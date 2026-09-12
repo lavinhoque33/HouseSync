@@ -1,0 +1,75 @@
+name: Foundation checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+      - name: Verify formatting, tests, package, and PostgreSQL integration
+        run: make backend-check
+      - name: Preserve test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          path: |
+            backend/target/surefire-reports/
+            backend/target/failsafe-reports/
+          if-no-files-found: ignore
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - name: Verify lint, types, formatting, behavior, and build
+        run: make web-check
+
+  containers:
+    needs: [backend, web]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose configuration
+        run: docker compose --env-file .env.example --profile app config --quiet
+      - name: Build and wait for the local stack
+        run: docker compose --env-file .env.example --profile app up --build -d --wait --wait-timeout 180
+      - name: Exercise web and its real backend proxy
+        run: |
+          curl --fail --silent --show-error http://127.0.0.1:8081/ --output /dev/null
+          curl --fail --silent --show-error http://127.0.0.1:8081/actuator/health | python3 -c 'import json,sys; assert json.load(sys.stdin) == {"status":"UP"}'
+          test "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8081/api/households)" = 403
+      - name: Show stack diagnostics on failure
+        if: failure()
+        run: |
+          docker compose --env-file .env.example --profile app ps -a
+          docker compose --env-file .env.example --profile app logs --no-color --tail 100
+      - name: Stop local stack
+        if: always()
+        run: docker compose --env-file .env.example --profile app down

@@ -1,0 +1,22 @@
+# Local secrets (examples are safe to track).
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+
+# Build/test outputs and downloaded dependencies.
+**/node_modules/
+**/dist/
+**/coverage/
+**/target/
+*.log
+
+# Local tools and editors.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
