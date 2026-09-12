@@ -55,6 +55,11 @@ if command -v docker >/dev/null 2>&1; then
   else
     fail 'Install/update Docker Compose v2 with profiles and --wait support'
   fi
+  if docker buildx version >/dev/null 2>&1; then
+    ok 'Docker Buildx available for application image builds'
+  else
+    fail 'Install the Docker Buildx plugin for make app-up image builds'
+  fi
 else
   fail 'Docker missing: install Docker Engine/Desktop and Compose v2 for PostgreSQL and integration tests'
 fi

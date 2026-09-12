@@ -61,9 +61,10 @@ jobs:
       - name: Build and wait for the local stack
         run: docker compose --env-file .env.example --profile app up --build -d --wait --wait-timeout 180
       - name: Exercise web and its real backend proxy
+        shell: bash
         run: |
           curl --fail --silent --show-error http://127.0.0.1:8081/ --output /dev/null
-          curl --fail --silent --show-error http://127.0.0.1:8081/actuator/health | python3 -c 'import json,sys; assert json.load(sys.stdin) == {"status":"UP"}'
+          curl --fail --silent --show-error http://127.0.0.1:8081/actuator/health | python3 -c 'import json,sys; body=json.load(sys.stdin); assert isinstance(body,dict) and body.get("status")=="UP", body; assert not {"components","details"}.intersection(body), body'
           test "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8081/api/households)" = 403
       - name: Show stack diagnostics on failure
         if: failure()
