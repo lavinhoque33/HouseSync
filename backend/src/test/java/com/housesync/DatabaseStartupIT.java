@@ -2,6 +2,7 @@ package com.housesync;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.housesync.identity.persistence.UserEntity;
 import jakarta.persistence.EntityManagerFactory;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -46,22 +47,29 @@ class DatabaseStartupIT {
   @LocalServerPort private int port;
 
   @Test
-  void applicationBootsWithPostgresAndFlywayOwnsTheEmptySchema() {
+  void applicationBootsWithPostgresAndFlywayOwnsIdentityAndSessionTables() {
     assertThat(jdbc.queryForObject("SELECT 1", Integer.class)).isEqualTo(1);
     assertThat(jdbc.queryForObject("SHOW server_version", String.class)).startsWith("17.");
     assertThat(entityManagerFactory.isOpen()).isTrue();
-    assertThat(entityManagerFactory.getMetamodel().getEntities()).isEmpty();
+    assertThat(entityManagerFactory.getMetamodel().getEntities())
+        .extracting(type -> type.getJavaType().getSimpleName())
+        .contains(UserEntity.class.getSimpleName());
     assertThat(
             jdbc.queryForList(
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public'", String.class))
-        .containsExactly("flyway_schema_history");
-    assertThat(flyway.info().all()).isEmpty();
+        .containsExactlyInAnyOrder(
+            "flyway_schema_history", "users", "spring_session", "spring_session_attributes");
+    assertThat(flyway.info().applied()).hasSize(3);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM users WHERE email = 'nobody@example.test'", Integer.class))
+        .isZero();
   }
 
   @Test
-  void runningServerExposesHealthyProbesAndDeniesApiAccess() throws Exception {
+  void runningServerExposesHealthyProbesAndDeniesUnknownApiAccess() throws Exception {
     try (HttpClient client =
         HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()) {
       for (String path :
@@ -74,7 +82,8 @@ class DatabaseStartupIT {
             .contains("\"status\":\"UP\"")
             .doesNotContain("components", "details");
       }
-      assertThat(get(client, "/api/unknown").statusCode()).isEqualTo(403);
+      // Unimplemented routes stay denied: 401 for anonymous callers.
+      assertThat(get(client, "/api/unknown").statusCode()).isEqualTo(401);
     }
   }
 

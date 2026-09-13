@@ -72,7 +72,7 @@ export function HealthStatus() {
             className={`status-dot status-dot--${health}`}
             aria-hidden="true"
           />
-          {messages[health].title}
+          <span className="health-label-text">{messages[health].title}</span>
         </p>
         <p className="health-detail">{messages[health].detail}</p>
       </div>

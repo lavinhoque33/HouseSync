@@ -65,7 +65,8 @@ jobs:
         run: |
           curl --fail --silent --show-error http://127.0.0.1:8081/ --output /dev/null
           curl --fail --silent --show-error http://127.0.0.1:8081/actuator/health | python3 -c 'import json,sys; body=json.load(sys.stdin); assert isinstance(body,dict) and body.get("status")=="UP", body; assert not {"components","details"}.intersection(body), body'
-          test "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8081/api/households)" = 403
+          test "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8081/api/auth/me)" = 401
+          test "$(curl --silent --show-error --request POST --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8081/api/auth/logout)" = 403
       - name: Show stack diagnostics on failure
         if: failure()
         run: |

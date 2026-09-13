@@ -38,7 +38,7 @@ db-down:
 	docker compose stop postgres
 
 backend-dev: .env
-	@$(LOAD_ENV) $(MVN) spring-boot:run
+	@$(LOAD_ENV) SERVER_ADDRESS="$${SERVER_ADDRESS:-127.0.0.1}" SESSION_COOKIE_SECURE="$${SESSION_COOKIE_SECURE:-false}" $(MVN) spring-boot:run
 
 web-dev: .env
 	@$(LOAD_ENV) API_PROXY_TARGET="$${API_PROXY_TARGET:-http://localhost:$${SERVER_PORT:-8080}}" npm --prefix web run dev

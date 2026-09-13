@@ -1,3 +1,4 @@
+import { AuthSection } from './auth/AuthSection';
 import { HealthStatus } from './HealthStatus';
 
 export function App() {
@@ -15,7 +16,7 @@ export function App() {
           </svg>
           HouseSync
         </span>
-        <span className="area-badge">Foundation</span>
+        <span className="area-badge">Identity</span>
       </header>
 
       <main id="main-content">
@@ -33,13 +34,14 @@ export function App() {
             <p className="eyebrow">Where we are</p>
             <h2 id="foundation-title">First, a solid foundation.</h2>
             <p>
-              The web shell is running. This build establishes the technical
-              starting point; accounts, households, and financial features are
-              still ahead.
+              The web shell is running. Accounts and sign-in are available;
+              households and financial features are still ahead.
             </p>
           </div>
           <HealthStatus />
         </section>
+
+        <AuthSection />
       </main>
 
       <footer className="site-footer">

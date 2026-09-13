@@ -17,9 +17,28 @@ spring:
     locations: classpath:db/migration
     validate-migration-naming: true
     clean-disabled: true
+  session:
+    timeout: 30m
+    jdbc:
+      initialize-schema: never
+      table-name: SPRING_SESSION
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
 
 server:
   port: ${SERVER_PORT:8080}
+  servlet:
+    session:
+      timeout: 30m
+
+app:
+  session-cookie-secure: ${SESSION_COOKIE_SECURE:true}
+  auth:
+    ip-max-attempts: 30
+    ip-window-seconds: 60
+    login-email-max-attempts: 10
+    login-email-window-seconds: 600
 
 management:
   endpoints:

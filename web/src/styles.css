@@ -66,10 +66,12 @@ p {
 .identity {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.65rem;
   font-size: 1.25rem;
   font-weight: 750;
   letter-spacing: -0.04em;
+  min-width: 0;
 }
 
 .brand-mark {
@@ -109,6 +111,7 @@ h1 {
   letter-spacing: -0.055em;
   font-weight: 600;
   text-wrap: balance;
+  overflow-wrap: break-word;
 }
 
 .intro-copy {
@@ -129,6 +132,7 @@ h1 {
 
 .foundation-copy {
   align-self: center;
+  min-width: 0;
 }
 
 h2 {
@@ -137,11 +141,13 @@ h2 {
   line-height: 1.2;
   letter-spacing: -0.035em;
   margin-bottom: var(--space-2);
+  overflow-wrap: break-word;
 }
 
 .foundation-copy > p:last-child {
   max-width: 490px;
   color: var(--color-muted);
+  overflow-wrap: break-word;
 }
 
 .health {
@@ -156,13 +162,24 @@ h3 {
   font-weight: 600;
   color: var(--color-muted);
   margin-bottom: var(--space-2);
+  overflow-wrap: break-word;
+}
+
+.health > * {
+  min-width: 0;
 }
 
 .health-label {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1);
   font-weight: 700;
+  overflow-wrap: break-word;
+}
+
+.health-label > span:last-child {
+  min-width: 0;
 }
 
 .status-dot {
@@ -184,6 +201,7 @@ h3 {
 .health-detail {
   font-size: 0.875rem;
   margin-top: var(--space-1);
+  overflow-wrap: break-word;
 }
 
 .health-note {
@@ -212,6 +230,187 @@ code {
   color: var(--color-ink);
 }
 
+.auth {
+  margin-top: var(--space-4);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.auth > * {
+  min-width: 0;
+}
+
+.auth-tabs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-1);
+}
+
+.auth-tab {
+  min-height: 44px;
+  min-width: 0;
+  overflow-wrap: break-word;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-muted);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 650;
+  cursor: pointer;
+  padding: 0.6rem 0.8rem;
+}
+
+.auth-tab--active {
+  background: var(--color-ink);
+  border-color: var(--color-ink);
+  color: #fffef9;
+}
+
+.auth-form {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.auth-form > * {
+  min-width: 0;
+}
+
+.auth-form-title {
+  font-size: 1.1rem;
+  color: var(--color-ink);
+  margin: 0;
+}
+
+.auth-form-title:focus,
+.auth-notice:focus {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 3px;
+  border-radius: 0.5rem;
+}
+
+.auth-field {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.auth-field > * {
+  min-width: 0;
+}
+
+.auth-field label {
+  font-weight: 650;
+  font-size: 0.9rem;
+  overflow-wrap: break-word;
+}
+
+.auth-field input {
+  min-height: 44px;
+  min-width: 0;
+  width: 100%;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  font: inherit;
+  color: var(--color-ink);
+  background: #fff;
+}
+
+.auth-field input[aria-invalid='true'] {
+  border-color: var(--color-warning);
+  border-width: 2px;
+}
+
+.auth-hint {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.auth-error {
+  font-size: 0.85rem;
+  color: #7a3d12;
+  font-weight: 600;
+}
+
+.auth-button {
+  min-height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: #fffef9;
+  font: inherit;
+  font-weight: 700;
+  padding: 0.7rem 1.2rem;
+  cursor: pointer;
+}
+
+.auth-button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.auth-notice {
+  padding: var(--space-2);
+  border-radius: 0.75rem;
+  border: 1px solid var(--color-line);
+  background: var(--color-soft);
+}
+
+.auth-notice--error {
+  border-color: #b06a28;
+  background: #faf0e2;
+}
+
+.auth-notice--warning {
+  border-color: #b06a28;
+  background: #faf0e2;
+}
+
+.auth-notice--info {
+  border-color: var(--color-accent);
+  background: #e9f1e8;
+}
+
+.auth-notice-detail {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  margin-top: 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+.auth-card {
+  padding: var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 1rem;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.auth-card--muted {
+  background: var(--color-soft);
+}
+
+.auth-email {
+  font-weight: 750;
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+
+.auth-meta {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
 @media (min-width: 760px) {
   .shell {
     padding: var(--space-4);
@@ -220,5 +419,9 @@ code {
     grid-template-columns: 1.3fr 1fr;
     padding: var(--space-4);
     gap: var(--space-5);
+  }
+  .auth {
+    padding: var(--space-4);
+    max-width: 640px;
   }
 }
