@@ -8,11 +8,14 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.housesync.household.application.HouseholdService;
+import com.housesync.household.invitation.application.InvitationService;
+import com.housesync.household.invitation.web.InvitationExceptions.InvitationServiceException;
 import com.housesync.household.web.HouseholdResponse;
 import com.housesync.identity.application.HouseSyncUserDetails;
 import com.housesync.identity.application.HouseSyncUserDetailsService;
@@ -54,6 +57,7 @@ class SecurityConfigurationTest {
   @MockitoBean private IdentityService identities;
   @MockitoBean private HouseSyncUserDetailsService userDetails;
   @MockitoBean private HouseholdService households;
+  @MockitoBean private InvitationService invitations;
 
   @ParameterizedTest
   @ValueSource(
@@ -79,6 +83,12 @@ class SecurityConfigurationTest {
     "POST, /api/households",
     "GET, /api/households",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/invitations",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/invitations",
+    "DELETE,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/invitations/123e4567-e89b-12d3-a456-426614174001",
+    "POST, /api/invitations/preview",
+    "POST, /api/invitations/accept",
     "POST, /actuator/health",
     "PUT, /actuator/health",
     "PATCH, /actuator/health",
@@ -112,6 +122,19 @@ class SecurityConfigurationTest {
     "POST, /api/households/123e4567-e89b-12d3-a456-426614174000",
     "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000",
     "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/invitations",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/invitations",
+    "POST,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/invitations/123e4567-e89b-12d3-a456-426614174001",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/invitations/123e4567-e89b-12d3-a456-426614174001",
+    "GET, /api/invitations",
+    "POST, /api/invitations",
+    "GET, /api/invitations/preview",
+    "PUT, /api/invitations/preview",
+    "DELETE, /api/invitations/preview",
+    "GET, /api/invitations/accept",
+    "PUT, /api/invitations/accept",
     "GET, /api/households/a/b",
   })
   void authenticatedRequestsToUnimplementedRoutesAreForbidden(String method, String path)
@@ -197,6 +220,34 @@ class SecurityConfigurationTest {
         .andExpect(status().isForbidden())
         .andExpect(jsonPath("$.code").value("CSRF_INVALID"))
         .andExpect(jsonPath("$.correlationId").exists());
+  }
+
+  @Test
+  void invitationServiceFailureIsSafeInternalError() throws Exception {
+    UUID actorId = UUID.randomUUID();
+    UUID householdId = UUID.randomUUID();
+    when(invitations.create(eq(householdId), eq(actorId)))
+        .thenThrow(new InvitationServiceException());
+    mvc.perform(
+            post("/api/households/" + householdId + "/invitations")
+                .with(signedInAs(actorId))
+                .with(csrf()))
+        .andExpect(status().isInternalServerError())
+        .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"))
+        .andExpect(jsonPath("$.correlationId").exists())
+        .andExpect(jsonPath("$.message").exists())
+        .andExpect(
+            header().string("Cache-Control", org.hamcrest.Matchers.containsString("no-store")))
+        .andExpect(
+            content()
+                .string(
+                    org.hamcrest.Matchers.allOf(
+                        org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("secret_hash")),
+                        org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("household_invitations")),
+                        org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("at com.housesync")))));
   }
 
   private static org.springframework.test.web.servlet.request.RequestPostProcessor signedInAs(

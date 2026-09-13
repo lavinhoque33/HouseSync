@@ -21,6 +21,7 @@ export type ApiErrorCode =
   | 'REGISTRATION_CONFLICT'
   | 'RATE_LIMITED'
   | 'HOUSEHOLD_NOT_FOUND'
+  | 'INVITATION_NOT_FOUND'
   | 'INTERNAL_ERROR'
   | 'NETWORK_ERROR'
   | 'UNKNOWN_ERROR';
@@ -71,6 +72,7 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'REGISTRATION_CONFLICT',
     'RATE_LIMITED',
     'HOUSEHOLD_NOT_FOUND',
+    'INVITATION_NOT_FOUND',
     'INTERNAL_ERROR',
   ];
   return codes.includes(value as ApiErrorCode)
@@ -89,7 +91,9 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
       (key === 'email' ||
         key === 'password' ||
         key === 'confirmPassword' ||
-        key === 'name') &&
+        key === 'name' ||
+        key === 'invitationId' ||
+        key === 'secret') &&
       typeof message === 'string'
     ) {
       result[key] = message;
@@ -636,5 +640,333 @@ export async function postHousehold(
     response,
     response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
     'Household creation could not be completed.',
+  );
+}
+
+export interface InvitationCapability {
+  id: string;
+  secret: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface ActiveInvitation {
+  id: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface InvitationPreview {
+  householdName: string;
+  role: 'MEMBER';
+  expiresAt: string;
+}
+
+export interface InvitationCredential {
+  invitationId: string;
+  secret: string;
+}
+
+const INVITATION_ID_PATTERN =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+const INVITATION_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * Decode a 43-character unpadded base64url invitation secret to its raw
+ * 32 bytes, rejecting non-canonical encodings (for example nonzero spare
+ * bits). Returns null when the secret is not exactly the canonical
+ * encoding of 32 random bytes.
+ */
+function decodeInvitationSecret(secret: string): Uint8Array | null {
+  if (!INVITATION_SECRET_PATTERN.test(secret)) return null;
+  let binary: string;
+  try {
+    const padded = `${secret.replace(/-/g, '+').replace(/_/g, '/')}=`;
+    binary = atob(padded);
+  } catch {
+    return null;
+  }
+  if (binary.length !== 32) return null;
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  let encoded: string;
+  try {
+    encoded = btoa(String.fromCharCode(...bytes))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+  } catch {
+    return null;
+  }
+  return encoded === secret ? bytes : null;
+}
+
+function parseInvitationCapability(
+  value: unknown,
+): InvitationCapability | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== 'string' ||
+    !INVITATION_ID_PATTERN.test(record.id) ||
+    typeof record.secret !== 'string' ||
+    decodeInvitationSecret(record.secret) === null ||
+    typeof record.createdAt !== 'string' ||
+    typeof record.expiresAt !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    id: record.id,
+    secret: record.secret,
+    createdAt: record.createdAt,
+    expiresAt: record.expiresAt,
+  };
+}
+
+function parseActiveInvitation(value: unknown): ActiveInvitation | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== 'string' ||
+    record.id.length === 0 ||
+    typeof record.createdAt !== 'string' ||
+    typeof record.expiresAt !== 'string'
+  ) {
+    return undefined;
+  }
+  // The active list never carries secret material; the parser only reads the
+  // documented fields and ignores any unexpected extras.
+  return {
+    id: record.id,
+    createdAt: record.createdAt,
+    expiresAt: record.expiresAt,
+  };
+}
+
+function parseInvitationPreview(value: unknown): InvitationPreview | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.householdName !== 'string' ||
+    record.householdName.length === 0 ||
+    record.role !== 'MEMBER' ||
+    typeof record.expiresAt !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    householdName: record.householdName,
+    role: 'MEMBER',
+    expiresAt: record.expiresAt,
+  };
+}
+
+function unexpectedInvitationResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message: 'The server returned an unexpected response.',
+  });
+}
+
+function invitationPath(householdId: string): string {
+  return `/api/households/${encodeURIComponent(householdId)}/invitations`;
+}
+
+export async function postInvitation(
+  householdId: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<InvitationCapability> {
+  const response = await apiFetch(
+    invitationPath(householdId),
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 201) {
+    const body = await readJson<unknown>(response);
+    const parsed = parseInvitationCapability(body);
+    if (!parsed) throw unexpectedInvitationResponse(response.status);
+    return parsed;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Invitation creation could not be completed.',
+  );
+}
+
+export async function fetchInvitations(
+  householdId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<ActiveInvitation[]> {
+  const response = await apiFetch(
+    invitationPath(householdId),
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      'UNKNOWN_ERROR',
+      'Could not load invitations. Retry.',
+    );
+  }
+  const body = await readJson<{ invitations?: unknown }>(response);
+  if (!Array.isArray(body.invitations)) {
+    throw unexpectedInvitationResponse(response.status);
+  }
+  const invitations: ActiveInvitation[] = [];
+  for (const entry of body.invitations) {
+    const parsed = parseActiveInvitation(entry);
+    if (!parsed) throw unexpectedInvitationResponse(response.status);
+    invitations.push(parsed);
+  }
+  return invitations;
+}
+
+export async function deleteInvitation(
+  householdId: string,
+  invitationId: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<void> {
+  const response = await apiFetch(
+    `${invitationPath(householdId)}/${encodeURIComponent(invitationId)}`,
+    {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  // A repeated revoke of an already-revoked invitation is a successful
+  // no-op by contract; 204 is bodyless and carries no secret material.
+  if (response.status === 204) return;
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Invitation revocation could not be completed.',
+  );
+}
+
+export async function postInvitationPreview(
+  credential: InvitationCredential,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<InvitationPreview> {
+  const response = await apiFetch(
+    '/api/invitations/preview',
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify({
+        invitationId: credential.invitationId,
+        secret: credential.secret,
+      }),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.ok) {
+    const body = await readJson<unknown>(response);
+    const parsed = parseInvitationPreview(body);
+    if (!parsed) throw unexpectedInvitationResponse(response.status);
+    return parsed;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Invitation preview could not be loaded.',
+  );
+}
+
+export async function postInvitationAccept(
+  credential: InvitationCredential,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<Household> {
+  const response = await apiFetch(
+    '/api/invitations/accept',
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify({
+        invitationId: credential.invitationId,
+        secret: credential.secret,
+      }),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.ok) {
+    const body = await readJson<unknown>(response);
+    const parsed = parseHousehold(body);
+    if (!parsed) throw unexpectedInvitationResponse(response.status);
+    return parsed;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Joining the household could not be completed.',
   );
 }

@@ -15,9 +15,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Proves the V3 to V4 upgrade path: migrate identity/session-only history, seed a user and a
- * session row the way a live deployment holds them, then apply V4 and confirm household tables and
- * constraints with identity/session data intact.
+ * Proves the V3 to V5 upgrade path: migrate identity/session-only history, seed a user, a
+ * household, a membership, and a session row the way a live deployment holds them, then apply V4
+ * and V5 step by step and confirm household and invitation tables and constraints with
+ * identity/session/household data intact.
  */
 @Testcontainers
 class HouseholdSchemaUpgradeIT {
@@ -30,7 +31,7 @@ class HouseholdSchemaUpgradeIT {
           .withPassword("integration-test-only");
 
   @Test
-  void v3DatabaseUpgradesToV4WithIdentityAndSessionDataPreserved() throws Exception {
+  void v3DatabaseUpgradesToV5WithIdentitySessionAndHouseholdDataPreserved() throws Exception {
     Properties credentials = new Properties();
     credentials.setProperty("user", POSTGRES.getUsername());
     credentials.setProperty("password", POSTGRES.getPassword());
@@ -73,6 +74,33 @@ class HouseholdSchemaUpgradeIT {
       assertThat(session.executeUpdate()).isEqualTo(1);
     }
 
+    Flyway v4 =
+        Flyway.configure()
+            .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+            .locations("classpath:db/migration")
+            .target("4")
+            .load();
+    assertThat(v4.migrate().migrationsExecuted).isEqualTo(1);
+    v4.validate();
+    assertThat(v4.info().applied()).hasSize(4);
+
+    UUID householdId = UUID.randomUUID();
+    try (Connection connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), credentials);
+        PreparedStatement household =
+            connection.prepareStatement(
+                "INSERT INTO households (id, name, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)");
+        PreparedStatement membership =
+            connection.prepareStatement(
+                "INSERT INTO household_members (household_id, user_id, role)"
+                    + " VALUES (?, ?, 'OWNER')")) {
+      household.setObject(1, householdId);
+      household.setString(2, "Elm Street home");
+      assertThat(household.executeUpdate()).isEqualTo(1);
+      membership.setObject(1, householdId);
+      membership.setObject(2, userId);
+      assertThat(membership.executeUpdate()).isEqualTo(1);
+    }
+
     Flyway current =
         Flyway.configure()
             .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
@@ -80,7 +108,7 @@ class HouseholdSchemaUpgradeIT {
             .load();
     assertThat(current.migrate().migrationsExecuted).isEqualTo(1);
     current.validate();
-    assertThat(current.info().applied()).hasSize(4);
+    assertThat(current.info().applied()).hasSize(5);
 
     try (Connection connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), credentials)) {
       try (PreparedStatement user =
@@ -104,7 +132,8 @@ class HouseholdSchemaUpgradeIT {
           connection
               .getMetaData()
               .getTables(null, "public", "household%", new String[] {"TABLE"})) {
-        assertThat(tableNames(tables)).containsExactlyInAnyOrder("households", "household_members");
+        assertThat(tableNames(tables))
+            .containsExactlyInAnyOrder("households", "household_members", "household_invitations");
       }
       assertThat(constraintExists(connection, "households_name_length")).isTrue();
       assertThat(constraintExists(connection, "households_name_trimmed")).isTrue();
@@ -112,6 +141,10 @@ class HouseholdSchemaUpgradeIT {
       assertThat(constraintExists(connection, "households_name_no_controls")).isTrue();
       assertThat(constraintExists(connection, "household_members_pk")).isTrue();
       assertThat(constraintExists(connection, "household_members_role_check")).isTrue();
+      assertThat(constraintExists(connection, "household_invitations_secret_hash_length")).isTrue();
+      assertThat(constraintExists(connection, "household_invitations_expiry_check")).isTrue();
+      assertThat(constraintExists(connection, "household_invitations_acceptance_paired")).isTrue();
+      assertThat(constraintExists(connection, "household_invitations_terminal_exclusive")).isTrue();
       try (PreparedStatement index =
           connection.prepareStatement(
               "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public'"
@@ -120,6 +153,35 @@ class HouseholdSchemaUpgradeIT {
         try (ResultSet rows = index.executeQuery()) {
           assertThat(rows.next()).isTrue();
           assertThat(rows.getInt(1)).isEqualTo(1);
+        }
+      }
+      try (PreparedStatement index =
+          connection.prepareStatement(
+              "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public'"
+                  + " AND tablename = 'household_invitations'"
+                  + " AND indexname = 'household_invitations_active_list_idx'")) {
+        try (ResultSet rows = index.executeQuery()) {
+          assertThat(rows.next()).isTrue();
+          assertThat(rows.getInt(1)).isEqualTo(1);
+        }
+      }
+      // V4-seeded household data survives the V5 upgrade.
+      try (PreparedStatement household =
+          connection.prepareStatement("SELECT name FROM households WHERE id = ?")) {
+        household.setObject(1, householdId);
+        try (ResultSet rows = household.executeQuery()) {
+          assertThat(rows.next()).isTrue();
+          assertThat(rows.getString(1)).isEqualTo("Elm Street home");
+        }
+      }
+      try (PreparedStatement membership =
+          connection.prepareStatement(
+              "SELECT role FROM household_members WHERE household_id = ? AND user_id = ?")) {
+        membership.setObject(1, householdId);
+        membership.setObject(2, userId);
+        try (ResultSet rows = membership.executeQuery()) {
+          assertThat(rows.next()).isTrue();
+          assertThat(rows.getString(1)).isEqualTo("OWNER");
         }
       }
     }

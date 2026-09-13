@@ -18,6 +18,8 @@ import {
   validateNewPassword,
 } from './validation';
 import { HouseholdSection } from '../household/HouseholdSection';
+import { JoinSection } from '../invitation/JoinSection';
+import type { PendingInvite } from '../invitation/route';
 
 type Phase = 'booting' | 'ready' | 'failed';
 type Mode = 'login' | 'register';
@@ -82,7 +84,27 @@ function timeoutNotice(kind: ForegroundKind): string {
   return 'Sign-out timed out. Its outcome is unknown — you are still shown as signed in. Retry to confirm.';
 }
 
-export function AuthSection() {
+export interface AuthSectionProps {
+  /**
+   * Capability extracted from the `/join/{id}#invite={secret}` route. Owned
+   * by the application root above this section so registration, sign-in,
+   * and user-keyed household branches never drop it mid-flow. It lives in
+   * memory only and is never written to web storage.
+   */
+  invite?: PendingInvite | null | undefined;
+  joinActive?: boolean | undefined;
+  joinInvalid?: boolean | undefined;
+  onInviteCleared?: (() => void) | undefined;
+  onLeaveJoin?: (() => void) | undefined;
+}
+
+export function AuthSection({
+  invite = null,
+  joinActive = false,
+  joinInvalid = false,
+  onInviteCleared = () => {},
+  onLeaveJoin = () => {},
+}: AuthSectionProps = {}) {
   const [phase, setPhase] = useState<Phase>('booting');
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [csrf, setCsrf] = useState<CsrfToken | null>(null);
@@ -101,6 +123,14 @@ export function AuthSection() {
     null,
   );
   const [loggingOut, setLoggingOut] = useState(false);
+  const [invitationRequestsReady, setInvitationRequestsReady] = useState(true);
+  // Bumped when the join flow accepts an invitation so the household
+  // collection below reloads and shows the newly joined household.
+  // `householdsSettled` records the latest requested reload that settled;
+  // the join flow unlocks its explicit accept retry only after the version
+  // it requested settles, enforcing reconciliation-before-retry order.
+  const [householdsVersion, setHouseholdsVersion] = useState(0);
+  const [householdsSettled, setHouseholdsSettled] = useState(0);
 
   // Foreground/background ownership. Foreground auth operations own a token;
   // background session checks own a separate sequence and must never
@@ -429,17 +459,19 @@ export function AuthSection() {
       };
       const me = await postLogin(credentials, requestCsrf, controller.signal);
       if (unmountedRef.current || !isActiveOp(token)) return;
-      // The login itself completed: record it before refreshing CSRF so a
-      // post-action bootstrap failure cannot pretend the sign-in failed.
+      setInvitationRequestsReady(false);
       applyUser(me);
       setLoginPassword('');
       setRegPassword('');
       setRegConfirm('');
       setNotice({ kind: 'info', text: `Signed in as ${me.email}.` });
+      // The login itself is visible immediately, but invitation preview waits
+      // for this refresh so it cannot submit the pre-authentication CSRF token.
       try {
         const fresh = await fetchCsrf(controller.signal);
         if (unmountedRef.current || !isActiveOp(token)) return;
         setCsrf(fresh);
+        setInvitationRequestsReady(true);
       } catch (refreshError) {
         if (unmountedRef.current || !isActiveOp(token)) return;
         if (
@@ -448,6 +480,8 @@ export function AuthSection() {
         ) {
           return;
         }
+        setCsrf(null);
+        setInvitationRequestsReady(true);
         setNotice({
           kind: 'warning',
           text: `Signed in as ${me.email}, but the security token could not be refreshed. Reload before your next change.`,
@@ -617,6 +651,11 @@ export function AuthSection() {
       setLoginPassword('');
       setRegPassword('');
       setRegConfirm('');
+      // Explicit logout discards the in-memory invitation secret and leaves
+      // the join route, so a signed-out tab never retains a capability.
+      if (joinActive) {
+        onLeaveJoin();
+      }
       setNotice({ kind: 'info', text: 'Signed out.' });
       try {
         const fresh = await fetchCsrf(controller.signal);
@@ -736,7 +775,57 @@ export function AuthSection() {
         <button type="button" className="auth-button" onClick={retryBootstrap}>
           Retry
         </button>
+        {joinActive && (
+          <div className="join-notice">
+            <h3>Household invitation</h3>
+            {joinInvalid || !invite ? (
+              <p>
+                This invitation link is invalid or no longer available. Ask the
+                household owner for a new link.
+              </p>
+            ) : (
+              <p>
+                You opened a household invitation link, but your session state
+                could not be confirmed, so no invitation details were loaded.
+                Retry above, or dismiss the invitation to continue without it.
+              </p>
+            )}
+            <button
+              type="button"
+              className="household-button household-button--secondary"
+              onClick={onLeaveJoin}
+            >
+              Dismiss invitation
+            </button>
+          </div>
+        )}
       </section>
+    );
+  }
+
+  function joinFlow() {
+    if (!joinActive) return null;
+    return (
+      <JoinSection
+        invite={invite}
+        joinActive={joinActive}
+        joinInvalid={joinInvalid}
+        csrf={csrf}
+        user={user}
+        onCsrfRefreshed={setCsrf}
+        onSessionExpired={handleHouseholdSessionExpired}
+        onInviteCleared={onInviteCleared}
+        onLeaveJoin={onLeaveJoin}
+        onHouseholdsChanged={() =>
+          setHouseholdsVersion((version) => version + 1)
+        }
+        reconcileVersion={householdsVersion}
+        reconcileSettled={householdsSettled}
+        authenticatedRequestsReady={invitationRequestsReady}
+        onRequestReconcile={() =>
+          setHouseholdsVersion((version) => version + 1)
+        }
+      />
     );
   }
 
@@ -744,6 +833,7 @@ export function AuthSection() {
     return (
       <section className="auth" aria-labelledby="auth-title">
         <h2 id="auth-title">Account</h2>
+        {joinFlow()}
         {notice && (
           <div
             ref={noticeRef}
@@ -779,6 +869,8 @@ export function AuthSection() {
             csrf={csrf}
             onCsrfRefreshed={setCsrf}
             onSessionExpired={handleHouseholdSessionExpired}
+            refreshSignal={householdsVersion}
+            onRefreshSettled={setHouseholdsSettled}
           />
         </div>
       </section>
@@ -790,6 +882,7 @@ export function AuthSection() {
   return (
     <section className="auth" aria-labelledby="auth-title">
       <h2 id="auth-title">Account</h2>
+      {joinFlow()}
       <div
         className="auth-tabs"
         role="group"

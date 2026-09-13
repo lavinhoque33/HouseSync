@@ -358,6 +358,8 @@ code {
   border-radius: 0.75rem;
   border: 1px solid var(--color-line);
   background: var(--color-soft);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .auth-notice--error {
@@ -602,6 +604,172 @@ code {
   outline-offset: 2px;
 }
 
+.invite,
+.join {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-line);
+}
+
+.invite > *,
+.join > * {
+  min-width: 0;
+}
+
+.invite-title {
+  font-size: 1rem;
+  color: var(--color-ink);
+  margin: 0;
+}
+
+.invite-count {
+  color: var(--color-muted);
+  overflow-wrap: break-word;
+}
+
+.invite-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.invite-card {
+  padding: var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 1rem;
+  background: var(--color-soft);
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.invite-meta,
+.join-meta {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  overflow-wrap: break-word;
+}
+
+.invite-notice,
+.join-notice {
+  padding: var(--space-2);
+  border-radius: 0.75rem;
+  border: 1px solid var(--color-line);
+  background: var(--color-soft);
+  display: grid;
+  gap: 0.5rem;
+}
+
+.invite-notice > *,
+.join-notice > * {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.invite-notice:focus,
+.join-notice:focus {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 3px;
+  border-radius: 0.5rem;
+}
+
+.invite-notice--error,
+.join-notice--error {
+  border-color: #b06a28;
+  background: #faf0e2;
+}
+
+.invite-notice--warning,
+.join-notice--warning {
+  border-color: #b06a28;
+  background: #faf0e2;
+}
+
+.invite-notice--info,
+.join-notice--info {
+  border-color: var(--color-accent);
+  background: #e9f1e8;
+}
+
+.invite-notice-detail,
+.join-notice-detail {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  margin-top: 0.4rem;
+  overflow-wrap: anywhere;
+}
+
+.invite-warning {
+  font-weight: 600;
+  overflow-wrap: break-word;
+}
+
+.invite-notice label,
+.join-notice label {
+  font-weight: 650;
+  font-size: 0.9rem;
+  overflow-wrap: break-word;
+}
+
+.invite-link-field {
+  min-height: 44px;
+  min-width: 0;
+  width: 100%;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--color-ink);
+  background: #fff;
+  overflow-wrap: anywhere;
+}
+
+.invite-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.invite-actions > * {
+  flex: 1 1 12rem;
+}
+
+.invite-copied {
+  font-size: 0.85rem;
+  color: var(--color-accent);
+  font-weight: 600;
+  overflow-wrap: break-word;
+}
+
+.invite-error {
+  font-size: 0.85rem;
+  color: #7a3d12;
+  font-weight: 600;
+  overflow-wrap: break-word;
+}
+
+.join-card {
+  padding: var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 1rem;
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.join-name {
+  font-weight: 750;
+  font-size: 1.25rem;
+  overflow-wrap: break-word;
+  min-width: 0;
+}
+
 @media (max-width: 420px) {
   .shell,
   .foundation,
@@ -609,7 +777,11 @@ code {
   .auth,
   .auth-card,
   .household-card,
-  .household-notice {
+  .household-notice,
+  .invite-card,
+  .invite-notice,
+  .join-notice,
+  .join-card {
     padding-inline: 16px;
   }
 }

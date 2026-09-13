@@ -146,6 +146,68 @@ describe('auth bootstrap', () => {
       await screen.findByRole('heading', { name: 'Sign in' }),
     ).toBeInTheDocument();
   });
+
+  it('shows invitation context and dismissal on a join route without preview calls', async () => {
+    const calls: Array<{ url: string; init?: RequestInit | undefined }> = [];
+    const mock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        calls.push({ url, init });
+        if (url === '/api/auth/csrf') return csrfOk();
+        return jsonResponse({ code: 'INTERNAL_ERROR', message: 'Oops.' }, 500);
+      },
+    );
+    vi.stubGlobal('fetch', mock);
+    const onLeaveJoin = vi.fn();
+    render(
+      <AuthSection
+        invite={{
+          invitationId: '22222222-3333-4444-8555-666666666666',
+          secret: 'hGgem9rtrw2Z_PHXg76mXTNiof78wQArhcJVnsxQK6A',
+        }}
+        joinActive
+        joinInvalid={false}
+        onInviteCleared={() => {}}
+        onLeaveJoin={onLeaveJoin}
+      />,
+    );
+    expect(
+      await screen.findByRole('button', { name: 'Retry' }),
+    ).toBeInTheDocument();
+    // Invitation context is shown, but no details were loaded and no
+    // preview request ever left the browser.
+    expect(screen.getByText('Household invitation')).toBeInTheDocument();
+    expect(
+      screen.getByText(/no invitation details were loaded/i),
+    ).toBeInTheDocument();
+    expect(
+      calls.filter(({ url }) => url.startsWith('/api/invitations/')),
+    ).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss invitation' }));
+    expect(onLeaveJoin).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the terminal link state on bootstrap failure for a malformed link', async () => {
+    stubFetch({
+      csrf: csrfOk,
+      me: () => jsonResponse({ code: 'INTERNAL_ERROR', message: 'Oops.' }, 500),
+    });
+    render(
+      <AuthSection
+        invite={null}
+        joinActive
+        joinInvalid
+        onInviteCleared={() => {}}
+        onLeaveJoin={() => {}}
+      />,
+    );
+    expect(
+      await screen.findByRole('button', { name: 'Retry' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/invalid or no longer available/i),
+    ).toBeInTheDocument();
+  });
 });
 
 describe('registration', () => {

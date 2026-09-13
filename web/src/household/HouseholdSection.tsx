@@ -8,6 +8,7 @@ import {
   type Household,
 } from '../auth/client';
 import { validateHouseholdName } from '../auth/validation';
+import { InvitationSection } from '../invitation/InvitationSection';
 
 interface HouseholdNotice {
   kind: 'info' | 'error' | 'warning';
@@ -20,6 +21,17 @@ interface HouseholdSectionProps {
   csrf: CsrfToken | null;
   onCsrfRefreshed: (token: CsrfToken) => void;
   onSessionExpired: () => void;
+  /**
+   * Bumped by the parent after an invitation acceptance so the authorized
+   * collection reloads and shows the newly joined household.
+   */
+  refreshSignal?: number | undefined;
+  /**
+   * Reports the served signal value once the reload it triggered settles,
+   * so a requester (the join flow) can order an explicit retry after
+   * reconciliation. Manual and initial loads never report.
+   */
+  onRefreshSettled?: ((signal: number) => void) | undefined;
 }
 
 function formatCreatedAt(value: string): string {
@@ -56,6 +68,8 @@ export function HouseholdSection({
   csrf,
   onCsrfRefreshed,
   onSessionExpired,
+  refreshSignal = 0,
+  onRefreshSettled,
 }: HouseholdSectionProps) {
   const [households, setHouseholds] = useState<Household[] | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -75,10 +89,19 @@ export function HouseholdSection({
   const listNoticeRef = useRef<HTMLDivElement>(null);
   const createNoticeRef = useRef<HTMLDivElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const lastSignalRef = useRef(refreshSignal);
+  const queuedSignalRef = useRef<number | null>(null);
+  const busyRef = useRef(false);
+  const onRefreshSettledRef = useRef(onRefreshSettled);
 
   useEffect(() => {
     csrfRef.current = csrf;
   }, [csrf]);
+
+  useEffect(() => {
+    busyRef.current = loading || creating;
+    onRefreshSettledRef.current = onRefreshSettled;
+  });
 
   function track(controller: AbortController) {
     ownedRef.current.add(controller);
@@ -147,11 +170,7 @@ export function HouseholdSection({
     }
   }
 
-  useEffect(() => {
-    // StrictMode replays setup→cleanup→setup in development: the cleanup
-    // aborts the first controller and the generation guard ignores its late
-    // continuations, so only the second load can publish state.
-    unmountedRef.current = false;
+  function startLoad(servedSignal: number | null): void {
     const generation = ++genRef.current;
     const controller = new AbortController();
     track(controller);
@@ -160,16 +179,61 @@ export function HouseholdSection({
         await load(controller.signal, generation);
       } finally {
         untrack(controller);
+        if (isCurrent(generation)) {
+          if (servedSignal !== null) {
+            // The serving reload settled: report first so a waiter can
+            // proceed, then drain any signal that arrived while busy.
+            onRefreshSettledRef.current?.(servedSignal);
+          }
+          drainQueuedSignal();
+        }
       }
     })();
+  }
+
+  function drainQueuedSignal(): void {
+    if (unmountedRef.current) {
+      queuedSignalRef.current = null;
+      return;
+    }
+    const queued = queuedSignalRef.current;
+    if (queued === null || queued === lastSignalRef.current) {
+      queuedSignalRef.current = null;
+      return;
+    }
+    queuedSignalRef.current = null;
+    lastSignalRef.current = queued;
+    startLoad(queued);
+  }
+
+  useEffect(() => {
+    // StrictMode replays setup→cleanup→setup in development: the cleanup
+    // aborts the first controller and the generation guard ignores its late
+    // continuations, so only the second load can publish state.
+    unmountedRef.current = false;
+    startLoad(null);
     const owned = ownedRef.current;
     return () => {
       unmountedRef.current = true;
-      controller.abort();
       for (const tracked of owned) tracked.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Invitation acceptance elsewhere (the join flow) bumps refreshSignal so
+  // the newly joined household appears without a manual refresh. A signal
+  // arriving while a load or creation is busy is queued — never consumed
+  // silently — and a second fetch runs after the busy work settles.
+  useEffect(() => {
+    if (lastSignalRef.current === refreshSignal) return;
+    if (busyRef.current) {
+      queuedSignalRef.current = refreshSignal;
+      return;
+    }
+    lastSignalRef.current = refreshSignal;
+    startLoad(refreshSignal);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshSignal]);
 
   useEffect(() => {
     if (listError && listNoticeRef.current) {
@@ -185,16 +249,7 @@ export function HouseholdSection({
 
   function handleRefresh() {
     if (loading || creating) return;
-    const generation = ++genRef.current;
-    const controller = new AbortController();
-    track(controller);
-    void (async () => {
-      try {
-        await load(controller.signal, generation);
-      } finally {
-        untrack(controller);
-      }
-    })();
+    startLoad(null);
   }
 
   async function ensureCsrf(
@@ -331,6 +386,7 @@ export function HouseholdSection({
       untrack(controller);
       if (isCurrent(generation)) {
         setCreating(false);
+        drainQueuedSignal();
       }
     }
   }
@@ -413,6 +469,15 @@ export function HouseholdSection({
                   {formatCreatedAt(household.createdAt)}
                 </time>
               </p>
+              {household.role === 'OWNER' && (
+                <InvitationSection
+                  household={household}
+                  csrf={csrf}
+                  onCsrfRefreshed={onCsrfRefreshed}
+                  onSessionExpired={onSessionExpired}
+                  onHouseholdAccessChanged={handleRefresh}
+                />
+              )}
             </li>
           ))}
         </ul>

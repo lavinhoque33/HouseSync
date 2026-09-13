@@ -68,8 +68,9 @@ class DatabaseStartupIT {
             "spring_session",
             "spring_session_attributes",
             "households",
-            "household_members");
-    assertThat(flyway.info().applied()).hasSize(4);
+            "household_members",
+            "household_invitations");
+    assertThat(flyway.info().applied()).hasSize(5);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
     assertThat(

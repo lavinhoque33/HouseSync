@@ -1,7 +1,64 @@
+import { useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import { AuthSection } from './auth/AuthSection';
 import { HealthStatus } from './HealthStatus';
+import {
+  clearJoinFragment,
+  readJoinRoute,
+  type JoinRouteState,
+} from './invitation/route';
 
 export function App() {
+  // The invitation capability lives here, above the anonymous/authenticated
+  // branches and the user-keyed household components, so registration and
+  // sign-in within this tab never drop it. It is memory only: never web
+  // storage, query, path, log, title, or analytics.
+  const [joinState, setJoinState] = useState<JoinRouteState>(() =>
+    readJoinRoute(),
+  );
+
+  // Strip the fragment immediately after extraction so the secret does not
+  // linger in the visible URL or history entries.
+  useLayoutEffect(() => {
+    if (joinState.invite) {
+      clearJoinFragment(joinState.invite.invitationId);
+    } else if (window.location.hash.startsWith('#invite=')) {
+      window.history.replaceState(
+        null,
+        '',
+        window.location.pathname + window.location.search,
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const next = readJoinRoute();
+      // A history entry can carry a fragment (back/forward to the original
+      // link): capture the capability and strip it immediately, just like
+      // the initial load.
+      if (next.invite) {
+        clearJoinFragment(next.invite.invitationId);
+      }
+      setJoinState(next);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+    };
+  }, []);
+
+  const handleInviteCleared = useCallback(() => {
+    setJoinState((current) => ({ ...current, invite: null }));
+  }, []);
+
+  const handleLeaveJoin = useCallback(() => {
+    // Leaving the flow discards the in-memory secret; recovery is to
+    // reopen the original link.
+    window.history.pushState(null, '', '/');
+    setJoinState({ joinActive: false, joinInvalid: false, invite: null });
+  }, []);
+
   return (
     <div className="shell">
       <header className="site-header">
@@ -34,15 +91,21 @@ export function App() {
             <p className="eyebrow">Where we are</p>
             <h2 id="foundation-title">First, a solid foundation.</h2>
             <p>
-              The web shell is running. Accounts, sign-in, and household
-              creation are available; invitations and financial features are
+              The web shell is running. Accounts, sign-in, household creation,
+              and household invitations are available; financial features are
               still ahead.
             </p>
           </div>
           <HealthStatus />
         </section>
 
-        <AuthSection />
+        <AuthSection
+          invite={joinState.invite}
+          joinActive={joinState.joinActive}
+          joinInvalid={joinState.joinInvalid}
+          onInviteCleared={handleInviteCleared}
+          onLeaveJoin={handleLeaveJoin}
+        />
       </main>
 
       <footer className="site-footer">

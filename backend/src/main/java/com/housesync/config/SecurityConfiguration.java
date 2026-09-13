@@ -19,9 +19,12 @@ import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler
  * login accept anonymous JSON posts guarded by CSRF; {@code /me} needs an authenticated session;
  * logout runs the standard handlers for authenticated and anonymous callers alike. The household
  * routes permit exactly {@code POST /api/households}, {@code GET /api/households}, and {@code GET
- * /api/households/{householdId}} for authenticated users. Every other route stays denied (401
- * anonymous / 403 authenticated). No CORS allowances, no form/basic login, no remember-me: browsers
- * use the same-origin session cookie plus CSRF header.
+ * /api/households/{householdId}} for authenticated users. The invitation routes permit exactly
+ * {@code POST} and {@code GET /api/households/{householdId}/invitations}, {@code DELETE
+ * /api/households/{householdId}/invitations/{invitationId}}, and {@code POST
+ * /api/invitations/preview} plus {@code POST /api/invitations/accept} for authenticated users.
+ * Every other route stays denied (401 anonymous / 403 authenticated). No CORS allowances, no
+ * form/basic login, no remember-me: browsers use the same-origin session cookie plus CSRF header.
  */
 @Configuration(proxyBeanMethods = false)
 public class SecurityConfiguration {
@@ -57,6 +60,16 @@ public class SecurityConfiguration {
                     .requestMatchers(HttpMethod.POST, "/api/households")
                     .authenticated()
                     .requestMatchers(HttpMethod.GET, "/api/households", "/api/households/*")
+                    .authenticated()
+                    .requestMatchers(
+                        HttpMethod.POST,
+                        "/api/households/*/invitations",
+                        "/api/invitations/preview",
+                        "/api/invitations/accept")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.GET, "/api/households/*/invitations")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.DELETE, "/api/households/*/invitations/*")
                     .authenticated()
                     .anyRequest()
                     .denyAll())

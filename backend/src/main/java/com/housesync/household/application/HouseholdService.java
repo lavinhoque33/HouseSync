@@ -77,7 +77,8 @@ public class HouseholdService {
         .orElseThrow(HouseholdNotFoundException::new);
   }
 
-  private static HouseholdResponse toResponse(HouseholdMembershipView view) {
+  /** Membership-scoped view to the authorized household DTO. Shared with invitations. */
+  public static HouseholdResponse toResponse(HouseholdMembershipView view) {
     return new HouseholdResponse(
         view.householdId(), view.name(), view.role().name(), view.createdAt());
   }

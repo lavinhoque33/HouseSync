@@ -8,6 +8,7 @@ import {
 import { StrictMode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { AuthSection } from '../auth/AuthSection';
+import { HouseholdSection } from './HouseholdSection';
 import { validateHouseholdName } from '../auth/validation';
 
 const CSRF = { token: 'csrf-token-1', headerName: 'X-CSRF-TOKEN' };
@@ -62,6 +63,12 @@ interface RouteHandlers {
   logout?: () => Response | Promise<Response>;
   householdsGet?: () => Response | Promise<Response>;
   householdsPost?: (body?: unknown) => Response | Promise<Response>;
+  invitationsGet?: (householdId?: string) => Response | Promise<Response>;
+  invitationsPost?: (householdId?: string) => Response | Promise<Response>;
+  invitationsDelete?: (
+    householdId?: string,
+    invitationId?: string,
+  ) => Response | Promise<Response>;
 }
 
 function stubFetch(routes: RouteHandlers) {
@@ -92,6 +99,33 @@ function stubFetch(routes: RouteHandlers) {
           throw new Error('unexpected POST /api/households');
         }
         return routes.householdsPost(body);
+      }
+      const invitationMatch =
+        /^\/api\/households\/([^/]+)\/invitations(?:\/([^/]+))?$/.exec(url);
+      if (invitationMatch) {
+        const householdId = decodeURIComponent(invitationMatch[1] ?? '');
+        const invitationId =
+          invitationMatch[2] === undefined
+            ? undefined
+            : decodeURIComponent(invitationMatch[2] ?? '');
+        if ((init?.method ?? 'GET') === 'GET' && invitationId === undefined) {
+          return (
+            routes.invitationsGet?.(householdId) ??
+            jsonResponse({ invitations: [] })
+          );
+        }
+        if (init?.method === 'POST' && invitationId === undefined) {
+          if (!routes.invitationsPost) {
+            throw new Error('unexpected POST invitation');
+          }
+          return routes.invitationsPost(householdId);
+        }
+        if (init?.method === 'DELETE' && invitationId !== undefined) {
+          if (!routes.invitationsDelete) {
+            throw new Error('unexpected DELETE invitation');
+          }
+          return routes.invitationsDelete(householdId, invitationId);
+        }
       }
       throw new Error(`unexpected fetch ${url} ${init?.method ?? ''}`);
     },
@@ -806,5 +840,201 @@ describe('household ordering', () => {
     expect(items).toHaveLength(2);
     expect(items[0]).toHaveTextContent('Earlier id');
     expect(items[1]).toHaveTextContent('Later id');
+  });
+});
+
+describe('refresh signal queuing', () => {
+  function renderSection(
+    routes: {
+      get: () => Promise<Response>;
+      post?: () => Promise<Response>;
+    },
+    refreshSignal: number,
+    onRefreshSettled: (signal: number) => void,
+  ) {
+    let getCalls = 0;
+    const calls: Array<{ url: string; init?: RequestInit | undefined }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        calls.push({ url, init });
+        if (url === '/api/auth/csrf') return csrfOk();
+        if (url === '/api/households' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1;
+          return routes.get();
+        }
+        if (url === '/api/households' && init?.method === 'POST') {
+          if (!routes.post) throw new Error('unexpected POST');
+          return routes.post();
+        }
+        if (url.startsWith('/api/households/')) {
+          return jsonResponse({ invitations: [] });
+        }
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+    const rendered = render(
+      <HouseholdSection
+        csrf={CSRF}
+        onCsrfRefreshed={() => {}}
+        onSessionExpired={() => {}}
+        refreshSignal={refreshSignal}
+        onRefreshSettled={onRefreshSettled}
+      />,
+    );
+    const householdGets = () =>
+      calls.filter(
+        ({ url, init }) =>
+          url === '/api/households' && (init?.method ?? 'GET') === 'GET',
+      );
+    return { ...rendered, householdGets, getCallCount: () => getCalls };
+  }
+
+  it('queues a signal arriving during the initial load and fetches again after it settles', async () => {
+    let resolveFirst!: (response: Response) => void;
+    const firstGate = new Promise<Response>((resolve) => {
+      resolveFirst = resolve;
+    });
+    let resolveSecond!: (response: Response) => void;
+    const secondGate = new Promise<Response>((resolve) => {
+      resolveSecond = resolve;
+    });
+    let gateCalls = 0;
+    const settled = vi.fn();
+    const { rerender, householdGets } = renderSection(
+      {
+        get: () => {
+          gateCalls += 1;
+          return gateCalls === 1 ? firstGate : secondGate;
+        },
+      },
+      0,
+      settled,
+    );
+    expect(
+      await screen.findByText('Loading your households…'),
+    ).toBeInTheDocument();
+    // The signal arrives while the pre-membership load is busy: it must be
+    // queued, not consumed, so no second fetch starts yet.
+    rerender(
+      <HouseholdSection
+        csrf={CSRF}
+        onCsrfRefreshed={() => {}}
+        onSessionExpired={() => {}}
+        refreshSignal={1}
+        onRefreshSettled={settled}
+      />,
+    );
+    await act(async () => {});
+    expect(householdGets()).toHaveLength(1);
+    expect(settled).not.toHaveBeenCalled();
+    resolveFirst(householdsOk([HOUSEHOLD_1]));
+    // The queued signal drains into a second fetch after the busy load
+    // settles; the initial load never reported a settle.
+    await waitFor(() => expect(householdGets()).toHaveLength(2));
+    expect(settled).not.toHaveBeenCalled();
+    resolveSecond(householdsOk([HOUSEHOLD_1, HOUSEHOLD_2]));
+    expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
+    expect(screen.getByText('Elm Street home')).toBeInTheDocument();
+    await waitFor(() => expect(settled).toHaveBeenCalledWith(1));
+  });
+
+  it('queues a signal arriving during creation and reloads after the write settles', async () => {
+    let resolvePost!: (response: Response) => void;
+    const postGate = new Promise<Response>((resolve) => {
+      resolvePost = resolve;
+    });
+    let resolveReload!: (response: Response) => void;
+    const reloadGate = new Promise<Response>((resolve) => {
+      resolveReload = resolve;
+    });
+    let getCalls = 0;
+    const settled = vi.fn();
+    const sectionProps = (signal: number) => (
+      <HouseholdSection
+        csrf={CSRF}
+        onCsrfRefreshed={() => {}}
+        onSessionExpired={() => {}}
+        refreshSignal={signal}
+        onRefreshSettled={settled}
+      />
+    );
+    const { rerender, householdGets } = renderSection(
+      {
+        get: () => {
+          getCalls += 1;
+          return getCalls === 1
+            ? Promise.resolve(householdsOk([HOUSEHOLD_1]))
+            : reloadGate;
+        },
+        post: () => postGate,
+      },
+      0,
+      settled,
+    );
+    await screen.findByText('Elm Street home');
+    fireEvent.change(screen.getByLabelText('Household name'), {
+      target: { value: 'Lake cabin' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create household' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Creating…' })).toBeDisabled(),
+    );
+    // The join acceptance lands while creation is busy.
+    rerender(sectionProps(1));
+    await act(async () => {});
+    expect(householdGets()).toHaveLength(1);
+    resolvePost(jsonResponse(HOUSEHOLD_2, 201));
+    // Creation settles, then the queued signal triggers the reload.
+    await waitFor(() => expect(householdGets()).toHaveLength(2));
+    resolveReload(householdsOk([HOUSEHOLD_1, HOUSEHOLD_2]));
+    expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
+    await waitFor(() => expect(settled).toHaveBeenCalledWith(1));
+  });
+});
+
+describe('invitation access recovery', () => {
+  it('replaces stale owner controls after the household refresh confirms a member role', async () => {
+    let householdGets = 0;
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => {
+        householdGets += 1;
+        return householdsOk([
+          householdGets === 1
+            ? HOUSEHOLD_1
+            : { ...HOUSEHOLD_1, role: 'MEMBER' },
+        ]);
+      },
+      invitationsPost: () =>
+        jsonResponse(
+          {
+            code: 'FORBIDDEN',
+            message: 'Only owners may invite.',
+            correlationId: 'corr-role',
+          },
+          403,
+        ),
+    });
+    render(<AuthSection />);
+    await screen.findByRole('button', { name: 'Create invitation' });
+    fireEvent.click(screen.getByRole('button', { name: 'Create invitation' }));
+    expect(
+      await screen.findByText(/access to this household may have changed/i),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Refresh household list' }),
+    );
+    // The refreshed membership is MEMBER: stale owner controls disappear
+    // instead of lingering with a denied role.
+    await waitFor(() =>
+      expect(screen.getByText('Role: MEMBER')).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Create invitation' }),
+    ).not.toBeInTheDocument();
+    expect(householdGets).toBe(2);
   });
 });
