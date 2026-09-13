@@ -16,7 +16,7 @@ export function App() {
           </svg>
           HouseSync
         </span>
-        <span className="area-badge">Identity</span>
+        <span className="area-badge">Households</span>
       </header>
 
       <main id="main-content">
@@ -34,8 +34,9 @@ export function App() {
             <p className="eyebrow">Where we are</p>
             <h2 id="foundation-title">First, a solid foundation.</h2>
             <p>
-              The web shell is running. Accounts and sign-in are available;
-              households and financial features are still ahead.
+              The web shell is running. Accounts, sign-in, and household
+              creation are available; invitations and financial features are
+              still ahead.
             </p>
           </div>
           <HealthStatus />

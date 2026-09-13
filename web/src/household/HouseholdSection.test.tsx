@@ -1,0 +1,810 @@
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
+import { StrictMode } from 'react';
+import { describe, expect, it, vi } from 'vitest';
+import { AuthSection } from '../auth/AuthSection';
+import { validateHouseholdName } from '../auth/validation';
+
+const CSRF = { token: 'csrf-token-1', headerName: 'X-CSRF-TOKEN' };
+const CSRF_FRESH = { token: 'csrf-token-2', headerName: 'X-CSRF-TOKEN' };
+const USER = {
+  id: '11111111-2222-4333-8444-555555555555',
+  email: 'person@example.test',
+};
+const LONG_PASSWORD = 'correct horse battery staple extra';
+const HOUSEHOLD_1 = {
+  id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+  name: 'Elm Street home',
+  role: 'OWNER',
+  createdAt: '2026-09-13T01:30:00Z',
+};
+const HOUSEHOLD_2 = {
+  id: 'ffffffff-1111-4222-8333-444444444444',
+  name: 'Lake cabin',
+  role: 'MEMBER',
+  createdAt: '2026-09-13T02:30:00Z',
+};
+
+function jsonResponse(body: unknown, status = 200, headers?: HeadersInit) {
+  return headers === undefined
+    ? Response.json(body, { status })
+    : Response.json(body, { status, headers });
+}
+
+function csrfOk() {
+  return jsonResponse(CSRF);
+}
+
+function meAnonymous() {
+  return jsonResponse(
+    { code: 'UNAUTHENTICATED', message: 'You are not signed in.' },
+    401,
+  );
+}
+
+function meAuthenticated() {
+  return jsonResponse(USER);
+}
+
+function householdsOk(list: unknown[] = []) {
+  return jsonResponse({ households: list });
+}
+
+interface RouteHandlers {
+  csrf?: () => Response | Promise<Response>;
+  me?: () => Response | Promise<Response>;
+  login?: (body?: unknown) => Response | Promise<Response>;
+  logout?: () => Response | Promise<Response>;
+  householdsGet?: () => Response | Promise<Response>;
+  householdsPost?: (body?: unknown) => Response | Promise<Response>;
+}
+
+function stubFetch(routes: RouteHandlers) {
+  const calls: Array<{ url: string; init?: RequestInit | undefined }> = [];
+  const mock = vi.fn(
+    async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      calls.push({ url, init });
+      if (url === '/api/auth/csrf') return routes.csrf?.() ?? csrfOk();
+      if (url === '/api/auth/me') return routes.me?.() ?? meAnonymous();
+      if (url === '/api/auth/login') {
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        return (routes.login?.(body) ?? jsonResponse(USER)) as Response;
+      }
+      if (url === '/api/auth/logout') {
+        return (routes.logout?.() ??
+          new Response(null, { status: 204 })) as Response;
+      }
+      if (url === '/api/households' && (init?.method ?? 'GET') === 'GET') {
+        if (!routes.householdsGet) {
+          throw new Error('unexpected GET /api/households');
+        }
+        return routes.householdsGet();
+      }
+      if (url === '/api/households' && init?.method === 'POST') {
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        if (!routes.householdsPost) {
+          throw new Error('unexpected POST /api/households');
+        }
+        return routes.householdsPost(body);
+      }
+      throw new Error(`unexpected fetch ${url} ${init?.method ?? ''}`);
+    },
+  );
+  vi.stubGlobal('fetch', mock);
+  return { mock, calls };
+}
+
+function householdCalls(
+  calls: Array<{ url: string; init?: RequestInit | undefined }>,
+  method?: string,
+) {
+  return calls.filter(
+    ({ url, init }) =>
+      url === '/api/households' &&
+      (method === undefined || (init?.method ?? 'GET') === method),
+  );
+}
+
+function typeInto(label: string, value: string) {
+  fireEvent.change(screen.getByLabelText(label), { target: { value } });
+}
+
+function clickLastButton(name: string | RegExp) {
+  const buttons = screen.getAllByRole('button', { name });
+  const target = buttons[buttons.length - 1];
+  if (!target) throw new Error('button not found');
+  fireEvent.click(target);
+}
+
+async function signIn(
+  email: string = USER.email,
+  password: string = LONG_PASSWORD,
+) {
+  typeInto('Email', email);
+  typeInto('Password', password);
+  clickLastButton('Sign in');
+}
+
+describe('household name validation', () => {
+  it('trims outer space but keeps interior content and bounds', () => {
+    expect(validateHouseholdName('   ')).toBeDefined();
+    expect(validateHouseholdName('Elm  Street home')).toBeUndefined();
+    expect(validateHouseholdName(`  ${'a'.repeat(100)}  `)).toBeUndefined();
+    expect(validateHouseholdName('a'.repeat(101))).toBeDefined();
+    expect(validateHouseholdName('🙂'.repeat(100))).toBeUndefined();
+    expect(validateHouseholdName('🙂'.repeat(101))).toBeDefined();
+    expect(
+      validateHouseholdName(`Home${String.fromCharCode(7)}bell`),
+    ).toBeDefined();
+    expect(validateHouseholdName('Lake cabin')).toBeUndefined();
+  });
+});
+
+describe('signed-out suppression', () => {
+  it('never requests households while signed out', async () => {
+    const { calls } = stubFetch({ me: meAnonymous, csrf: csrfOk });
+    render(<AuthSection />);
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('Household name')).not.toBeInTheDocument();
+    expect(householdCalls(calls)).toHaveLength(0);
+  });
+});
+
+describe('household bootstrap', () => {
+  it('shows a distinct loading state then the empty state', async () => {
+    let resolveGet!: (response: Response) => void;
+    const gate = new Promise<Response>((resolve) => {
+      resolveGet = resolve;
+    });
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => gate,
+    });
+    render(<AuthSection />);
+    expect(
+      await screen.findByText('Loading your households…'),
+    ).toBeInTheDocument();
+    resolveGet(householdsOk([]));
+    expect(
+      await screen.findByText(/You do not belong to a household yet/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Household name')).toBeInTheDocument();
+  });
+
+  it('renders multiple authorized households with safe fields only', async () => {
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([HOUSEHOLD_1, HOUSEHOLD_2]),
+    });
+    render(<AuthSection />);
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    expect(screen.getByText('Lake cabin')).toBeInTheDocument();
+    expect(screen.getByText('Role: OWNER')).toBeInTheDocument();
+    expect(screen.getByText('Role: MEMBER')).toBeInTheDocument();
+    const times = screen.getAllByText('Created:');
+    expect(times).toHaveLength(2);
+    const rendered = document.querySelectorAll('time');
+    expect(rendered).toHaveLength(2);
+    expect(rendered[0]?.getAttribute('dateTime')).toBe(HOUSEHOLD_1.createdAt);
+    expect(rendered[1]?.getAttribute('dateTime')).toBe(HOUSEHOLD_2.createdAt);
+  });
+});
+
+describe('household creation', () => {
+  it('sends a trimmed name-only body with CSRF and renders the result immediately', async () => {
+    const { calls } = stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([]),
+      householdsPost: () => jsonResponse(HOUSEHOLD_1, 201),
+    });
+    render(<AuthSection />);
+    expect(
+      await screen.findByText(/You do not belong to a household yet/),
+    ).toBeInTheDocument();
+    typeInto('Household name', '  Elm Street home  ');
+    clickLastButton('Create household');
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    const post = householdCalls(calls, 'POST');
+    expect(post).toHaveLength(1);
+    expect(post[0]?.init?.credentials).toBe('include');
+    expect(post[0]?.init?.headers).toMatchObject({
+      'X-CSRF-TOKEN': CSRF.token,
+    });
+    expect(JSON.parse(String(post[0]?.init?.body))).toEqual({
+      name: 'Elm Street home',
+    });
+    expect(screen.getByLabelText('Household name')).toHaveValue('');
+    expect(
+      screen.getByText(/Household “Elm Street home” created/),
+    ).toBeInTheDocument();
+  });
+
+  it('rejects a blank name locally without a request and keeps focus semantics', async () => {
+    const { calls } = stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([]),
+    });
+    render(<AuthSection />);
+    await screen.findByLabelText('Household name');
+    typeInto('Household name', '   ');
+    clickLastButton('Create household');
+    expect(
+      await screen.findByText('Enter a household name.'),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Household name')).toHaveValue('   ');
+    expect(screen.getByLabelText('Household name')).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+    expect(householdCalls(calls, 'POST')).toHaveLength(0);
+  });
+
+  it('rejects a 101-code-point name locally without a request', async () => {
+    const { calls } = stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([]),
+    });
+    render(<AuthSection />);
+    await screen.findByLabelText('Household name');
+    const longName = 'a'.repeat(101);
+    typeInto('Household name', longName);
+    clickLastButton('Create household');
+    expect(
+      await screen.findByText(
+        'Household name must be 100 characters or fewer.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Household name')).toHaveValue(longName);
+    expect(householdCalls(calls, 'POST')).toHaveLength(0);
+  });
+
+  it('rejects control characters locally without a request', async () => {
+    const { calls } = stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([]),
+    });
+    render(<AuthSection />);
+    await screen.findByLabelText('Household name');
+    typeInto('Household name', `Home${String.fromCharCode(7)}bell`);
+    clickLastButton('Create household');
+    expect(
+      await screen.findByText(
+        'Household name must not contain control characters.',
+      ),
+    ).toBeInTheDocument();
+    expect(householdCalls(calls, 'POST')).toHaveLength(0);
+  });
+
+  it('associates server field errors and preserves the safe input', async () => {
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([]),
+      householdsPost: () =>
+        jsonResponse(
+          {
+            code: 'VALIDATION_FAILED',
+            message: 'Check the supplied details.',
+            correlationId: 'corr-1',
+            fieldErrors: { name: 'Enter a household name.' },
+          },
+          400,
+        ),
+    });
+    render(<AuthSection />);
+    await screen.findByLabelText('Household name');
+    typeInto('Household name', 'Elm Street home');
+    clickLastButton('Create household');
+    expect(
+      await screen.findByText('Enter a household name.'),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Household name')).toHaveValue(
+      'Elm Street home',
+    );
+    expect(document.querySelector('.household-list')).toBeNull();
+  });
+
+  it('guards duplicate submissions while creation is pending', async () => {
+    let resolvePost!: (response: Response) => void;
+    const gate = new Promise<Response>((resolve) => {
+      resolvePost = resolve;
+    });
+    const { calls } = stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([]),
+      householdsPost: () => gate,
+    });
+    render(<AuthSection />);
+    await screen.findByLabelText('Household name');
+    typeInto('Household name', 'Elm Street home');
+    const button = screen.getByRole('button', { name: 'Create household' });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Creating…' })).toBeDisabled(),
+    );
+    expect(householdCalls(calls, 'POST')).toHaveLength(1);
+    resolvePost(jsonResponse(HOUSEHOLD_1, 201));
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+  });
+});
+
+describe('household recovery', () => {
+  it('runs sign-in-again recovery and clears household UI on 401', async () => {
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () =>
+        jsonResponse(
+          { code: 'UNAUTHENTICATED', message: 'You are not signed in.' },
+          401,
+        ),
+    });
+    render(<AuthSection />);
+    expect(
+      await screen.findByText('Your session ended. Sign in again.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'Sign in' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Households')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Household name')).not.toBeInTheDocument();
+  });
+
+  it('refreshes CSRF on rejection and requires an explicit retry without replay', async () => {
+    let postCalls = 0;
+    let csrfCalls = 0;
+    const { calls } = stubFetch({
+      csrf: () => {
+        csrfCalls += 1;
+        return jsonResponse(csrfCalls === 1 ? CSRF : CSRF_FRESH);
+      },
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([]),
+      householdsPost: () => {
+        postCalls += 1;
+        if (postCalls === 1) {
+          return jsonResponse(
+            {
+              code: 'CSRF_INVALID',
+              message: 'Invalid CSRF token.',
+              correlationId: 'corr-csrf',
+            },
+            403,
+          );
+        }
+        return jsonResponse(HOUSEHOLD_1, 201);
+      },
+    });
+    render(<AuthSection />);
+    await screen.findByLabelText('Household name');
+    typeInto('Household name', 'Elm Street home');
+    clickLastButton('Create household');
+    expect(
+      await screen.findByText(/security token was refreshed/i),
+    ).toBeInTheDocument();
+    expect(postCalls).toBe(1);
+    // The safe input is preserved for the explicit retry.
+    expect(screen.getByLabelText('Household name')).toHaveValue(
+      'Elm Street home',
+    );
+    clickLastButton('Create household');
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    expect(postCalls).toBe(2);
+    const posts = householdCalls(calls, 'POST');
+    expect(posts[1]?.init?.headers).toMatchObject({
+      'X-CSRF-TOKEN': CSRF_FRESH.token,
+    });
+  });
+
+  it('shows safe 500 errors with a correlation reference and list refresh', async () => {
+    let getCalls = 0;
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => {
+        getCalls += 1;
+        if (getCalls === 1) {
+          return jsonResponse(
+            {
+              code: 'INTERNAL_ERROR',
+              message: 'Something went wrong. Retry.',
+              correlationId: 'corr-500',
+            },
+            500,
+          );
+        }
+        return householdsOk([]);
+      },
+    });
+    render(<AuthSection />);
+    expect(
+      await screen.findByText('Something went wrong. Retry.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Reference: corr-500')).toBeInTheDocument();
+    // A network failure must not masquerade as signed-out.
+    expect(screen.queryByText('Your session ended. Sign in again.')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh list' }));
+    expect(
+      await screen.findByText(/You do not belong to a household yet/),
+    ).toBeInTheDocument();
+  });
+
+  it('reports an unknown outcome on create timeout and offers refresh without resubmitting', async () => {
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === '/api/auth/csrf') return csrfOk();
+        if (url === '/api/auth/me') return meAuthenticated();
+        if (url === '/api/households' && (init?.method ?? 'GET') === 'GET') {
+          return householdsOk([HOUSEHOLD_1]);
+        }
+        if (url === '/api/households' && init?.method === 'POST') {
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('Aborted.', 'AbortError'));
+            });
+          });
+        }
+        throw new Error(`unexpected ${url}`);
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(<AuthSection />);
+    await screen.findByLabelText('Household name');
+    typeInto('Household name', 'Elm Street home');
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Create household' }));
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(
+      screen.getByText(/outcome is unknown — refresh the list/i),
+    ).toBeInTheDocument();
+    // The safe input is preserved and nothing was silently resubmitted.
+    expect(screen.getByLabelText('Household name')).toHaveValue(
+      'Elm Street home',
+    );
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          String(url) === '/api/households' &&
+          (init as RequestInit | undefined)?.method === 'POST',
+      ),
+    ).toHaveLength(1);
+    vi.useRealTimers();
+    const refreshButtons = screen.getAllByRole('button', {
+      name: 'Refresh list',
+    });
+    fireEvent.click(refreshButtons[refreshButtons.length - 1]!);
+    // The refreshed list answers the unknown-outcome check: its notice is
+    // cleared, while the safe name stays available for deliberate action.
+    await waitFor(() =>
+      expect(screen.queryByText(/outcome is unknown/i)).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText('Elm Street home')).toBeInTheDocument();
+    expect(screen.getByLabelText('Household name')).toHaveValue(
+      'Elm Street home',
+    );
+  });
+});
+
+describe('household logout and lifecycle', () => {
+  it('clears household state on logout and ignores a late list response', async () => {
+    let resolveGet!: (response: Response) => void;
+    const gate = new Promise<Response>((resolve) => {
+      resolveGet = resolve;
+    });
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => gate,
+      logout: () => new Response(null, { status: 204 }),
+    });
+    render(<AuthSection />);
+    expect(
+      await screen.findByText('Loading your households…'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByText('Signed out.')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'Sign in' }),
+    ).toBeInTheDocument();
+    resolveGet(householdsOk([HOUSEHOLD_1]));
+    await act(async () => {});
+    // The late household response cannot overwrite the signed-out state.
+    expect(screen.queryByText('Elm Street home')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Household name')).not.toBeInTheDocument();
+  });
+
+  it('loads households after a confirmed sign-in without an earlier request', async () => {
+    const { calls } = stubFetch({
+      csrf: csrfOk,
+      me: meAnonymous,
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+    });
+    render(<AuthSection />);
+    expect(
+      await screen.findByRole('heading', { name: 'Sign in' }),
+    ).toBeInTheDocument();
+    expect(householdCalls(calls)).toHaveLength(0);
+    await signIn();
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    expect(screen.getByText('Role: OWNER')).toBeInTheDocument();
+    expect(householdCalls(calls, 'GET').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('exits bootstrap and creates after a canceled StrictMode setup request', async () => {
+    let csrfCalls = 0;
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === '/api/auth/csrf') {
+          csrfCalls += 1;
+          if (csrfCalls === 1) {
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener('abort', () => {
+                reject(new DOMException('Aborted.', 'AbortError'));
+              });
+            });
+          }
+          return csrfOk();
+        }
+        if (url === '/api/auth/me') return meAuthenticated();
+        if (url === '/api/households' && (init?.method ?? 'GET') === 'GET') {
+          return householdsOk([]);
+        }
+        if (url === '/api/households' && init?.method === 'POST') {
+          return jsonResponse(HOUSEHOLD_1, 201);
+        }
+        throw new Error(`unexpected ${url}`);
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <StrictMode>
+        <AuthSection />
+      </StrictMode>,
+    );
+    expect(
+      await screen.findByText(/You do not belong to a household yet/),
+    ).toBeInTheDocument();
+    typeInto('Household name', 'Elm Street home');
+    clickLastButton('Create household');
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+  });
+
+  it('applies no household updates after a true unmount', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      let resolvePost!: (response: Response) => void;
+      const gate = new Promise<Response>((resolve) => {
+        resolvePost = resolve;
+      });
+      stubFetch({
+        csrf: csrfOk,
+        me: meAuthenticated,
+        householdsGet: () => householdsOk([]),
+        householdsPost: () => gate,
+      });
+      const { unmount } = render(<AuthSection />);
+      await screen.findByLabelText('Household name');
+      typeInto('Household name', 'Elm Street home');
+      clickLastButton('Create household');
+      await waitFor(() =>
+        expect(
+          screen.getByRole('button', { name: 'Creating…' }),
+        ).toBeInTheDocument(),
+      );
+      unmount();
+      resolvePost(jsonResponse(HOUSEHOLD_1, 201));
+      await act(async () => {});
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe('household list gating', () => {
+  it('hides creation until the initial list loads successfully', async () => {
+    let getCalls = 0;
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => {
+        getCalls += 1;
+        if (getCalls === 1) {
+          return jsonResponse(
+            {
+              code: 'INTERNAL_ERROR',
+              message: 'Something went wrong. Retry.',
+              correlationId: 'corr-gate',
+            },
+            500,
+          );
+        }
+        return householdsOk([]);
+      },
+    });
+    render(<AuthSection />);
+    expect(
+      await screen.findByText('Something went wrong. Retry.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('Household name')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Refresh list' }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh list' }));
+    expect(
+      await screen.findByText(/You do not belong to a household yet/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Household name')).toBeInTheDocument();
+  });
+
+  it('keeps a failed refresh stale with creation unavailable until recovery', async () => {
+    let getCalls = 0;
+    let postCalls = 0;
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url === '/api/auth/csrf') return csrfOk();
+        if (url === '/api/auth/me') return meAuthenticated();
+        if (url === '/api/households' && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1;
+          if (getCalls === 1) return householdsOk([HOUSEHOLD_1]);
+          if (getCalls === 2) {
+            return jsonResponse(
+              {
+                code: 'INTERNAL_ERROR',
+                message: 'Something went wrong. Retry.',
+                correlationId: 'corr-stale',
+              },
+              500,
+            );
+          }
+          return householdsOk([HOUSEHOLD_1]);
+        }
+        if (url === '/api/households' && init?.method === 'POST') {
+          postCalls += 1;
+          if (postCalls === 1) {
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener('abort', () => {
+                reject(new DOMException('Aborted.', 'AbortError'));
+              });
+            });
+          }
+          return jsonResponse(HOUSEHOLD_2, 201);
+        }
+        throw new Error(`unexpected ${url}`);
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    render(<AuthSection />);
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    typeInto('Household name', 'Lake cabin');
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Create household' }));
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(
+      screen.getByText(/outcome is unknown — refresh the list/i),
+    ).toBeInTheDocument();
+    vi.useRealTimers();
+    // Refresh through the timeout notice; the refresh fails.
+    const staleRefresh = screen.getAllByRole('button', {
+      name: 'Refresh list',
+    });
+    fireEvent.click(staleRefresh[staleRefresh.length - 1]!);
+    expect(
+      await screen.findByText('Something went wrong. Retry.'),
+    ).toBeInTheDocument();
+    // The previously loaded household stays visible but stale, and creation
+    // is unavailable until the list recovers.
+    expect(screen.getByText('Elm Street home')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /previously loaded households, which may be out of date/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('Household name')).not.toBeInTheDocument();
+    // Recover: the next refresh succeeds and creation returns.
+    const recoverRefresh = screen.getAllByRole('button', {
+      name: 'Refresh list',
+    });
+    fireEvent.click(recoverRefresh[recoverRefresh.length - 1]!);
+    expect(await screen.findByLabelText('Household name')).toBeInTheDocument();
+    expect(
+      screen.queryByText(/previously loaded households/),
+    ).not.toBeInTheDocument();
+    typeInto('Household name', 'Lake cabin');
+    clickLastButton('Create household');
+    expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
+  });
+
+  it('submits a 100-emoji name unchanged with no input length cap', async () => {
+    const emojiName = '🙂'.repeat(100);
+    const created = { ...HOUSEHOLD_1, name: emojiName };
+    const { calls } = stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([]),
+      householdsPost: () => jsonResponse(created, 201),
+    });
+    render(<AuthSection />);
+    const input = await screen.findByLabelText('Household name');
+    expect(input).not.toHaveAttribute('maxlength');
+    typeInto('Household name', emojiName);
+    clickLastButton('Create household');
+    expect(await screen.findByText(emojiName)).toBeInTheDocument();
+    const posts = householdCalls(calls, 'POST');
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(String(posts[0]?.init?.body))).toEqual({
+      name: emojiName,
+    });
+  });
+});
+
+describe('household ordering', () => {
+  it('keeps an exact second before a later fractional second chronologically', async () => {
+    const exact = {
+      id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee1',
+      name: 'Exact second',
+      role: 'OWNER',
+      createdAt: '2026-09-13T01:30:00Z',
+    };
+    const fractional = {
+      id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee2',
+      name: 'Fractional second',
+      role: 'OWNER',
+      createdAt: '2026-09-13T01:30:00.900Z',
+    };
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([exact, fractional]),
+    });
+    render(<AuthSection />);
+    expect(await screen.findByText('Exact second')).toBeInTheDocument();
+    const items = screen.getAllByRole('listitem');
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent('Exact second');
+    expect(items[1]).toHaveTextContent('Fractional second');
+  });
+
+  it('uses the household id to break equal timestamp ties', async () => {
+    const earlierId = {
+      ...HOUSEHOLD_1,
+      id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee1',
+      name: 'Earlier id',
+    };
+    const laterId = {
+      ...HOUSEHOLD_1,
+      id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee2',
+      name: 'Later id',
+    };
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([laterId, earlierId]),
+    });
+    render(<AuthSection />);
+    expect(await screen.findByText('Earlier id')).toBeInTheDocument();
+    const items = screen.getAllByRole('listitem');
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent('Earlier id');
+    expect(items[1]).toHaveTextContent('Later id');
+  });
+});

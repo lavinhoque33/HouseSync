@@ -38,12 +38,17 @@ function meAuthenticated() {
   return jsonResponse(USER);
 }
 
+function householdsEmpty() {
+  return jsonResponse({ households: [] });
+}
+
 interface RouteHandlers {
   csrf?: () => Response | Promise<Response>;
   me?: () => Response | Promise<Response>;
   register?: (body?: unknown) => Response | Promise<Response>;
   login?: (body?: unknown) => Response | Promise<Response>;
   logout?: () => Response | Promise<Response>;
+  householdsGet?: () => Response | Promise<Response>;
 }
 
 function stubFetch(routes: RouteHandlers) {
@@ -65,6 +70,9 @@ function stubFetch(routes: RouteHandlers) {
       if (url === '/api/auth/logout') {
         return (routes.logout?.() ??
           new Response(null, { status: 204 })) as Response;
+      }
+      if (url === '/api/households') {
+        return (routes.householdsGet?.() ?? householdsEmpty()) as Response;
       }
       throw new Error(`unexpected fetch ${url}`);
     },
@@ -106,11 +114,14 @@ describe('auth bootstrap', () => {
     expect(screen.queryByText(/session ended/i)).not.toBeInTheDocument();
   });
 
-  it('shows the account shell when bootstrap finds a session', async () => {
+  it('shows the account shell with households when bootstrap finds a session', async () => {
     stubFetch({ csrf: csrfOk, me: meAuthenticated });
     render(<AuthSection />);
     expect(await screen.findByText(USER.email)).toBeInTheDocument();
-    expect(screen.getByText(/Household — next/)).toBeInTheDocument();
+    expect(screen.getByText('Households')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/You do not belong to a household yet/),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: 'Sign out' }),
     ).toBeInTheDocument();

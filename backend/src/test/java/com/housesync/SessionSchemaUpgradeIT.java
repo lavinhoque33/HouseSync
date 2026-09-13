@@ -69,9 +69,9 @@ class SessionSchemaUpgradeIT {
             .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
             .locations("classpath:db/migration")
             .load();
-    assertThat(current.migrate().migrationsExecuted).isEqualTo(1);
+    assertThat(current.migrate().migrationsExecuted).isEqualTo(2);
     current.validate();
-    assertThat(current.info().applied()).hasSize(3);
+    assertThat(current.info().applied()).hasSize(4);
     assertThat(principalNameLength(credentials)).isEqualTo(254);
 
     try (Connection connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), credentials);

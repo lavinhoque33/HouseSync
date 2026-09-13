@@ -1,7 +1,9 @@
 package com.housesync;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -10,9 +12,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.housesync.household.application.HouseholdService;
+import com.housesync.household.web.HouseholdResponse;
+import com.housesync.identity.application.HouseSyncUserDetails;
 import com.housesync.identity.application.HouseSyncUserDetailsService;
 import com.housesync.identity.application.IdentityService;
 import com.housesync.identity.web.SafeUserResponse;
+import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -46,6 +53,7 @@ class SecurityConfigurationTest {
   @Autowired private MockMvc mvc;
   @MockitoBean private IdentityService identities;
   @MockitoBean private HouseSyncUserDetailsService userDetails;
+  @MockitoBean private HouseholdService households;
 
   @ParameterizedTest
   @ValueSource(
@@ -68,6 +76,9 @@ class SecurityConfigurationTest {
     "GET, /actuator/health/readiness/db",
     "GET, /login",
     "GET, /api/auth/me",
+    "POST, /api/households",
+    "GET, /api/households",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000",
     "POST, /actuator/health",
     "PUT, /actuator/health",
     "PATCH, /actuator/health",
@@ -95,6 +106,13 @@ class SecurityConfigurationTest {
     "GET, /test/protected",
     "GET, /api/unknown",
     "POST, /actuator/health",
+    "PUT, /api/households",
+    "PATCH, /api/households",
+    "DELETE, /api/households",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000",
+    "GET, /api/households/a/b",
   })
   void authenticatedRequestsToUnimplementedRoutesAreForbidden(String method, String path)
       throws Exception {
@@ -123,6 +141,70 @@ class SecurityConfigurationTest {
   @Test
   void anonymousLogoutWithValidCsrfIsSafe() throws Exception {
     mvc.perform(post("/api/auth/logout").with(csrf())).andExpect(status().isNoContent());
+  }
+
+  @Test
+  void authenticatedHouseholdReadsUseMembershipScopedService() throws Exception {
+    UUID actorId = UUID.randomUUID();
+    UUID householdId = UUID.randomUUID();
+    Instant createdAt = Instant.parse("2026-09-13T01:30:00Z");
+    HouseholdResponse household =
+        new HouseholdResponse(householdId, "Elm Street home", "OWNER", createdAt);
+    when(households.list(eq(actorId))).thenReturn(List.of(household));
+    when(households.get(eq(householdId), eq(actorId))).thenReturn(household);
+
+    mvc.perform(get("/api/households").with(signedInAs(actorId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.households[0].id").value(householdId.toString()))
+        .andExpect(jsonPath("$.households[0].name").value("Elm Street home"))
+        .andExpect(jsonPath("$.households[0].role").value("OWNER"))
+        .andExpect(jsonPath("$.households[0].createdAt").value("2026-09-13T01:30:00Z"));
+
+    mvc.perform(get("/api/households/" + householdId).with(signedInAs(actorId)))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.id").value(householdId.toString()))
+        .andExpect(jsonPath("$.role").value("OWNER"));
+  }
+
+  @Test
+  void authenticatedHouseholdCreateReturnsCreatedHousehold() throws Exception {
+    UUID actorId = UUID.randomUUID();
+    UUID householdId = UUID.randomUUID();
+    when(households.create(eq("Elm Street home"), eq(actorId)))
+        .thenReturn(
+            new HouseholdResponse(
+                householdId, "Elm Street home", "OWNER", Instant.parse("2026-09-13T01:30:00Z")));
+    mvc.perform(
+            post("/api/households")
+                .with(signedInAs(actorId))
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"Elm Street home\"}"))
+        .andExpect(status().isCreated())
+        .andExpect(
+            header().string("Cache-Control", org.hamcrest.Matchers.containsString("no-store")))
+        .andExpect(jsonPath("$.id").value(householdId.toString()))
+        .andExpect(jsonPath("$.role").value("OWNER"));
+  }
+
+  @Test
+  void unsafeHouseholdCreateWithoutCsrfIsRejectedWithCsrfInvalid() throws Exception {
+    mvc.perform(
+            post("/api/households")
+                .with(signedInAs(UUID.randomUUID()))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"Elm Street home\"}"))
+        .andExpect(status().isForbidden())
+        .andExpect(jsonPath("$.code").value("CSRF_INVALID"))
+        .andExpect(jsonPath("$.correlationId").exists());
+  }
+
+  private static org.springframework.test.web.servlet.request.RequestPostProcessor signedInAs(
+      UUID actorId) {
+    HouseSyncUserDetails principal = new HouseSyncUserDetails(actorId, "person@example.test", null);
+    return authentication(
+        new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(
+            principal, null, List.of()));
   }
 
   @Test

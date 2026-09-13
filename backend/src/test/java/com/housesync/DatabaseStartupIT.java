@@ -2,6 +2,8 @@ package com.housesync;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.housesync.household.persistence.HouseholdEntity;
+import com.housesync.household.persistence.HouseholdMemberEntity;
 import com.housesync.identity.persistence.UserEntity;
 import jakarta.persistence.EntityManagerFactory;
 import java.net.URI;
@@ -53,13 +55,21 @@ class DatabaseStartupIT {
     assertThat(entityManagerFactory.isOpen()).isTrue();
     assertThat(entityManagerFactory.getMetamodel().getEntities())
         .extracting(type -> type.getJavaType().getSimpleName())
-        .contains(UserEntity.class.getSimpleName());
+        .contains(
+            UserEntity.class.getSimpleName(),
+            HouseholdEntity.class.getSimpleName(),
+            HouseholdMemberEntity.class.getSimpleName());
     assertThat(
             jdbc.queryForList(
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public'", String.class))
         .containsExactlyInAnyOrder(
-            "flyway_schema_history", "users", "spring_session", "spring_session_attributes");
-    assertThat(flyway.info().applied()).hasSize(3);
+            "flyway_schema_history",
+            "users",
+            "spring_session",
+            "spring_session_attributes",
+            "households",
+            "household_members");
+    assertThat(flyway.info().applied()).hasSize(4);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
     assertThat(

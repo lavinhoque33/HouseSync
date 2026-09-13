@@ -20,6 +20,7 @@ export type ApiErrorCode =
   | 'FORBIDDEN'
   | 'REGISTRATION_CONFLICT'
   | 'RATE_LIMITED'
+  | 'HOUSEHOLD_NOT_FOUND'
   | 'INTERNAL_ERROR'
   | 'NETWORK_ERROR'
   | 'UNKNOWN_ERROR';
@@ -69,6 +70,7 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'FORBIDDEN',
     'REGISTRATION_CONFLICT',
     'RATE_LIMITED',
+    'HOUSEHOLD_NOT_FOUND',
     'INTERNAL_ERROR',
   ];
   return codes.includes(value as ApiErrorCode)
@@ -84,7 +86,10 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
   const result: ApiFieldErrors = {};
   for (const [key, message] of entries) {
     if (
-      (key === 'email' || key === 'password' || key === 'confirmPassword') &&
+      (key === 'email' ||
+        key === 'password' ||
+        key === 'confirmPassword' ||
+        key === 'name') &&
       typeof message === 'string'
     ) {
       result[key] = message;
@@ -503,5 +508,133 @@ export async function postLogout(
     response,
     'UNKNOWN_ERROR',
     'Sign-out could not be completed.',
+  );
+}
+
+export type HouseholdRole = 'OWNER' | 'MEMBER';
+
+export interface Household {
+  id: string;
+  name: string;
+  role: HouseholdRole;
+  createdAt: string;
+}
+
+function isHouseholdRole(value: unknown): value is HouseholdRole {
+  return value === 'OWNER' || value === 'MEMBER';
+}
+
+function parseHousehold(value: unknown): Household | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== 'string' ||
+    typeof record.name !== 'string' ||
+    !isHouseholdRole(record.role) ||
+    typeof record.createdAt !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    id: record.id,
+    name: record.name,
+    role: record.role,
+    createdAt: record.createdAt,
+  };
+}
+
+export async function fetchHouseholds(
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<Household[]> {
+  const response = await apiFetch(
+    '/api/households',
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      'UNKNOWN_ERROR',
+      'Could not load your households. Retry.',
+    );
+  }
+  const body = await readJson<{ households?: unknown }>(response);
+  if (!Array.isArray(body.households)) {
+    throw new ApiError({
+      status: response.status,
+      code: 'UNKNOWN_ERROR',
+      message: 'The server returned an unexpected response.',
+    });
+  }
+  const households: Household[] = [];
+  for (const entry of body.households) {
+    const parsed = parseHousehold(entry);
+    if (!parsed) {
+      throw new ApiError({
+        status: response.status,
+        code: 'UNKNOWN_ERROR',
+        message: 'The server returned an unexpected response.',
+      });
+    }
+    households.push(parsed);
+  }
+  return households;
+}
+
+export async function postHousehold(
+  name: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<Household> {
+  const response = await apiFetch(
+    '/api/households',
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify({ name }),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 201) {
+    const body = await readJson<unknown>(response);
+    const parsed = parseHousehold(body);
+    if (!parsed) {
+      throw new ApiError({
+        status: response.status,
+        code: 'UNKNOWN_ERROR',
+        message: 'The server returned an unexpected response.',
+      });
+    }
+    return parsed;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Household creation could not be completed.',
   );
 }

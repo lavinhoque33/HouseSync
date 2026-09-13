@@ -17,6 +17,7 @@ import {
   validateLoginPassword,
   validateNewPassword,
 } from './validation';
+import { HouseholdSection } from '../household/HouseholdSection';
 
 type Phase = 'booting' | 'ready' | 'failed';
 type Mode = 'login' | 'register';
@@ -679,6 +680,38 @@ export function AuthSection() {
     })();
   }
 
+  // Confirmed household-API session expiry. Mirrors the focus-recheck
+  // recovery: drop the stale user and CSRF token, show sign-in-again, and
+  // prepare a fresh anonymous token. The household section unmounts with the
+  // cleared user, discarding its response state. A refresh failure leaves
+  // the token empty and the next sign-in recovers it on demand.
+  function handleHouseholdSessionExpired() {
+    if (unmountedRef.current) return;
+    backgroundGenRef.current += 1;
+    applyUser(null);
+    setLoginPassword('');
+    setRegPassword('');
+    setRegConfirm('');
+    setCsrf(null);
+    setNotice({
+      kind: 'warning',
+      text: 'Your session ended. Sign in again.',
+    });
+    requestAnimationFrame(() => noticeRef.current?.focus());
+    const refreshController = new AbortController();
+    trackController(refreshController);
+    void (async () => {
+      try {
+        const fresh = await fetchCsrf(refreshController.signal);
+        untrackController(refreshController);
+        if (unmountedRef.current) return;
+        setCsrf(fresh);
+      } catch {
+        untrackController(refreshController);
+      }
+    })();
+  }
+
   if (phase === 'booting') {
     return (
       <section className="auth" aria-labelledby="auth-title">
@@ -740,12 +773,13 @@ export function AuthSection() {
             {loggingOut ? 'Signing out…' : 'Sign out'}
           </button>
         </div>
-        <div className="auth-card auth-card--muted">
-          <h3>Household — next</h3>
-          <p>
-            Household creation and invitations are not available yet. There
-            is nothing to manage here yet.
-          </p>
+        <div className="auth-card">
+          <HouseholdSection
+            key={user.id}
+            csrf={csrf}
+            onCsrfRefreshed={setCsrf}
+            onSessionExpired={handleHouseholdSessionExpired}
+          />
         </div>
       </section>
     );

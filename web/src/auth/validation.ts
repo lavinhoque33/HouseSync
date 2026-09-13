@@ -66,4 +66,23 @@ export function validateConfirm(
   return undefined;
 }
 
-export { MAX_EMAIL_LENGTH };
+const MAX_HOUSEHOLD_NAME_CODE_POINTS = 100;
+
+const HOUSEHOLD_CONTROL_PATTERN: RegExp = new RegExp(
+  // eslint-disable-next-line no-control-regex
+  '[\\u0000-\\u001F\\u007F-\\u009F]',
+);
+
+export function validateHouseholdName(raw: string): string | undefined {
+  const value = raw.trim();
+  if (value.length === 0) return 'Enter a household name.';
+  if (countCodePoints(value) > MAX_HOUSEHOLD_NAME_CODE_POINTS) {
+    return 'Household name must be 100 characters or fewer.';
+  }
+  if (HOUSEHOLD_CONTROL_PATTERN.test(value)) {
+    return 'Household name must not contain control characters.';
+  }
+  return undefined;
+}
+
+export { MAX_EMAIL_LENGTH, MAX_HOUSEHOLD_NAME_CODE_POINTS };
