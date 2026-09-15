@@ -5,7 +5,7 @@ import {
   screen,
   waitFor,
 } from '@testing-library/react';
-import { StrictMode } from 'react';
+import { StrictMode, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { AuthSection } from '../auth/AuthSection';
 import { HouseholdSection } from './HouseholdSection';
@@ -29,6 +29,16 @@ const HOUSEHOLD_2 = {
   name: 'Lake cabin',
   role: 'MEMBER',
   createdAt: '2026-09-13T02:30:00Z',
+};
+const USER_MEMBER = {
+  userId: USER.id,
+  email: USER.email,
+  role: 'OWNER' as const,
+};
+const OTHER_MEMBER = {
+  userId: '22222222-3333-4444-8555-666666666666',
+  email: 'member@example.test',
+  role: 'MEMBER' as const,
 };
 
 function jsonResponse(body: unknown, status = 200, headers?: HeadersInit) {
@@ -63,6 +73,17 @@ interface RouteHandlers {
   logout?: () => Response | Promise<Response>;
   householdsGet?: () => Response | Promise<Response>;
   householdsPost?: (body?: unknown) => Response | Promise<Response>;
+  membersGet?: (householdId?: string) => Response | Promise<Response>;
+  membersPatch?: (
+    householdId?: string,
+    userId?: string,
+    body?: unknown,
+  ) => Response | Promise<Response>;
+  membersDelete?: (
+    householdId?: string,
+    userId?: string,
+  ) => Response | Promise<Response>;
+  leavePost?: (householdId?: string) => Response | Promise<Response>;
   invitationsGet?: (householdId?: string) => Response | Promise<Response>;
   invitationsPost?: (householdId?: string) => Response | Promise<Response>;
   invitationsDelete?: (
@@ -126,6 +147,36 @@ function stubFetch(routes: RouteHandlers) {
           }
           return routes.invitationsDelete(householdId, invitationId);
         }
+      }
+      const membersMatch =
+        /^\/api\/households\/([^/]+)\/members(?:\/([^/]+))?$/.exec(url);
+      if (membersMatch) {
+        const householdId = decodeURIComponent(membersMatch[1] ?? '');
+        const userId =
+          membersMatch[2] === undefined
+            ? undefined
+            : decodeURIComponent(membersMatch[2] ?? '');
+        if ((init?.method ?? 'GET') === 'GET' && userId === undefined) {
+          return (
+            routes.membersGet?.(householdId) ?? jsonResponse({ members: [] })
+          );
+        }
+        if (init?.method === 'PATCH' && userId !== undefined) {
+          if (!routes.membersPatch) throw new Error('unexpected PATCH member');
+          const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+          return routes.membersPatch(householdId, userId, body);
+        }
+        if (init?.method === 'DELETE' && userId !== undefined) {
+          if (!routes.membersDelete) {
+            throw new Error('unexpected DELETE member');
+          }
+          return routes.membersDelete(householdId, userId);
+        }
+      }
+      const leaveMatch = /^\/api\/households\/([^/]+)\/leave$/.exec(url);
+      if (leaveMatch && init?.method === 'POST') {
+        if (!routes.leavePost) throw new Error('unexpected POST leave');
+        return routes.leavePost(decodeURIComponent(leaveMatch[1] ?? ''));
       }
       throw new Error(`unexpected fetch ${url} ${init?.method ?? ''}`);
     },
@@ -868,6 +919,9 @@ describe('refresh signal queuing', () => {
           if (!routes.post) throw new Error('unexpected POST');
           return routes.post();
         }
+        if (/\/members$/.test(url)) {
+          return jsonResponse({ members: [] });
+        }
         if (url.startsWith('/api/households/')) {
           return jsonResponse({ invitations: [] });
         }
@@ -881,6 +935,7 @@ describe('refresh signal queuing', () => {
         onSessionExpired={() => {}}
         refreshSignal={refreshSignal}
         onRefreshSettled={onRefreshSettled}
+        currentUserId={USER.id}
       />,
     );
     const householdGets = () =>
@@ -924,6 +979,7 @@ describe('refresh signal queuing', () => {
         onSessionExpired={() => {}}
         refreshSignal={1}
         onRefreshSettled={settled}
+        currentUserId={USER.id}
       />,
     );
     await act(async () => {});
@@ -958,6 +1014,7 @@ describe('refresh signal queuing', () => {
         onSessionExpired={() => {}}
         refreshSignal={signal}
         onRefreshSettled={settled}
+        currentUserId={USER.id}
       />
     );
     const { rerender, householdGets } = renderSection(
@@ -1036,5 +1093,223 @@ describe('invitation access recovery', () => {
       screen.queryByRole('button', { name: 'Create invitation' }),
     ).not.toBeInTheDocument();
     expect(householdGets).toBe(2);
+  });
+});
+
+describe('membership roster identity', () => {
+  it('marks the signed-in user and offers no self-target owner controls', async () => {
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+      membersGet: (householdId) =>
+        householdId === HOUSEHOLD_1.id
+          ? jsonResponse({ members: [USER_MEMBER, OTHER_MEMBER] })
+          : jsonResponse({ members: [] }),
+    });
+    render(<AuthSection />);
+    // AuthSection supplies the actual signed-in user ID: the actor's row is
+    // marked and offers no mutation controls for themself.
+    expect(
+      await screen.findByText('person@example.test (you)'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('member@example.test')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: 'Make member@example.test an owner of Elm Street home',
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', {
+        name: 'Remove member@example.test from Elm Street home',
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', {
+        name: 'Make person@example.test an owner of Elm Street home',
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole('button', {
+        name: 'Remove person@example.test from Elm Street home',
+      }),
+    ).toBeNull();
+  });
+});
+
+describe('membership reconciliation wiring', () => {
+  function ReconcileHarness({ settled }: { settled: (value: number) => void }) {
+    // Mirrors the AuthSection wiring: the membership reconcile callback
+    // bumps the queued refresh signal and reports each settled reload.
+    const [signal, setSignal] = useState(0);
+    return (
+      <HouseholdSection
+        csrf={CSRF}
+        onCsrfRefreshed={() => {}}
+        onSessionExpired={() => {}}
+        refreshSignal={signal}
+        onRefreshSettled={settled}
+        currentUserId={USER.id}
+        onHouseholdReconcile={() => setSignal((version) => version + 1)}
+      />
+    );
+  }
+
+  function memberCalls(
+    calls: Array<{ url: string; init?: RequestInit | undefined }>,
+    method?: string,
+  ) {
+    return calls.filter(
+      ({ url, init }) =>
+        url.includes('/members') &&
+        (method === undefined || (init?.method ?? 'GET') === method),
+    );
+  }
+
+  it('reconciles a membership write through the queued household refresh signal', async () => {
+    let removed = false;
+    const settledSignals: number[] = [];
+    const { calls } = stubFetch({
+      csrf: csrfOk,
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+      membersGet: (householdId) =>
+        householdId === HOUSEHOLD_1.id
+          ? jsonResponse({
+              members: removed ? [USER_MEMBER] : [USER_MEMBER, OTHER_MEMBER],
+            })
+          : jsonResponse({ members: [] }),
+      membersDelete: () => {
+        removed = true;
+        return new Response(null, { status: 204 });
+      },
+    });
+    render(
+      <ReconcileHarness settled={(value) => settledSignals.push(value)} />,
+    );
+    await screen.findByRole('button', {
+      name: 'Remove member@example.test from Elm Street home',
+    });
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Remove member@example.test from Elm Street home',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove member' }));
+    expect(
+      await screen.findByText(/was removed from the household/),
+    ).toBeInTheDocument();
+    // The membership reconcile callback drove an authoritative collection
+    // reload through the queued signal, and that reload settled and was
+    // reported.
+    await waitFor(() => expect(settledSignals).toEqual([1]));
+    expect(householdCalls(calls, 'GET')).toHaveLength(2);
+    expect(memberCalls(calls, 'GET')).toHaveLength(2);
+  });
+
+  it('queues the membership reconcile while the household collection is busy', async () => {
+    const settledSignals: number[] = [];
+    let householdsGets = 0;
+    let resolveCreate!: (response: Response) => void;
+    const createGate = new Promise<Response>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const { calls } = stubFetch({
+      csrf: csrfOk,
+      householdsGet: () => {
+        householdsGets += 1;
+        return householdsGets === 1
+          ? householdsOk([HOUSEHOLD_1])
+          : householdsOk([HOUSEHOLD_1, HOUSEHOLD_2]);
+      },
+      householdsPost: () => createGate,
+      membersGet: (householdId) =>
+        householdId === HOUSEHOLD_1.id
+          ? jsonResponse({ members: [USER_MEMBER, OTHER_MEMBER] })
+          : jsonResponse({ members: [USER_MEMBER] }),
+      membersDelete: () => new Response(null, { status: 204 }),
+    });
+    render(
+      <ReconcileHarness settled={(value) => settledSignals.push(value)} />,
+    );
+    await screen.findByRole('button', {
+      name: 'Remove member@example.test from Elm Street home',
+    });
+    // A creation is in flight, so the collection is busy.
+    typeInto('Household name', 'Lake cabin');
+    fireEvent.click(screen.getByRole('button', { name: 'Create household' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Creating…' })).toBeDisabled(),
+    );
+    // The membership write starts and settles while the collection is busy.
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Remove member@example.test from Elm Street home',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove member' }));
+    expect(
+      await screen.findByText(/was removed from the household/),
+    ).toBeInTheDocument();
+    await act(async () => {});
+    // The reconcile bump entered the queue instead of being dropped.
+    expect(householdCalls(calls, 'GET')).toHaveLength(1);
+    expect(settledSignals).toHaveLength(0);
+    resolveCreate(jsonResponse(HOUSEHOLD_2, 201));
+    expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
+    // The queued signal drains into a second collection fetch that settles.
+    await waitFor(() => expect(settledSignals).toEqual([1]));
+    expect(householdCalls(calls, 'GET')).toHaveLength(2);
+  });
+
+  it('queues the invitation access reconcile while the household collection is busy', async () => {
+    const settledSignals: number[] = [];
+    let householdsGets = 0;
+    let resolveCreate!: (response: Response) => void;
+    const createGate = new Promise<Response>((resolve) => {
+      resolveCreate = resolve;
+    });
+    const { calls } = stubFetch({
+      csrf: csrfOk,
+      householdsGet: () => {
+        householdsGets += 1;
+        return householdsGets === 1
+          ? householdsOk([HOUSEHOLD_1])
+          : householdsOk([HOUSEHOLD_1, HOUSEHOLD_2]);
+      },
+      householdsPost: () => createGate,
+      invitationsPost: () =>
+        jsonResponse(
+          {
+            code: 'FORBIDDEN',
+            message: 'Only owners may invite.',
+            correlationId: 'corr-role',
+          },
+          403,
+        ),
+    });
+    render(
+      <ReconcileHarness settled={(value) => settledSignals.push(value)} />,
+    );
+    await screen.findByRole('button', { name: 'Create invitation' });
+    // A creation is in flight, so the collection is busy.
+    typeInto('Household name', 'Lake cabin');
+    fireEvent.click(screen.getByRole('button', { name: 'Create household' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Creating…' })).toBeDisabled(),
+    );
+    // The owner invitation write reports changed access while busy.
+    fireEvent.click(screen.getByRole('button', { name: 'Create invitation' }));
+    expect(
+      await screen.findByText(/access to this household may have changed/i),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Refresh household list' }),
+    );
+    await act(async () => {});
+    // The invitation reconcile entered the queue instead of being dropped.
+    expect(householdCalls(calls, 'GET')).toHaveLength(1);
+    resolveCreate(jsonResponse(HOUSEHOLD_2, 201));
+    expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
+    await waitFor(() => expect(householdCalls(calls, 'GET')).toHaveLength(2));
   });
 });

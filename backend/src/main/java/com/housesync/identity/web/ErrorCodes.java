@@ -11,6 +11,8 @@ public final class ErrorCodes {
   public static final String REGISTRATION_CONFLICT = "REGISTRATION_CONFLICT";
   public static final String RATE_LIMITED = "RATE_LIMITED";
   public static final String HOUSEHOLD_NOT_FOUND = "HOUSEHOLD_NOT_FOUND";
+  public static final String MEMBERSHIP_NOT_FOUND = "MEMBERSHIP_NOT_FOUND";
+  public static final String LAST_OWNER_REQUIRED = "LAST_OWNER_REQUIRED";
   public static final String INVITATION_NOT_FOUND = "INVITATION_NOT_FOUND";
   public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 

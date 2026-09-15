@@ -4,6 +4,10 @@ import com.housesync.household.invitation.web.InvitationExceptions.InvitationFor
 import com.housesync.household.invitation.web.InvitationExceptions.InvitationNotFoundException;
 import com.housesync.household.invitation.web.InvitationExceptions.InvitationServiceException;
 import com.housesync.household.web.HouseholdExceptions.HouseholdNotFoundException;
+import com.housesync.household.web.HouseholdExceptions.LastOwnerRequiredException;
+import com.housesync.household.web.HouseholdExceptions.MembershipForbiddenException;
+import com.housesync.household.web.HouseholdExceptions.MembershipNotFoundException;
+import com.housesync.household.web.HouseholdExceptions.MembershipSelfTargetException;
 import com.housesync.identity.web.ApiError;
 import com.housesync.identity.web.CorrelationIds;
 import com.housesync.identity.web.ErrorCodes;
@@ -68,6 +72,77 @@ public class HouseholdExceptionHandler {
         .body(
             ApiError.of(
                 ErrorCodes.VALIDATION_FAILED, "Check the supplied details.", correlationId));
+  }
+
+  /**
+   * A missing target membership and a target outside the household share one generic 404. The body
+   * never contains the requested user ID, email, or name.
+   */
+  @ExceptionHandler(MembershipNotFoundException.class)
+  public ResponseEntity<ApiError> membershipNotFound(MembershipNotFoundException failure) {
+    String correlationId = CorrelationIds.newId();
+    log.warn(
+        "event=household.request_failed code={} correlationId={}",
+        ErrorCodes.MEMBERSHIP_NOT_FOUND,
+        correlationId);
+    return ResponseEntity.status(HttpStatus.NOT_FOUND)
+        .cacheControl(CacheControl.noStore())
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(
+            ApiError.of(
+                ErrorCodes.MEMBERSHIP_NOT_FOUND, "Membership was not found.", correlationId));
+  }
+
+  /** A current non-owner member lacks authority over another membership. */
+  @ExceptionHandler(MembershipForbiddenException.class)
+  public ResponseEntity<ApiError> membershipForbidden(MembershipForbiddenException failure) {
+    String correlationId = CorrelationIds.newId();
+    log.warn(
+        "event=household.request_failed code={} correlationId={}",
+        ErrorCodes.FORBIDDEN,
+        correlationId);
+    return ResponseEntity.status(HttpStatus.FORBIDDEN)
+        .cacheControl(CacheControl.noStore())
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(ApiError.of(ErrorCodes.FORBIDDEN, "Access is denied.", correlationId));
+  }
+
+  /**
+   * Owner self-target mutations are a safe 400 with the shared validation code and no field errors:
+   * only {@code role} may appear as a lifecycle field error, and self-removal belongs to the leave
+   * operation.
+   */
+  @ExceptionHandler(MembershipSelfTargetException.class)
+  public ResponseEntity<ApiError> membershipSelfTarget(MembershipSelfTargetException failure) {
+    String correlationId = CorrelationIds.newId();
+    log.warn(
+        "event=household.request_failed code={} correlationId={}",
+        ErrorCodes.VALIDATION_FAILED,
+        correlationId);
+    return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+        .cacheControl(CacheControl.noStore())
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(
+            ApiError.of(
+                ErrorCodes.VALIDATION_FAILED, "Check the supplied details.", correlationId));
+  }
+
+  /** The final owner cannot be demoted, removed, or leave the household. */
+  @ExceptionHandler(LastOwnerRequiredException.class)
+  public ResponseEntity<ApiError> lastOwnerRequired(LastOwnerRequiredException failure) {
+    String correlationId = CorrelationIds.newId();
+    log.warn(
+        "event=household.request_failed code={} correlationId={}",
+        ErrorCodes.LAST_OWNER_REQUIRED,
+        correlationId);
+    return ResponseEntity.status(HttpStatus.CONFLICT)
+        .cacheControl(CacheControl.noStore())
+        .contentType(MediaType.APPLICATION_JSON)
+        .body(
+            ApiError.of(
+                ErrorCodes.LAST_OWNER_REQUIRED,
+                "The household must keep an owner.",
+                correlationId));
   }
 
   /**

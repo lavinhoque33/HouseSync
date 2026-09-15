@@ -72,13 +72,14 @@ public class InvitationService {
 
   /**
    * Creates one independent invitation for an owner-authorized household. The raw secret is
-   * returned once and never persisted; only its SHA-256 digest is stored. A digest collision
-   * triggers one server-side regeneration attempt, then a safe failure. Each attempt runs in its
-   * own transaction because PostgreSQL aborts the enclosing transaction on a unique violation, so a
-   * retry inside the same transaction could never succeed.
+   * returned once and never persisted; only its SHA-256 digest is stored. Owner authorization runs
+   * inside the insert transaction under the household lifecycle lock, so a demotion that completes
+   * first denies the stale owner before any row is written. A digest collision triggers one
+   * server-side regeneration attempt, then a safe failure. Each attempt runs in its own transaction
+   * because PostgreSQL aborts the enclosing transaction on a unique violation, so a retry inside
+   * the same transaction could never succeed.
    */
   public InvitationCreatedResponse create(UUID householdId, UUID actorId) {
-    authorizeOwner(householdId, actorId);
     Instant createdAt = microsNow();
     Instant expiresAt = createdAt.plus(INVITATION_TTL);
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -87,18 +88,20 @@ public class InvitationService {
       byte[] digest = InvitationSecrets.sha256(InvitationSecrets.decodeStrict(secret));
       try {
         attempts.executeWithoutResult(
-            status ->
-                jdbc.update(
-                    "INSERT INTO household_invitations"
-                        + " (id, household_id, created_by_user_id, secret_hash, created_at,"
-                        + " expires_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?)",
-                    id,
-                    householdId,
-                    actorId,
-                    digest,
-                    Timestamp.from(createdAt),
-                    Timestamp.from(expiresAt)));
+            status -> {
+              authorizeOwner(householdId, actorId);
+              jdbc.update(
+                  "INSERT INTO household_invitations"
+                      + " (id, household_id, created_by_user_id, secret_hash, created_at,"
+                      + " expires_at)"
+                      + " VALUES (?, ?, ?, ?, ?, ?)",
+                  id,
+                  householdId,
+                  actorId,
+                  digest,
+                  Timestamp.from(createdAt),
+                  Timestamp.from(expiresAt));
+            });
         return new InvitationCreatedResponse(id, secret, createdAt, expiresAt);
       } catch (DuplicateKeyException collision) {
         if (attempt == 1) {
@@ -109,8 +112,12 @@ public class InvitationService {
     throw new InvitationServiceException();
   }
 
-  /** Lists the active invitations of an owner-authorized household, ordered by creation then ID. */
-  @Transactional(readOnly = true)
+  /**
+   * Lists the active invitations of an owner-authorized household, ordered by creation then ID.
+   * Owner authorization takes the household lifecycle lock before reading, so a demotion that
+   * commits first denies the stale owner's list result.
+   */
+  @Transactional
   public List<InvitationSummary> listActive(UUID householdId, UUID actorId) {
     authorizeOwner(householdId, actorId);
     return invitations.findActiveByHousehold(householdId, microsNow()).stream()
@@ -122,9 +129,10 @@ public class InvitationService {
   }
 
   /**
-   * Revokes an active invitation. Revoking an already-revoked row is a successful no-op; accepted,
-   * expired, missing, and wrong-household IDs are the generic invitation 404 after path household
-   * authorization.
+   * Revokes an active invitation. Owner authorization takes the household lifecycle lock before the
+   * invitation row lock, serializing revocation with membership mutations. Revoking an
+   * already-revoked row is a successful no-op; accepted, expired, missing, and wrong-household IDs
+   * are the generic invitation 404 after path household authorization.
    */
   @Transactional
   public void revoke(UUID householdId, UUID invitationId, UUID actorId) {
@@ -227,10 +235,13 @@ public class InvitationService {
   }
 
   /**
-   * Resolves the path household with current membership. Missing and non-member households share
-   * the generic 404; a current non-owner member receives 403.
+   * Resolves the path household under the shared lifecycle household write lock, then current
+   * membership. Missing and non-member households share the generic 404; a current non-owner member
+   * receives 403. The lock serializes owner-authorized invitation writes with membership mutations:
+   * a demotion that completes first denies the stale owner before this write commits.
    */
   private void authorizeOwner(UUID householdId, UUID actorId) {
+    households.findByIdForUpdate(householdId).orElseThrow(HouseholdNotFoundException::new);
     MemberRole role =
         memberships
             .findScopedByHouseholdAndActor(householdId, actorId)

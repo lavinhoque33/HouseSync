@@ -9,6 +9,7 @@ import {
 } from '../auth/client';
 import { validateHouseholdName } from '../auth/validation';
 import { InvitationSection } from '../invitation/InvitationSection';
+import { MembersSection } from './MembersSection';
 
 interface HouseholdNotice {
   kind: 'info' | 'error' | 'warning';
@@ -32,6 +33,14 @@ interface HouseholdSectionProps {
    * reconciliation. Manual and initial loads never report.
    */
   onRefreshSettled?: ((signal: number) => void) | undefined;
+  /** Signed-in account id separating self and other-member controls. */
+  currentUserId: string;
+  /**
+   * Requests an authoritative household-collection reload for membership
+   * writes and stale-access recovery. The parent normally supplies this as
+   * a queued refresh-signal bump; it falls back to a direct refresh.
+   */
+  onHouseholdReconcile?: (() => void) | undefined;
 }
 
 function formatCreatedAt(value: string): string {
@@ -70,6 +79,8 @@ export function HouseholdSection({
   onSessionExpired,
   refreshSignal = 0,
   onRefreshSettled,
+  currentUserId,
+  onHouseholdReconcile,
 }: HouseholdSectionProps) {
   const [households, setHouseholds] = useState<Household[] | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -469,13 +480,23 @@ export function HouseholdSection({
                   {formatCreatedAt(household.createdAt)}
                 </time>
               </p>
+              <MembersSection
+                household={household}
+                currentUserId={currentUserId}
+                csrf={csrf}
+                onCsrfRefreshed={onCsrfRefreshed}
+                onSessionExpired={onSessionExpired}
+                onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+              />
               {household.role === 'OWNER' && (
                 <InvitationSection
                   household={household}
                   csrf={csrf}
                   onCsrfRefreshed={onCsrfRefreshed}
                   onSessionExpired={onSessionExpired}
-                  onHouseholdAccessChanged={handleRefresh}
+                  onHouseholdAccessChanged={
+                    onHouseholdReconcile ?? handleRefresh
+                  }
                 />
               )}
             </li>

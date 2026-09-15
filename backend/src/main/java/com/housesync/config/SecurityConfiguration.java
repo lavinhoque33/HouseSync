@@ -18,9 +18,12 @@ import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler
  * Session-based security. Health probes and the CSRF bootstrap stay public; registration and
  * login accept anonymous JSON posts guarded by CSRF; {@code /me} needs an authenticated session;
  * logout runs the standard handlers for authenticated and anonymous callers alike. The household
- * routes permit exactly {@code POST /api/households}, {@code GET /api/households}, and {@code GET
- * /api/households/{householdId}} for authenticated users. The invitation routes permit exactly
- * {@code POST} and {@code GET /api/households/{householdId}/invitations}, {@code DELETE
+ * routes permit exactly {@code POST /api/households}, {@code GET /api/households}, {@code GET
+ * /api/households/{householdId}}, {@code GET /api/households/{householdId}/members}, {@code PATCH
+ * /api/households/{householdId}/members/{userId}}, {@code DELETE
+ * /api/households/{householdId}/members/{userId}}, and {@code POST
+ * /api/households/{householdId}/leave} for authenticated users. Invitations permit
+ * exactly {@code POST} and {@code GET /api/households/{householdId}/invitations}, {@code DELETE
  * /api/households/{householdId}/invitations/{invitationId}}, and {@code POST
  * /api/invitations/preview} plus {@code POST /api/invitations/accept} for authenticated users.
  * Every other route stays denied (401 anonymous / 403 authenticated). No CORS allowances, no
@@ -60,6 +63,14 @@ public class SecurityConfiguration {
                     .requestMatchers(HttpMethod.POST, "/api/households")
                     .authenticated()
                     .requestMatchers(HttpMethod.GET, "/api/households", "/api/households/*")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.GET, "/api/households/*/members")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.PATCH, "/api/households/*/members/*")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.DELETE, "/api/households/*/members/*")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.POST, "/api/households/*/leave")
                     .authenticated()
                     .requestMatchers(
                         HttpMethod.POST,

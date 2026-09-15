@@ -871,6 +871,10 @@ export function AuthSection({
             onSessionExpired={handleHouseholdSessionExpired}
             refreshSignal={householdsVersion}
             onRefreshSettled={setHouseholdsSettled}
+            currentUserId={user.id}
+            onHouseholdReconcile={() =>
+              setHouseholdsVersion((version) => version + 1)
+            }
           />
         </div>
       </section>

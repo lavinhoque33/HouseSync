@@ -14,4 +14,28 @@ public final class HouseholdExceptions {
       super("Household not found.");
     }
   }
+
+  public static final class MembershipNotFoundException extends RuntimeException {
+    public MembershipNotFoundException() {
+      super("Membership not found.");
+    }
+  }
+
+  public static final class MembershipForbiddenException extends RuntimeException {
+    public MembershipForbiddenException() {
+      super("Owner access is required.");
+    }
+  }
+
+  public static final class MembershipSelfTargetException extends RuntimeException {
+    public MembershipSelfTargetException() {
+      super("Use the leave operation for your own membership.");
+    }
+  }
+
+  public static final class LastOwnerRequiredException extends RuntimeException {
+    public LastOwnerRequiredException() {
+      super("The household must keep an owner.");
+    }
+  }
 }

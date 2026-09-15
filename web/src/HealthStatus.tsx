@@ -63,8 +63,12 @@ export function HealthStatus() {
     };
   }, []);
 
+  // A generic wrapper, not an <aside>: inside <main> a complementary
+  // landmark would violate the top-level landmark requirement. A role-less
+  // generic container must not carry aria-labelledby, so the panel is
+  // navigable through its heading and the status region below.
   return (
-    <aside className="health" aria-labelledby="health-title">
+    <div className="health">
       <h3 id="health-title">Service connection</h3>
       <div role="status" aria-live="polite" aria-atomic="true">
         <p className="health-label">
@@ -81,6 +85,6 @@ export function HealthStatus() {
         <br />
         Checked on page load, with a five-second timeout.
       </p>
-    </aside>
+    </div>
   );
 }

@@ -2,11 +2,18 @@ package com.housesync.household.application;
 
 import com.housesync.household.domain.HouseholdNamePolicy;
 import com.housesync.household.domain.MemberRole;
+import com.housesync.household.domain.MemberRolePolicy;
 import com.housesync.household.persistence.HouseholdEntity;
 import com.housesync.household.persistence.HouseholdMemberEntity;
+import com.housesync.household.persistence.HouseholdMemberId;
 import com.housesync.household.persistence.HouseholdMemberRepository;
 import com.housesync.household.persistence.HouseholdRepository;
 import com.housesync.household.web.HouseholdExceptions.HouseholdNotFoundException;
+import com.housesync.household.web.HouseholdExceptions.LastOwnerRequiredException;
+import com.housesync.household.web.HouseholdExceptions.MembershipForbiddenException;
+import com.housesync.household.web.HouseholdExceptions.MembershipNotFoundException;
+import com.housesync.household.web.HouseholdExceptions.MembershipSelfTargetException;
+import com.housesync.household.web.HouseholdMemberResponse;
 import com.housesync.household.web.HouseholdResponse;
 import com.housesync.identity.web.IdentityExceptions;
 import java.time.Clock;
@@ -19,13 +26,18 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Household create/access use cases.
+ * Household create/access and membership lifecycle use cases.
  *
  * <p>The actor always comes from the authenticated {@code HouseSyncUserDetails} UUID supplied by
  * the controller; request bodies never assign ownership. Creation inserts the household and its
  * creator {@code OWNER} membership in one transaction so no household can exist without its owner
  * row. Reads resolve the household and the caller's current role together in one membership-scoped
  * database query on every request.
+ *
+ * <p>Every membership mutation locks the household row for update before resolving actor and target
+ * roles, so role changes, removal, and leave serialize per household and concurrent mutations can
+ * never remove the final owner. Owner-authorized invitation writes take the same lock, so a stale
+ * owner cannot commit an invitation write after a completed demotion.
  */
 @Service
 public class HouseholdService {
@@ -77,9 +89,111 @@ public class HouseholdService {
         .orElseThrow(HouseholdNotFoundException::new);
   }
 
+  /** Returns the minimal roster only while the actor is a current member. */
+  @Transactional(readOnly = true)
+  public List<HouseholdMemberResponse> listMembers(UUID householdId, UUID actorId) {
+    List<HouseholdMemberView> roster = memberships.findRosterScopedForActor(householdId, actorId);
+    if (roster.isEmpty()) {
+      throw new HouseholdNotFoundException();
+    }
+    return roster.stream().map(HouseholdService::toMemberResponse).toList();
+  }
+
+  /**
+   * Changes another member's role under the household's lifecycle lock. The requested role is
+   * validated against the strict policy before the lock resolves target state; assigning the
+   * current role is idempotent.
+   */
+  @Transactional
+  public HouseholdMemberResponse updateMemberRole(
+      UUID householdId, UUID targetUserId, String rawRole, UUID actorId) {
+    MemberRolePolicy.violation(rawRole)
+        .ifPresent(
+            message -> {
+              throw new IdentityExceptions.ValidationFailedException(Map.of("role", message));
+            });
+    MemberRole requestedRole = MemberRole.valueOf(rawRole);
+    HouseholdMemberEntity actor = lockAndRequireMembership(householdId, actorId);
+    requireOwner(actor);
+    requireOtherActor(targetUserId, actorId);
+    HouseholdMemberEntity target = requireMembership(householdId, targetUserId);
+    if (target.getRole() == requestedRole) {
+      return memberResponse(householdId, targetUserId);
+    }
+    if (target.getRole() == MemberRole.OWNER
+        && requestedRole == MemberRole.MEMBER
+        && memberships.countByHouseholdIdAndRole(householdId, MemberRole.OWNER) == 1) {
+      throw new LastOwnerRequiredException();
+    }
+    target.setRole(requestedRole);
+    memberships.save(target);
+    return memberResponse(householdId, targetUserId);
+  }
+
+  /** Removes another current member under the household's lifecycle lock. */
+  @Transactional
+  public void removeMember(UUID householdId, UUID targetUserId, UUID actorId) {
+    HouseholdMemberEntity actor = lockAndRequireMembership(householdId, actorId);
+    requireOwner(actor);
+    requireOtherActor(targetUserId, actorId);
+    HouseholdMemberEntity target = requireMembership(householdId, targetUserId);
+    if (target.getRole() == MemberRole.OWNER
+        && memberships.countByHouseholdIdAndRole(householdId, MemberRole.OWNER) == 1) {
+      throw new LastOwnerRequiredException();
+    }
+    memberships.delete(target);
+  }
+
+  /** Removes the actor's own membership unless it is the household's final owner. */
+  @Transactional
+  public void leave(UUID householdId, UUID actorId) {
+    HouseholdMemberEntity actor = lockAndRequireMembership(householdId, actorId);
+    if (actor.getRole() == MemberRole.OWNER
+        && memberships.countByHouseholdIdAndRole(householdId, MemberRole.OWNER) == 1) {
+      throw new LastOwnerRequiredException();
+    }
+    memberships.delete(actor);
+  }
+
   /** Membership-scoped view to the authorized household DTO. Shared with invitations. */
   public static HouseholdResponse toResponse(HouseholdMembershipView view) {
     return new HouseholdResponse(
         view.householdId(), view.name(), view.role().name(), view.createdAt());
+  }
+
+  private HouseholdMemberEntity lockAndRequireMembership(UUID householdId, UUID actorId) {
+    households.findByIdForUpdate(householdId).orElseThrow(HouseholdNotFoundException::new);
+    return memberships
+        .findById(new HouseholdMemberId(householdId, actorId))
+        .orElseThrow(HouseholdNotFoundException::new);
+  }
+
+  private HouseholdMemberEntity requireMembership(UUID householdId, UUID userId) {
+    return memberships
+        .findById(new HouseholdMemberId(householdId, userId))
+        .orElseThrow(MembershipNotFoundException::new);
+  }
+
+  private static void requireOwner(HouseholdMemberEntity actor) {
+    if (actor.getRole() != MemberRole.OWNER) {
+      throw new MembershipForbiddenException();
+    }
+  }
+
+  private static void requireOtherActor(UUID targetUserId, UUID actorId) {
+    if (targetUserId.equals(actorId)) {
+      throw new MembershipSelfTargetException();
+    }
+  }
+
+  private HouseholdMemberResponse memberResponse(UUID householdId, UUID userId) {
+    return memberships
+        .findMemberView(householdId, userId)
+        .map(HouseholdService::toMemberResponse)
+        .orElseThrow(MembershipNotFoundException::new);
+  }
+
+  private static HouseholdMemberResponse toMemberResponse(HouseholdMemberView member) {
+    return new HouseholdMemberResponse(member.userId(), member.email(), member.role().name());
   }
 }

@@ -50,4 +50,8 @@ public class HouseholdMemberEntity {
   public MemberRole getRole() {
     return role;
   }
+
+  public void setRole(MemberRole role) {
+    this.role = role;
+  }
 }

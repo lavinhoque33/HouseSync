@@ -61,6 +61,16 @@ describe('backend health', () => {
     expect(
       screen.getByText(/financial features are still ahead/),
     ).toBeInTheDocument();
+    // The health panel is a generic block, not a complementary landmark:
+    // inside <main> an <aside> would violate the top-level landmark rule.
+    expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
+    // A role-less generic container cannot carry aria-labelledby; the
+    // heading and the live status region keep the panel navigable.
+    const healthPanel = screen
+      .getByRole('heading', { level: 3, name: 'Service connection' })
+      .closest('.health');
+    expect(healthPanel).not.toHaveAttribute('aria-labelledby');
+    expect(screen.getByRole('status')).toBeInTheDocument();
   });
 
   it('times out a stalled request and ignores a late success', async () => {

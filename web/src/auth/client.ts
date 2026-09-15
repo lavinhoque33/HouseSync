@@ -22,6 +22,8 @@ export type ApiErrorCode =
   | 'RATE_LIMITED'
   | 'HOUSEHOLD_NOT_FOUND'
   | 'INVITATION_NOT_FOUND'
+  | 'MEMBERSHIP_NOT_FOUND'
+  | 'LAST_OWNER_REQUIRED'
   | 'INTERNAL_ERROR'
   | 'NETWORK_ERROR'
   | 'UNKNOWN_ERROR';
@@ -73,6 +75,8 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'RATE_LIMITED',
     'HOUSEHOLD_NOT_FOUND',
     'INVITATION_NOT_FOUND',
+    'MEMBERSHIP_NOT_FOUND',
+    'LAST_OWNER_REQUIRED',
     'INTERNAL_ERROR',
   ];
   return codes.includes(value as ApiErrorCode)
@@ -93,7 +97,8 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
         key === 'confirmPassword' ||
         key === 'name' ||
         key === 'invitationId' ||
-        key === 'secret') &&
+        key === 'secret' ||
+        key === 'role') &&
       typeof message === 'string'
     ) {
       result[key] = message;
@@ -640,6 +645,198 @@ export async function postHousehold(
     response,
     response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
     'Household creation could not be completed.',
+  );
+}
+
+export interface HouseholdMember {
+  userId: string;
+  email: string;
+  role: HouseholdRole;
+}
+
+function parseHouseholdMember(value: unknown): HouseholdMember | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.userId !== 'string' ||
+    record.userId.length === 0 ||
+    typeof record.email !== 'string' ||
+    record.email.length === 0 ||
+    !isHouseholdRole(record.role)
+  ) {
+    return undefined;
+  }
+  return { userId: record.userId, email: record.email, role: record.role };
+}
+
+function memberPath(householdId: string, userId?: string): string {
+  return userId === undefined
+    ? `/api/households/${encodeURIComponent(householdId)}/members`
+    : `/api/households/${encodeURIComponent(householdId)}/members/${encodeURIComponent(userId)}`;
+}
+
+function parseMemberList(
+  response: BodySource,
+  body: { members?: unknown },
+): HouseholdMember[] {
+  if (!Array.isArray(body.members)) {
+    throw unexpectedLifecycleResponse(response.status);
+  }
+  const members: HouseholdMember[] = [];
+  for (const entry of body.members) {
+    const parsed = parseHouseholdMember(entry);
+    if (!parsed) throw unexpectedLifecycleResponse(response.status);
+    members.push(parsed);
+  }
+  return members;
+}
+
+function unexpectedLifecycleResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message: 'The server returned an unexpected response.',
+  });
+}
+
+export async function fetchHouseholdMembers(
+  householdId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<HouseholdMember[]> {
+  const response = await apiFetch(
+    memberPath(householdId),
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      'UNKNOWN_ERROR',
+      'Could not load members. Retry.',
+    );
+  }
+  const body = await readJson<{ members?: unknown }>(response);
+  return parseMemberList(response, body);
+}
+
+export async function patchHouseholdMemberRole(
+  householdId: string,
+  userId: string,
+  role: HouseholdRole,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<HouseholdMember> {
+  const response = await apiFetch(
+    memberPath(householdId, userId),
+    {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify({ role }),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const body = await readJson<unknown>(response);
+    const parsed = parseHouseholdMember(body);
+    if (!parsed) throw unexpectedLifecycleResponse(response.status);
+    return parsed;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'The role change could not be completed.',
+  );
+}
+
+export async function deleteHouseholdMember(
+  householdId: string,
+  userId: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<void> {
+  const response = await apiFetch(
+    memberPath(householdId, userId),
+    {
+      method: 'DELETE',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  // A bodyless 204 is the only success; nothing about the removed member
+  // is carried in the response.
+  if (response.status === 204) return;
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Member removal could not be completed.',
+  );
+}
+
+export async function postLeaveHousehold(
+  householdId: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<void> {
+  const response = await apiFetch(
+    `/api/households/${encodeURIComponent(householdId)}/leave`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 204) return;
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    'UNKNOWN_ERROR',
+    'Leaving the household could not be completed.',
   );
 }
 

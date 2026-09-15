@@ -754,6 +754,87 @@ code {
   overflow-wrap: break-word;
 }
 
+.members {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-line);
+}
+
+.members > * {
+  min-width: 0;
+}
+
+.members-title {
+  font-size: 1rem;
+  color: var(--color-ink);
+  margin: 0;
+}
+
+.members-status {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  overflow-wrap: break-word;
+}
+
+.members-stale {
+  font-size: 0.85rem;
+  color: #7a3d12;
+  font-weight: 600;
+  overflow-wrap: break-word;
+}
+
+.members-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.member-card {
+  padding: var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 1rem;
+  background: var(--color-soft);
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.member-email {
+  font-weight: 650;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.member-role {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+  overflow-wrap: break-word;
+}
+
+.member-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.member-actions > * {
+  flex: 1 1 10rem;
+}
+
+.members-confirm {
+  gap: 0.5rem;
+}
+
+.members-confirm > * {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
 .join-card {
   padding: var(--space-2);
   border: 1px solid var(--color-line);
@@ -778,6 +859,7 @@ code {
   .auth-card,
   .household-card,
   .household-notice,
+  .members-confirm,
   .invite-card,
   .invite-notice,
   .join-notice,

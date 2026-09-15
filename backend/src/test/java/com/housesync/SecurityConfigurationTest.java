@@ -1,12 +1,16 @@
 package com.housesync;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -16,6 +20,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.housesync.household.application.HouseholdService;
 import com.housesync.household.invitation.application.InvitationService;
 import com.housesync.household.invitation.web.InvitationExceptions.InvitationServiceException;
+import com.housesync.household.web.HouseholdMemberResponse;
 import com.housesync.household.web.HouseholdResponse;
 import com.housesync.identity.application.HouseSyncUserDetails;
 import com.housesync.identity.application.HouseSyncUserDetailsService;
@@ -83,6 +88,10 @@ class SecurityConfigurationTest {
     "POST, /api/households",
     "GET, /api/households",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/members",
+    "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/members/123e4567-e89b-12d3-a456-426614174001",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/members/123e4567-e89b-12d3-a456-426614174001",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/leave",
     "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/invitations",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/invitations",
     "DELETE,"
@@ -122,6 +131,16 @@ class SecurityConfigurationTest {
     "POST, /api/households/123e4567-e89b-12d3-a456-426614174000",
     "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000",
     "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/members",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/members",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/members/123e4567-e89b-12d3-a456-426614174001",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/members/123e4567-e89b-12d3-a456-426614174001",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/members/123e4567-e89b-12d3-a456-426614174001",
+    "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/members",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/members",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/leave",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/leave",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/leave",
     "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/invitations",
     "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/invitations",
     "POST,"
@@ -208,6 +227,51 @@ class SecurityConfigurationTest {
             header().string("Cache-Control", org.hamcrest.Matchers.containsString("no-store")))
         .andExpect(jsonPath("$.id").value(householdId.toString()))
         .andExpect(jsonPath("$.role").value("OWNER"));
+  }
+
+  @Test
+  void authenticatedLifecycleRoutesUseMembershipScopedService() throws Exception {
+    UUID actorId = UUID.randomUUID();
+    UUID householdId = UUID.randomUUID();
+    UUID targetId = UUID.randomUUID();
+    HouseholdMemberResponse member =
+        new HouseholdMemberResponse(targetId, "person@example.test", "MEMBER");
+    when(households.listMembers(eq(householdId), eq(actorId))).thenReturn(List.of(member));
+    when(households.updateMemberRole(eq(householdId), eq(targetId), eq("MEMBER"), eq(actorId)))
+        .thenReturn(member);
+
+    mvc.perform(get("/api/households/" + householdId + "/members").with(signedInAs(actorId)))
+        .andExpect(status().isOk())
+        .andExpect(header().string("Cache-Control", containsString("no-store")))
+        .andExpect(jsonPath("$.members[0].userId").value(targetId.toString()))
+        .andExpect(jsonPath("$.members[0].email").value("person@example.test"))
+        .andExpect(jsonPath("$.members[0].role").value("MEMBER"));
+
+    mvc.perform(
+            patch("/api/households/" + householdId + "/members/" + targetId)
+                .with(signedInAs(actorId))
+                .with(csrf())
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"role\":\"MEMBER\"}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.role").value("MEMBER"));
+
+    mvc.perform(
+            delete("/api/households/" + householdId + "/members/" + targetId)
+                .with(signedInAs(actorId))
+                .with(csrf()))
+        .andExpect(status().isNoContent())
+        .andExpect(header().string("Cache-Control", containsString("no-store")));
+
+    mvc.perform(
+            post("/api/households/" + householdId + "/leave")
+                .with(signedInAs(actorId))
+                .with(csrf()))
+        .andExpect(status().isNoContent())
+        .andExpect(header().string("Cache-Control", containsString("no-store")));
+
+    verify(households).removeMember(householdId, targetId, actorId);
+    verify(households).leave(householdId, actorId);
   }
 
   @Test
