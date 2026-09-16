@@ -8,6 +8,10 @@
     "npm": ">=10.9.2 <11"
   },
   "packageManager": "npm@10.9.2",
+  "volta": {
+    "node": "22.14.0",
+    "npm": "10.9.2"
+  },
   "scripts": {
     "dev": "vite",
     "lint": "eslint . --max-warnings 0",
