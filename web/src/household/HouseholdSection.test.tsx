@@ -90,6 +90,7 @@ interface RouteHandlers {
     householdId?: string,
     invitationId?: string,
   ) => Response | Promise<Response>;
+  financialAccountsGet?: (householdId?: string) => Response | Promise<Response>;
 }
 
 function stubFetch(routes: RouteHandlers) {
@@ -177,6 +178,16 @@ function stubFetch(routes: RouteHandlers) {
       if (leaveMatch && init?.method === 'POST') {
         if (!routes.leavePost) throw new Error('unexpected POST leave');
         return routes.leavePost(decodeURIComponent(leaveMatch[1] ?? ''));
+      }
+      const financeMatch =
+        /^\/api\/households\/([^/]+)\/financial-accounts/.exec(url);
+      if (financeMatch) {
+        return (
+          routes.financialAccountsGet?.(
+            decodeURIComponent(financeMatch[1] ?? ''),
+          ) ??
+          jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
+        );
       }
       throw new Error(`unexpected fetch ${url} ${init?.method ?? ''}`);
     },
@@ -1311,5 +1322,90 @@ describe('membership reconciliation wiring', () => {
     resolveCreate(jsonResponse(HOUSEHOLD_2, 201));
     expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
     await waitFor(() => expect(householdCalls(calls, 'GET')).toHaveLength(2));
+  });
+});
+
+describe('financial section authority gating', () => {
+  function financeSection(signal: number) {
+    return (
+      <HouseholdSection
+        csrf={CSRF}
+        onCsrfRefreshed={() => {}}
+        onSessionExpired={() => {}}
+        refreshSignal={signal}
+        currentUserId={USER.id}
+      />
+    );
+  }
+
+  it('gates financial mutation controls while the household list is stale', async () => {
+    let gets = 0;
+    stubFetch({
+      csrf: csrfOk,
+      householdsGet: () => {
+        gets += 1;
+        return gets === 1
+          ? householdsOk([HOUSEHOLD_1])
+          : jsonResponse(
+              { code: 'NETWORK_ERROR', message: 'Could not reach the server.' },
+              500,
+            );
+      },
+      financialAccountsGet: () =>
+        jsonResponse({
+          items: [
+            {
+              id: '10000000-0000-4000-8000-000000000001',
+              householdId: HOUSEHOLD_1.id,
+              ownerUserId: USER.id,
+              name: 'Daily spending',
+              kind: 'CHECKING',
+              currency: 'BRL',
+              source: 'MANUAL',
+              visibility: 'PRIVATE',
+              status: 'ACTIVE',
+              version: 0,
+              createdAt: '2026-09-16T12:00:00Z',
+              updatedAt: '2026-09-16T12:00:00Z',
+            },
+          ],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+    });
+    const { rerender } = render(financeSection(0));
+
+    // With a confirmed list, the finance mutations are available.
+    await screen.findByText('Daily spending');
+    expect(
+      screen.getByRole('button', { name: 'Rename Daily spending' }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole('button', { name: 'Add private account' }),
+    ).toBeEnabled();
+
+    // A failed reload leaves the card (and finance section) rendered but
+    // stale: the list stays visible while every mutation is gated.
+    rerender(financeSection(1));
+    expect(
+      await screen.findByText(/Showing previously loaded households/),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Daily spending')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Refresh the household before changing financial accounts.',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Rename Daily spending' }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Archive Daily spending' }),
+    ).toBeDisabled();
+    expect(screen.getByLabelText('Account name')).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Add private account' }),
+    ).toBeDisabled();
   });
 });

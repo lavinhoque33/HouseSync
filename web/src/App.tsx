@@ -73,7 +73,7 @@ export function App() {
           </svg>
           HouseSync
         </span>
-        <span className="area-badge">Households</span>
+        <span className="area-badge">Manual finance</span>
       </header>
 
       <main id="main-content">
@@ -91,9 +91,9 @@ export function App() {
             <p className="eyebrow">Where we are</p>
             <h2 id="foundation-title">First, a solid foundation.</h2>
             <p>
-              The web shell is running. Accounts, sign-in, household creation,
-              and household invitations are available; financial features are
-              still ahead.
+              Accounts, sign-in, and household collaboration are available.
+              Private manual financial accounts are the first finance step;
+              transactions and balances are still ahead.
             </p>
           </div>
           <HealthStatus />
@@ -110,7 +110,7 @@ export function App() {
 
       <footer className="site-footer">
         <p>HouseSync · Built for the household, mindful of the individual.</p>
-        <p>Foundation preview — no financial data connected.</p>
+        <p>Manual account preview — no bank connection or inferred balance.</p>
       </footer>
     </div>
   );

@@ -55,9 +55,9 @@ class InvitationSchemaIT {
             .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
             .locations("classpath:db/migration")
             .load();
-    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(5);
+    assertThat(flyway.migrate().migrationsExecuted).isEqualTo(6);
     flyway.validate();
-    assertThat(flyway.info().applied()).hasSize(5);
+    assertThat(flyway.info().applied()).hasSize(6);
   }
 
   @Test

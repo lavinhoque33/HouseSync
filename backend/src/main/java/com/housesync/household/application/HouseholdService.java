@@ -16,6 +16,7 @@ import com.housesync.household.web.HouseholdExceptions.MembershipSelfTargetExcep
 import com.housesync.household.web.HouseholdMemberResponse;
 import com.housesync.household.web.HouseholdResponse;
 import com.housesync.identity.web.IdentityExceptions;
+import jakarta.persistence.EntityManager;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -23,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
@@ -45,12 +47,17 @@ public class HouseholdService {
   private final HouseholdRepository households;
   private final HouseholdMemberRepository memberships;
   private final Clock clock;
+  private final EntityManager entityManager;
 
   public HouseholdService(
-      HouseholdRepository households, HouseholdMemberRepository memberships, Clock clock) {
+      HouseholdRepository households,
+      HouseholdMemberRepository memberships,
+      Clock clock,
+      EntityManager entityManager) {
     this.households = households;
     this.memberships = memberships;
     this.clock = clock;
+    this.entityManager = entityManager;
   }
 
   /** Creates a household and its creator {@code OWNER} membership atomically. */
@@ -153,6 +160,24 @@ public class HouseholdService {
       throw new LastOwnerRequiredException();
     }
     memberships.delete(actor);
+  }
+
+  /**
+   * Serializes a finance mutation with membership lifecycle writes and rechecks current membership.
+   * The caller owns the surrounding transaction so the household lock stays held through its write.
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void lockForFinance(UUID householdId, UUID actorId) {
+    entityManager.createNativeQuery("SET LOCAL lock_timeout = '5s'").executeUpdate();
+    lockAndRequireMembership(householdId, actorId);
+  }
+
+  /** Read-only membership guard for finance reads that found no owner-scoped rows. */
+  @Transactional(readOnly = true, propagation = Propagation.MANDATORY)
+  public void requireFinanceMembership(UUID householdId, UUID actorId) {
+    memberships
+        .findScopedByHouseholdAndActor(householdId, actorId)
+        .orElseThrow(HouseholdNotFoundException::new);
   }
 
   /** Membership-scoped view to the authorized household DTO. Shared with invitations. */

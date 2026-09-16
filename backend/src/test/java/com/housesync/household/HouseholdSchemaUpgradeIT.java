@@ -15,10 +15,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Proves the V3 to V5 upgrade path: migrate identity/session-only history, seed a user, a
- * household, a membership, and a session row the way a live deployment holds them, then apply V4
- * and V5 step by step and confirm household and invitation tables and constraints with
- * identity/session/household data intact.
+ * Proves the V3 to V6 upgrade path: migrate identity/session-only history, seed a user, a
+ * household, a membership, and a session row the way a live deployment holds them, then apply V4-V6
+ * step by step and confirm household, invitation, and private-account tables with prior data
+ * intact.
  */
 @Testcontainers
 class HouseholdSchemaUpgradeIT {
@@ -31,7 +31,7 @@ class HouseholdSchemaUpgradeIT {
           .withPassword("integration-test-only");
 
   @Test
-  void v3DatabaseUpgradesToV5WithIdentitySessionAndHouseholdDataPreserved() throws Exception {
+  void v3DatabaseUpgradesToV6WithIdentitySessionAndHouseholdDataPreserved() throws Exception {
     Properties credentials = new Properties();
     credentials.setProperty("user", POSTGRES.getUsername());
     credentials.setProperty("password", POSTGRES.getPassword());
@@ -106,9 +106,9 @@ class HouseholdSchemaUpgradeIT {
             .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
             .locations("classpath:db/migration")
             .load();
-    assertThat(current.migrate().migrationsExecuted).isEqualTo(1);
+    assertThat(current.migrate().migrationsExecuted).isEqualTo(2);
     current.validate();
-    assertThat(current.info().applied()).hasSize(5);
+    assertThat(current.info().applied()).hasSize(6);
 
     try (Connection connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), credentials)) {
       try (PreparedStatement user =
@@ -135,6 +135,13 @@ class HouseholdSchemaUpgradeIT {
         assertThat(tableNames(tables))
             .containsExactlyInAnyOrder("households", "household_members", "household_invitations");
       }
+      try (ResultSet tables =
+          connection
+              .getMetaData()
+              .getTables(null, "public", "financial_account%", new String[] {"TABLE"})) {
+        assertThat(tableNames(tables))
+            .containsExactlyInAnyOrder("financial_accounts", "financial_account_idempotency_keys");
+      }
       assertThat(constraintExists(connection, "households_name_length")).isTrue();
       assertThat(constraintExists(connection, "households_name_trimmed")).isTrue();
       assertThat(constraintExists(connection, "households_name_nonblank")).isTrue();
@@ -145,6 +152,10 @@ class HouseholdSchemaUpgradeIT {
       assertThat(constraintExists(connection, "household_invitations_expiry_check")).isTrue();
       assertThat(constraintExists(connection, "household_invitations_acceptance_paired")).isTrue();
       assertThat(constraintExists(connection, "household_invitations_terminal_exclusive")).isTrue();
+      assertThat(constraintExists(connection, "financial_accounts_name_trimmed")).isTrue();
+      assertThat(constraintExists(connection, "financial_accounts_currency_check")).isTrue();
+      assertThat(constraintExists(connection, "financial_accounts_status_check")).isTrue();
+      assertThat(constraintExists(connection, "financial_account_idempotency_keys_pk")).isTrue();
       try (PreparedStatement index =
           connection.prepareStatement(
               "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = 'public'"

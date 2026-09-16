@@ -82,6 +82,15 @@ public class SecurityConfiguration {
                     .authenticated()
                     .requestMatchers(HttpMethod.DELETE, "/api/households/*/invitations/*")
                     .authenticated()
+                    .requestMatchers(HttpMethod.POST, "/api/households/*/financial-accounts")
+                    .authenticated()
+                    .requestMatchers(
+                        HttpMethod.GET,
+                        "/api/households/*/financial-accounts",
+                        "/api/households/*/financial-accounts/*")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.PATCH, "/api/households/*/financial-accounts/*")
+                    .authenticated()
                     .anyRequest()
                     .denyAll())
         .sessionManagement(

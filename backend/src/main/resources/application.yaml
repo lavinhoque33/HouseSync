@@ -23,6 +23,8 @@ spring:
       initialize-schema: never
       table-name: SPRING_SESSION
   jackson:
+    read:
+      strict-duplicate-detection: true
     deserialization:
       fail-on-unknown-properties: true
 

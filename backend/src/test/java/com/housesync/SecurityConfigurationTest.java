@@ -17,6 +17,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.housesync.finance.account.application.FinancialAccountService;
 import com.housesync.household.application.HouseholdService;
 import com.housesync.household.invitation.application.InvitationService;
 import com.housesync.household.invitation.web.InvitationExceptions.InvitationServiceException;
@@ -63,6 +64,7 @@ class SecurityConfigurationTest {
   @MockitoBean private HouseSyncUserDetailsService userDetails;
   @MockitoBean private HouseholdService households;
   @MockitoBean private InvitationService invitations;
+  @MockitoBean private FinancialAccountService financialAccounts;
 
   @ParameterizedTest
   @ValueSource(
@@ -98,6 +100,10 @@ class SecurityConfigurationTest {
         + " /api/households/123e4567-e89b-12d3-a456-426614174000/invitations/123e4567-e89b-12d3-a456-426614174001",
     "POST, /api/invitations/preview",
     "POST, /api/invitations/accept",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-accounts",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-accounts",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-accounts/123e4567-e89b-12d3-a456-426614174001",
+    "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-accounts/123e4567-e89b-12d3-a456-426614174001",
     "POST, /actuator/health",
     "PUT, /actuator/health",
     "PATCH, /actuator/health",
@@ -154,6 +160,10 @@ class SecurityConfigurationTest {
     "DELETE, /api/invitations/preview",
     "GET, /api/invitations/accept",
     "PUT, /api/invitations/accept",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-accounts",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-accounts",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-accounts/123e4567-e89b-12d3-a456-426614174001",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-accounts/123e4567-e89b-12d3-a456-426614174001",
     "GET, /api/households/a/b",
   })
   void authenticatedRequestsToUnimplementedRoutesAreForbidden(String method, String path)

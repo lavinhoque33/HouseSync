@@ -24,6 +24,11 @@ export type ApiErrorCode =
   | 'INVITATION_NOT_FOUND'
   | 'MEMBERSHIP_NOT_FOUND'
   | 'LAST_OWNER_REQUIRED'
+  | 'FINANCIAL_ACCOUNT_NOT_FOUND'
+  | 'IDEMPOTENCY_CONFLICT'
+  | 'RESOURCE_VERSION_CONFLICT'
+  | 'RESOURCE_VERSION_EXHAUSTED'
+  | 'FINANCE_BUSY'
   | 'INTERNAL_ERROR'
   | 'NETWORK_ERROR'
   | 'UNKNOWN_ERROR';
@@ -77,6 +82,11 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'INVITATION_NOT_FOUND',
     'MEMBERSHIP_NOT_FOUND',
     'LAST_OWNER_REQUIRED',
+    'FINANCIAL_ACCOUNT_NOT_FOUND',
+    'IDEMPOTENCY_CONFLICT',
+    'RESOURCE_VERSION_CONFLICT',
+    'RESOURCE_VERSION_EXHAUSTED',
+    'FINANCE_BUSY',
     'INTERNAL_ERROR',
   ];
   return codes.includes(value as ApiErrorCode)
@@ -98,7 +108,16 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
         key === 'name' ||
         key === 'invitationId' ||
         key === 'secret' ||
-        key === 'role') &&
+        key === 'role' ||
+        key === 'kind' ||
+        key === 'currency' ||
+        key === 'status' ||
+        key === 'expectedVersion' ||
+        key === 'idempotencyKey' ||
+        key === 'limit' ||
+        key === 'offset' ||
+        key === 'query' ||
+        key === 'account') &&
       typeof message === 'string'
     ) {
       result[key] = message;
@@ -1165,5 +1184,224 @@ export async function postInvitationAccept(
     response,
     response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
     'Joining the household could not be completed.',
+  );
+}
+
+export type FinancialAccountKind =
+  'CASH' | 'CHECKING' | 'SAVINGS' | 'CREDIT_CARD';
+export type FinancialAccountCurrency =
+  'BRL' | 'USD' | 'EUR' | 'GBP' | 'JPY' | 'KWD';
+export type FinancialAccountStatus = 'ACTIVE' | 'ARCHIVED';
+
+export interface FinancialAccount {
+  id: string;
+  householdId: string;
+  ownerUserId: string;
+  name: string;
+  kind: FinancialAccountKind;
+  currency: FinancialAccountCurrency;
+  source: 'MANUAL';
+  visibility: 'PRIVATE';
+  status: FinancialAccountStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FinancialAccountPage {
+  items: FinancialAccount[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+export interface CreateFinancialAccountInput {
+  name: string;
+  kind: FinancialAccountKind;
+  currency: FinancialAccountCurrency;
+}
+
+function financialAccountPath(householdId: string, accountId?: string): string {
+  const base = `/api/households/${encodeURIComponent(householdId)}/financial-accounts`;
+  return accountId === undefined
+    ? base
+    : `${base}/${encodeURIComponent(accountId)}`;
+}
+
+function isFinancialAccountKind(value: unknown): value is FinancialAccountKind {
+  return (
+    value === 'CASH' ||
+    value === 'CHECKING' ||
+    value === 'SAVINGS' ||
+    value === 'CREDIT_CARD'
+  );
+}
+
+function isFinancialAccountCurrency(
+  value: unknown,
+): value is FinancialAccountCurrency {
+  return (
+    value === 'BRL' ||
+    value === 'USD' ||
+    value === 'EUR' ||
+    value === 'GBP' ||
+    value === 'JPY' ||
+    value === 'KWD'
+  );
+}
+
+function parseFinancialAccount(value: unknown): FinancialAccount | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.id !== 'string' ||
+    typeof record.householdId !== 'string' ||
+    typeof record.ownerUserId !== 'string' ||
+    typeof record.name !== 'string' ||
+    !isFinancialAccountKind(record.kind) ||
+    !isFinancialAccountCurrency(record.currency) ||
+    record.source !== 'MANUAL' ||
+    record.visibility !== 'PRIVATE' ||
+    (record.status !== 'ACTIVE' && record.status !== 'ARCHIVED') ||
+    typeof record.version !== 'number' ||
+    !Number.isInteger(record.version) ||
+    record.version < 0 ||
+    typeof record.createdAt !== 'string' ||
+    typeof record.updatedAt !== 'string'
+  ) {
+    return undefined;
+  }
+  return record as unknown as FinancialAccount;
+}
+
+function unexpectedFinancialAccountResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message: 'The server returned an unexpected financial account response.',
+  });
+}
+
+export async function fetchFinancialAccounts(
+  householdId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<FinancialAccountPage> {
+  const response = await apiFetch(
+    `${financialAccountPath(householdId)}?limit=100&offset=0&status=ALL`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load your financial accounts.',
+    );
+  }
+  const body = await readJson<{
+    items?: unknown;
+    limit?: unknown;
+    offset?: unknown;
+    hasMore?: unknown;
+  }>(response);
+  if (
+    !Array.isArray(body.items) ||
+    typeof body.limit !== 'number' ||
+    typeof body.offset !== 'number' ||
+    typeof body.hasMore !== 'boolean'
+  ) {
+    throw unexpectedFinancialAccountResponse(response.status);
+  }
+  const items: FinancialAccount[] = [];
+  for (const value of body.items) {
+    const account = parseFinancialAccount(value);
+    if (!account) throw unexpectedFinancialAccountResponse(response.status);
+    items.push(account);
+  }
+  return {
+    items,
+    limit: body.limit,
+    offset: body.offset,
+    hasMore: body.hasMore,
+  };
+}
+
+export async function postFinancialAccount(
+  householdId: string,
+  input: CreateFinancialAccountInput,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<FinancialAccount> {
+  const response = await apiFetch(
+    financialAccountPath(householdId),
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        ...unsafeHeaders(csrf),
+        'Idempotency-Key': idempotencyKey,
+      },
+      cache: 'no-store',
+      body: JSON.stringify(input),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200 || response.status === 201) {
+    const account = parseFinancialAccount(await readJson<unknown>(response));
+    if (!account) throw unexpectedFinancialAccountResponse(response.status);
+    return account;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Financial account creation could not be completed.',
+  );
+}
+
+export async function patchFinancialAccount(
+  householdId: string,
+  accountId: string,
+  patch: {
+    expectedVersion: number;
+    name?: string;
+    status?: FinancialAccountStatus;
+  },
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<FinancialAccount> {
+  const response = await apiFetch(
+    financialAccountPath(householdId, accountId),
+    {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify(patch),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const account = parseFinancialAccount(await readJson<unknown>(response));
+    if (!account) throw unexpectedFinancialAccountResponse(response.status);
+    return account;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Financial account update could not be completed.',
   );
 }

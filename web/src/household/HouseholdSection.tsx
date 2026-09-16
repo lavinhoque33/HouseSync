@@ -9,6 +9,7 @@ import {
 } from '../auth/client';
 import { validateHouseholdName } from '../auth/validation';
 import { InvitationSection } from '../invitation/InvitationSection';
+import { FinancialAccountsSection } from '../finance/FinancialAccountsSection';
 import { MembersSection } from './MembersSection';
 
 interface HouseholdNotice {
@@ -480,6 +481,15 @@ export function HouseholdSection({
                   {formatCreatedAt(household.createdAt)}
                 </time>
               </p>
+              <FinancialAccountsSection
+                key={`${household.id}-finance`}
+                household={household}
+                csrf={csrf}
+                onCsrfRefreshed={onCsrfRefreshed}
+                onSessionExpired={onSessionExpired}
+                onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+                authorityConfirmed={!stale && !loading && listError === null}
+              />
               <MembersSection
                 household={household}
                 currentUserId={currentUserId}

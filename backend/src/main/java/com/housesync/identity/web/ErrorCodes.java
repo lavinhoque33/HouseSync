@@ -1,6 +1,6 @@
 package com.housesync.identity.web;
 
-/** Stable error codes for the identity/session, household, and invitation contracts. */
+/** Stable error codes for the identity/session, household, invitation, and finance contracts. */
 public final class ErrorCodes {
 
   public static final String VALIDATION_FAILED = "VALIDATION_FAILED";
@@ -14,6 +14,11 @@ public final class ErrorCodes {
   public static final String MEMBERSHIP_NOT_FOUND = "MEMBERSHIP_NOT_FOUND";
   public static final String LAST_OWNER_REQUIRED = "LAST_OWNER_REQUIRED";
   public static final String INVITATION_NOT_FOUND = "INVITATION_NOT_FOUND";
+  public static final String FINANCIAL_ACCOUNT_NOT_FOUND = "FINANCIAL_ACCOUNT_NOT_FOUND";
+  public static final String IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT";
+  public static final String RESOURCE_VERSION_CONFLICT = "RESOURCE_VERSION_CONFLICT";
+  public static final String RESOURCE_VERSION_EXHAUSTED = "RESOURCE_VERSION_EXHAUSTED";
+  public static final String FINANCE_BUSY = "FINANCE_BUSY";
   public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 
   private ErrorCodes() {}

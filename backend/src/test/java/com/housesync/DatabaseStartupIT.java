@@ -2,6 +2,8 @@ package com.housesync;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.housesync.finance.account.persistence.AccountIdempotencyEntity;
+import com.housesync.finance.account.persistence.FinancialAccountEntity;
 import com.housesync.household.persistence.HouseholdEntity;
 import com.housesync.household.persistence.HouseholdMemberEntity;
 import com.housesync.identity.persistence.UserEntity;
@@ -17,6 +19,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.junit.jupiter.Container;
@@ -24,6 +27,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @Testcontainers
 class DatabaseStartupIT {
 
@@ -58,7 +62,9 @@ class DatabaseStartupIT {
         .contains(
             UserEntity.class.getSimpleName(),
             HouseholdEntity.class.getSimpleName(),
-            HouseholdMemberEntity.class.getSimpleName());
+            HouseholdMemberEntity.class.getSimpleName(),
+            FinancialAccountEntity.class.getSimpleName(),
+            AccountIdempotencyEntity.class.getSimpleName());
     assertThat(
             jdbc.queryForList(
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public'", String.class))
@@ -69,8 +75,10 @@ class DatabaseStartupIT {
             "spring_session_attributes",
             "households",
             "household_members",
-            "household_invitations");
-    assertThat(flyway.info().applied()).hasSize(5);
+            "household_invitations",
+            "financial_accounts",
+            "financial_account_idempotency_keys");
+    assertThat(flyway.info().applied()).hasSize(6);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
     assertThat(
