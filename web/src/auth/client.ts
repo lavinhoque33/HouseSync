@@ -1,7 +1,9 @@
 import {
+  isAggregateAmountString,
   isFinancialAccountCurrency,
   isSupportedAmountString,
   isSupportedTransactionDate,
+  minorUnitsOfMagnitude,
   type FinancialAccountCurrency,
 } from '../finance/money';
 
@@ -41,6 +43,8 @@ export type ApiErrorCode =
   | 'RESOURCE_VERSION_EXHAUSTED'
   | 'REFUND_CONFLICT'
   | 'TRANSACTION_VOIDED'
+  | 'ALLOCATION_NOT_FOUND'
+  | 'ALLOCATION_CONFLICT'
   | 'FINANCE_BUSY'
   | 'INTERNAL_ERROR'
   | 'NETWORK_ERROR'
@@ -103,6 +107,8 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'RESOURCE_VERSION_EXHAUSTED',
     'REFUND_CONFLICT',
     'TRANSACTION_VOIDED',
+    'ALLOCATION_NOT_FOUND',
+    'ALLOCATION_CONFLICT',
     'FINANCE_BUSY',
     'INTERNAL_ERROR',
   ];
@@ -139,7 +145,10 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
         key === 'occurredOn' ||
         key === 'description' ||
         key === 'visibility' ||
+        key === 'category' ||
+        key === 'view' ||
         key === 'refundOfTransactionId' ||
+        key === 'participantUserIds' ||
         key === 'money.amount' ||
         key === 'money.currency') &&
       typeof message === 'string'
@@ -1417,8 +1426,9 @@ export async function patchFinancialAccount(
 
 export type TransactionKind = 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER';
 export type TransactionStatus = 'POSTED' | 'VOIDED';
-/** Only PRIVATE visibility is supported. */
-export type TransactionVisibility = 'PRIVATE';
+export type TransactionVisibility = 'PRIVATE' | 'HOUSEHOLD';
+/** The two documented feed projections of the transaction list. */
+export type TransactionFeedView = 'OWN' | 'HOUSEHOLD';
 
 export interface Money {
   readonly amount: string;
@@ -1426,19 +1436,53 @@ export interface Money {
 }
 
 /**
- * Exactly the documented 15-field transaction DTO. Here every
- * authorized response is the actor's own entry, so `accountId` is always a
- * string; redacted `HOUSEHOLD` reads are not parsed here.
+ * The server-owned fixed taxonomy tokens, in the documented response order.
+ * The list itself is always fetched from the API; this constant only
+ * validates that responses carry exactly the documented bounded set.
+ */
+export const TRANSACTION_CATEGORY_CODES = [
+  'HOUSING',
+  'GROCERIES',
+  'DINING',
+  'UTILITIES',
+  'TRANSPORTATION',
+  'SHOPPING',
+  'ENTERTAINMENT',
+  'HEALTHCARE',
+  'TRAVEL',
+  'EDUCATION',
+  'PERSONAL',
+  'HOUSEHOLD_SUPPLIES',
+  'SUBSCRIPTIONS',
+  'INCOME',
+  'TRANSFERS',
+  'MISCELLANEOUS',
+] as const;
+
+export type TransactionCategoryCode =
+  (typeof TRANSACTION_CATEGORY_CODES)[number];
+
+export interface TransactionCategory {
+  code: string;
+  label: string;
+}
+
+/**
+ * Exactly the documented 16-field transaction DTO. `accountId` is the
+ * owner's account reference for own reads and redacted to null when a
+ * household member reads someone else's shared entry; `category` is the
+ * server taxonomy token or null when uncategorized.
  */
 export interface Transaction {
   id: string;
   householdId: string;
   ownerUserId: string;
-  accountId: string;
+  accountId: string | null;
   kind: TransactionKind;
   money: Money;
   occurredOn: string;
   description: string;
+  category: string | null;
   visibility: TransactionVisibility;
   source: 'MANUAL';
   status: TransactionStatus;
@@ -1458,8 +1502,10 @@ export interface TransactionPage {
 /**
  * Create inputs are a discriminated union: `refundOfTransactionId` is
  * required and non-null for REFUND creation and forbidden on every other
- * kind (even as null). Refund payloads omit `visibility` so the source
- * expense's disclosure is inherited; non-refunds send PRIVATE explicitly.
+ * kind (even as null). Refund payloads omit `visibility` and `category` so
+ * the source expense's disclosure and category are inherited; non-refunds
+ * send PRIVATE explicitly and carry either a taxonomy token or explicit
+ * null (uncategorized).
  */
 export type CreateTransactionInput =
   | {
@@ -1469,6 +1515,7 @@ export type CreateTransactionInput =
       occurredOn: string;
       description: string;
       visibility: TransactionVisibility;
+      category?: string | null;
     }
   | {
       accountId: string;
@@ -1485,6 +1532,7 @@ export type UpdateTransactionPatch = {
   occurredOn?: string;
   description?: string;
   visibility?: TransactionVisibility;
+  category?: string | null;
   status?: 'VOIDED';
 };
 
@@ -1519,30 +1567,39 @@ function isSupportedDate(value: string): boolean {
   return isSupportedTransactionDate(value);
 }
 
+function isCategoryToken(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    (TRANSACTION_CATEGORY_CODES as readonly string[]).includes(value)
+  );
+}
+
 function parseTransaction(value: unknown): Transaction | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return undefined;
   }
   const record = value as Record<string, unknown>;
-  // The contract's response DTO has exactly these 15 fields; any extra or
+  // The contract's response DTO has exactly these 16 fields; any extra or
   // missing key is a contract drift and must fail loudly rather than be
   // carried into the UI.
   if (
-    Object.keys(record).length !== 15 ||
+    Object.keys(record).length !== 16 ||
     typeof record.id !== 'string' ||
     !UUID_PATTERN.test(record.id) ||
     typeof record.householdId !== 'string' ||
     !UUID_PATTERN.test(record.householdId) ||
     typeof record.ownerUserId !== 'string' ||
     !UUID_PATTERN.test(record.ownerUserId) ||
-    typeof record.accountId !== 'string' ||
-    !UUID_PATTERN.test(record.accountId) ||
+    (record.accountId !== null &&
+      (typeof record.accountId !== 'string' ||
+        !UUID_PATTERN.test(record.accountId))) ||
     !isTransactionKind(record.kind) ||
     !isMoney(record.money) ||
     typeof record.occurredOn !== 'string' ||
     !isSupportedDate(record.occurredOn) ||
     typeof record.description !== 'string' ||
-    record.visibility !== 'PRIVATE' ||
+    (record.category !== null && !isCategoryToken(record.category)) ||
+    (record.visibility !== 'PRIVATE' && record.visibility !== 'HOUSEHOLD') ||
     record.source !== 'MANUAL' ||
     (record.status !== 'POSTED' && record.status !== 'VOIDED') ||
     typeof record.version !== 'number' ||
@@ -1566,7 +1623,8 @@ function parseTransaction(value: unknown): Transaction | undefined {
     id: record.id,
     householdId: record.householdId,
     ownerUserId: record.ownerUserId,
-    accountId: record.accountId,
+    // Sharing redaction: null only for another member's shared entry.
+    accountId: typeof record.accountId === 'string' ? record.accountId : null,
     kind: record.kind,
     money: {
       amount: (record.money as Money).amount,
@@ -1574,7 +1632,8 @@ function parseTransaction(value: unknown): Transaction | undefined {
     },
     occurredOn: record.occurredOn,
     description: record.description,
-    visibility: 'PRIVATE',
+    category: record.category === null ? null : (record.category as string),
+    visibility: record.visibility,
     source: 'MANUAL',
     status: record.status,
     // The guard above proved the refund shape per kind.
@@ -1635,16 +1694,18 @@ function parseTransactionPage(
 }
 
 /**
- * List query: OWN view only, all statuses so retained voided
- * entries stay visible, page 1 with the documented 1–100 limit bound.
+ * Household feed query: the documented feed projection, all statuses so
+ * retained voided entries stay visible, page 1 with the documented 1–100
+ * limit bound.
  */
 export async function fetchTransactions(
   householdId: string,
+  view: TransactionFeedView,
   signal?: AbortSignal,
   timeoutMs: number = AUTH_TIMEOUT_MS,
 ): Promise<TransactionPage> {
   const response = await apiFetch(
-    `${transactionPath(householdId)}?limit=100&offset=0&view=OWN&status=ALL`,
+    `${transactionPath(householdId)}?limit=100&offset=0&view=${view}&status=ALL`,
     {
       method: 'GET',
       credentials: 'include',
@@ -1670,6 +1731,64 @@ export async function fetchTransactions(
       hasMore?: unknown;
     }>(response),
   );
+}
+
+/**
+ * The bounded fixed taxonomy for the household. It is not a paginated
+ * collection: the response is exactly the documented 16 items with their
+ * server-returned display labels.
+ */
+export async function fetchTransactionCategories(
+  householdId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<{ items: TransactionCategory[] }> {
+  const response = await apiFetch(
+    `/api/households/${encodeURIComponent(householdId)}/transaction-categories`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load transaction categories.',
+    );
+  }
+  const body = await readJson<{ items?: unknown }>(response);
+  if (
+    !Array.isArray(body.items) ||
+    body.items.length !== TRANSACTION_CATEGORY_CODES.length
+  ) {
+    throw unexpectedTransactionResponse(response.status);
+  }
+  const items: TransactionCategory[] = [];
+  const seen = new Set<string>();
+  for (const value of body.items) {
+    if (typeof value !== 'object' || value === null) {
+      throw unexpectedTransactionResponse(response.status);
+    }
+    const record = value as Record<string, unknown>;
+    if (
+      !isCategoryToken(record.code) ||
+      typeof record.label !== 'string' ||
+      record.label.length === 0
+    ) {
+      throw unexpectedTransactionResponse(response.status);
+    }
+    if (seen.has(record.code)) {
+      throw unexpectedTransactionResponse(response.status);
+    }
+    seen.add(record.code);
+    items.push({ code: record.code, label: record.label });
+  }
+  return { items };
 }
 
 export async function fetchTransaction(
@@ -1766,4 +1885,424 @@ export async function patchTransaction(
     response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
     'Transaction update could not be completed.',
   );
+}
+
+export type AllocationStatus = 'ACTIVE' | 'REVOKED';
+export type MembershipStatus = 'CURRENT' | 'DEPARTED';
+
+export interface AllocationParticipantShare {
+  userId: string;
+  share: Money;
+}
+
+/**
+ * The active allocation of one expense, exactly the 11 documented response
+ * fields. Participants are frozen at creation in ascending canonical user
+ * UUID order with their persisted exact shares, which always sum to the
+ * original positive magnitude. Revoked allocations are never returned by
+ * any route; this type is reached for ACTIVE allocations and, on same-key
+ * replay, for a since-revoked creation.
+ */
+export interface TransactionAllocation {
+  id: string;
+  transactionId: string;
+  householdId: string;
+  payerUserId: string;
+  currency: FinancialAccountCurrency;
+  originalAmount: Money;
+  participants: AllocationParticipantShare[];
+  status: AllocationStatus;
+  createdAt: string;
+  revokedAt: string | null;
+  transactionVersion: number;
+}
+
+export interface CreateAllocationInput {
+  expectedVersion: number;
+  participantUserIds: string[];
+}
+
+export interface MemberBalanceEntry {
+  userId: string;
+  membershipStatus: MembershipStatus;
+  amount: string;
+}
+
+export interface MemberBalancesCurrencyGroup {
+  currency: FinancialAccountCurrency;
+  balances: MemberBalanceEntry[];
+}
+
+/**
+ * Derived per-currency member balances from the household's active
+ * allocations. Positive amounts mean the user is owed, negative amounts
+ * mean the user owes, and each currency's balances sum to exactly zero.
+ * Identity is the stable user UUID only; no email or profile data is
+ * included, and there is no grand total or settlement in the contract.
+ */
+export interface MemberBalances {
+  currencies: MemberBalancesCurrencyGroup[];
+}
+
+function unexpectedAllocationResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message: 'The server returned an unexpected allocation response.',
+  });
+}
+
+function allocationPath(householdId: string, transactionId: string): string {
+  return `/api/households/${encodeURIComponent(householdId)}/transactions/${encodeURIComponent(transactionId)}/allocation`;
+}
+
+/**
+ * A participant share is an unsigned aggregate amount at the exact scale
+ * of the allocation's currency. Zero shares are legitimate (the remainder
+ * rule can award no minor unit to the last participant), unlike stored
+ * transaction amounts, so the aggregate grammar applies with a sign ban.
+ */
+function isShareMoney(
+  value: unknown,
+  currency: FinancialAccountCurrency,
+): value is Money {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).length === 2 &&
+    typeof record.amount === 'string' &&
+    typeof record.currency === 'string' &&
+    record.currency === currency &&
+    isAggregateAmountString(record.amount, currency) &&
+    !record.amount.startsWith('-')
+  );
+}
+
+function parseTransactionAllocation(
+  value: unknown,
+): TransactionAllocation | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  // Exactly the documented 11-field allocation DTO; any extra or missing
+  // key is contract drift and must fail loudly rather than reach the UI.
+  if (
+    Object.keys(record).length !== 11 ||
+    typeof record.id !== 'string' ||
+    !UUID_PATTERN.test(record.id) ||
+    typeof record.transactionId !== 'string' ||
+    !UUID_PATTERN.test(record.transactionId) ||
+    typeof record.householdId !== 'string' ||
+    !UUID_PATTERN.test(record.householdId) ||
+    typeof record.payerUserId !== 'string' ||
+    !UUID_PATTERN.test(record.payerUserId) ||
+    !isFinancialAccountCurrency(record.currency) ||
+    !isMoney(record.originalAmount) ||
+    !Array.isArray(record.participants) ||
+    record.participants.length === 0 ||
+    (record.status !== 'ACTIVE' && record.status !== 'REVOKED') ||
+    (record.revokedAt !== null && typeof record.revokedAt !== 'string') ||
+    (record.status === 'ACTIVE' && record.revokedAt !== null) ||
+    (record.status === 'REVOKED' &&
+      (typeof record.revokedAt !== 'string' ||
+        record.revokedAt.length === 0)) ||
+    typeof record.transactionVersion !== 'number' ||
+    !Number.isInteger(record.transactionVersion) ||
+    record.transactionVersion < 0 ||
+    record.transactionVersion > 2147483647 ||
+    typeof record.createdAt !== 'string' ||
+    record.createdAt.length === 0
+  ) {
+    return undefined;
+  }
+  const currency = record.currency as FinancialAccountCurrency;
+  const participants: AllocationParticipantShare[] = [];
+  let previousUserId: string | undefined;
+  for (const entry of record.participants) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      return undefined;
+    }
+    const participant = entry as Record<string, unknown>;
+    if (
+      Object.keys(participant).length !== 2 ||
+      typeof participant.userId !== 'string' ||
+      !UUID_PATTERN.test(participant.userId) ||
+      !isShareMoney(participant.share, currency)
+    ) {
+      return undefined;
+    }
+    const userId = participant.userId;
+    // The response is ordered ascending by canonical user UUID with no
+    // duplicates; ordering is part of the contract, not presentation.
+    const canonical = userId.toLowerCase();
+    if (previousUserId !== undefined && canonical <= previousUserId) {
+      return undefined;
+    }
+    previousUserId = canonical;
+    participants.push({
+      userId,
+      share: {
+        amount: (participant.share as Money).amount,
+        currency: (participant.share as Money).currency,
+      },
+    });
+  }
+  // Shares sum exactly to the original positive magnitude.
+  let sum = 0n;
+  for (const participant of participants) {
+    sum += minorUnitsOfMagnitude(participant.share.amount, currency);
+  }
+  const originalAmount = record.originalAmount as Money;
+  if (originalAmount.amount.startsWith('-')) return undefined;
+  if (sum !== minorUnitsOfMagnitude(originalAmount.amount, currency)) {
+    return undefined;
+  }
+  return {
+    id: record.id,
+    transactionId: record.transactionId,
+    householdId: record.householdId,
+    payerUserId: record.payerUserId,
+    currency,
+    originalAmount: {
+      amount: originalAmount.amount,
+      currency: originalAmount.currency,
+    },
+    participants,
+    status: record.status as AllocationStatus,
+    createdAt: record.createdAt,
+    revokedAt: record.revokedAt === null ? null : (record.revokedAt as string),
+    transactionVersion: record.transactionVersion,
+  };
+}
+
+/**
+ * The active allocation of an authorized expense. An authorized expense
+ * without an active allocation — never-allocated or revoked — answers
+ * `404 ALLOCATION_NOT_FOUND`, which callers read off the ApiError code; a
+ * hidden, missing, or foreign expense answers the generic
+ * `TRANSACTION_NOT_FOUND` 404 instead.
+ */
+export async function fetchTransactionAllocation(
+  householdId: string,
+  transactionId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<TransactionAllocation> {
+  const response = await apiFetch(
+    allocationPath(householdId, transactionId),
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load the allocation for this transaction.',
+    );
+  }
+  const allocation = parseTransactionAllocation(
+    await readJson<unknown>(response),
+  );
+  if (!allocation) throw unexpectedAllocationResponse(response.status);
+  return allocation;
+}
+
+/**
+ * Create the expense's allocation. One durable key per intent: a first
+ * committed create returns 201 and a same-key replay returns 200 with the
+ * current representation (possibly now revoked), so both statuses parse.
+ */
+export async function postTransactionAllocation(
+  householdId: string,
+  transactionId: string,
+  input: CreateAllocationInput,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<TransactionAllocation> {
+  const response = await apiFetch(
+    allocationPath(householdId, transactionId),
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        ...unsafeHeaders(csrf),
+        'Idempotency-Key': idempotencyKey,
+      },
+      cache: 'no-store',
+      body: JSON.stringify(input),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200 || response.status === 201) {
+    const allocation = parseTransactionAllocation(
+      await readJson<unknown>(response),
+    );
+    if (!allocation) throw unexpectedAllocationResponse(response.status);
+    return allocation;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Allocation creation could not be completed.',
+  );
+}
+
+/**
+ * Revoke the active allocation. PATCH carries no idempotency key: the
+ * expectedVersion guard on the expense provides stale-retry protection,
+ * and revocation bumps the expense version once.
+ */
+export async function patchAllocationRevoke(
+  householdId: string,
+  transactionId: string,
+  expectedVersion: number,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<TransactionAllocation> {
+  const response = await apiFetch(
+    allocationPath(householdId, transactionId),
+    {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify({ expectedVersion, status: 'REVOKED' }),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const allocation = parseTransactionAllocation(
+      await readJson<unknown>(response),
+    );
+    if (!allocation) throw unexpectedAllocationResponse(response.status);
+    return allocation;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Allocation revocation could not be completed.',
+  );
+}
+
+function unexpectedBalancesResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message: 'The server returned an unexpected member-balances response.',
+  });
+}
+
+function parseMemberBalances(value: unknown): MemberBalances | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (keys.length !== 1 || keys[0] !== 'currencies') return undefined;
+  if (!Array.isArray(record.currencies)) return undefined;
+  const groups: MemberBalancesCurrencyGroup[] = [];
+  let previousCurrency: string | undefined;
+  for (const entry of record.currencies) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      return undefined;
+    }
+    const group = entry as Record<string, unknown>;
+    if (
+      Object.keys(group).length !== 2 ||
+      !isFinancialAccountCurrency(group.currency) ||
+      !Array.isArray(group.balances)
+    ) {
+      return undefined;
+    }
+    // Currencies are ordered by code with no duplicates.
+    if (previousCurrency !== undefined && group.currency <= previousCurrency) {
+      return undefined;
+    }
+    previousCurrency = group.currency;
+    const balances: MemberBalanceEntry[] = [];
+    let previousUserId: string | undefined;
+    for (const balanceValue of group.balances) {
+      if (
+        typeof balanceValue !== 'object' ||
+        balanceValue === null ||
+        Array.isArray(balanceValue)
+      ) {
+        return undefined;
+      }
+      const balance = balanceValue as Record<string, unknown>;
+      if (
+        Object.keys(balance).length !== 3 ||
+        typeof balance.userId !== 'string' ||
+        !UUID_PATTERN.test(balance.userId) ||
+        (balance.membershipStatus !== 'CURRENT' &&
+          balance.membershipStatus !== 'DEPARTED') ||
+        typeof balance.amount !== 'string' ||
+        !isAggregateAmountString(balance.amount, group.currency)
+      ) {
+        return undefined;
+      }
+      const canonical = balance.userId.toLowerCase();
+      if (previousUserId !== undefined && canonical <= previousUserId) {
+        return undefined;
+      }
+      previousUserId = canonical;
+      balances.push({
+        userId: balance.userId,
+        membershipStatus: balance.membershipStatus as MembershipStatus,
+        amount: balance.amount,
+      });
+    }
+    groups.push({
+      currency: group.currency,
+      balances,
+    });
+  }
+  return { currencies: groups };
+}
+
+/**
+ * Derived member balances for the household, grouped by currency. A
+ * household with no contributing allocations answers `currencies: []`;
+ * the empty state invents no values.
+ */
+export async function fetchMemberBalances(
+  householdId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<MemberBalances> {
+  const response = await apiFetch(
+    `/api/households/${encodeURIComponent(householdId)}/member-balances`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load household member balances.',
+    );
+  }
+  const balances = parseMemberBalances(await readJson<unknown>(response));
+  if (!balances) throw unexpectedBalancesResponse(response.status);
+  return balances;
 }

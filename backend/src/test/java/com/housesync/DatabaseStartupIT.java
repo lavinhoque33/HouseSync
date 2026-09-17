@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.housesync.finance.account.persistence.AccountIdempotencyEntity;
 import com.housesync.finance.account.persistence.FinancialAccountEntity;
+import com.housesync.finance.transaction.persistence.FinancialAllocationIdempotencyEntity;
+import com.housesync.finance.transaction.persistence.FinancialTransactionAllocationEntity;
+import com.housesync.finance.transaction.persistence.FinancialTransactionAllocationParticipantEntity;
 import com.housesync.finance.transaction.persistence.FinancialTransactionEntity;
 import com.housesync.finance.transaction.persistence.TransactionIdempotencyEntity;
 import com.housesync.household.persistence.HouseholdEntity;
@@ -68,7 +71,10 @@ class DatabaseStartupIT {
             FinancialAccountEntity.class.getSimpleName(),
             AccountIdempotencyEntity.class.getSimpleName(),
             FinancialTransactionEntity.class.getSimpleName(),
-            TransactionIdempotencyEntity.class.getSimpleName());
+            TransactionIdempotencyEntity.class.getSimpleName(),
+            FinancialTransactionAllocationEntity.class.getSimpleName(),
+            FinancialTransactionAllocationParticipantEntity.class.getSimpleName(),
+            FinancialAllocationIdempotencyEntity.class.getSimpleName());
     assertThat(
             jdbc.queryForList(
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public'", String.class))
@@ -83,8 +89,11 @@ class DatabaseStartupIT {
             "financial_accounts",
             "financial_account_idempotency_keys",
             "financial_transactions",
-            "financial_transaction_idempotency_keys");
-    assertThat(flyway.info().applied()).hasSize(7);
+            "financial_transaction_idempotency_keys",
+            "financial_transaction_allocations",
+            "financial_transaction_allocation_participants",
+            "financial_allocation_idempotency_keys");
+    assertThat(flyway.info().applied()).hasSize(9);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
     assertThat(

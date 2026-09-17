@@ -11,15 +11,20 @@ import com.housesync.finance.account.domain.SupportedCurrency;
 import com.housesync.finance.account.persistence.FinancialAccountEntity;
 import com.housesync.finance.account.persistence.FinancialAccountRepository;
 import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAccountNotFoundException;
+import com.housesync.finance.transaction.domain.AllocationStatus;
+import com.housesync.finance.transaction.domain.TransactionCategory;
 import com.housesync.finance.transaction.domain.TransactionKind;
 import com.housesync.finance.transaction.domain.TransactionStatus;
+import com.housesync.finance.transaction.persistence.FinancialTransactionAllocationRepository;
 import com.housesync.finance.transaction.persistence.FinancialTransactionEntity;
 import com.housesync.finance.transaction.persistence.FinancialTransactionRepository;
 import com.housesync.finance.transaction.persistence.TransactionIdempotencyEntity;
 import com.housesync.finance.transaction.persistence.TransactionIdempotencyKey;
 import com.housesync.finance.transaction.persistence.TransactionIdempotencyRepository;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AccountArchivedException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AllocationConflictException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.RefundConflictException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionForbiddenException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionIdempotencyConflictException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionNotFoundException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionVersionConflictException;
@@ -27,6 +32,7 @@ import com.housesync.finance.transaction.web.FinancialTransactionExceptions.Tran
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionVoidedException;
 import com.housesync.finance.transaction.web.FinancialTransactionListResponse;
 import com.housesync.finance.transaction.web.FinancialTransactionResponse;
+import com.housesync.finance.transaction.web.TransactionCategoryListResponse;
 import com.housesync.household.application.HouseholdService;
 import com.housesync.identity.web.IdentityExceptions.ValidationFailedException;
 import jakarta.persistence.EntityManager;
@@ -39,32 +45,42 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
+import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Private manual transaction use cases: entries are owned by the actor, private, and
- * versioned. Every mutation serializes with household membership lifecycle through {@link
- * HouseholdService#lockForFinance}, and refund operations lock their source expense first and the
- * live refund rows in ascending UUID order. Source-expense version propagation for refund-group
- * operations is handled separately and is deliberately not applied here.
+ * Manual transaction use cases. Entries are versioned, category-aware, and either private
+ * or disclosed to the whole household. Every mutation serializes with household membership
+ * lifecycle through {@link HouseholdService#lockForFinance}, and refund-group operations lock their
+ * source expense first and the linked refund rows in ascending UUID order.
+ *
+ * <p>Sharing rules: only the financial owner mutates an entry; another current member reads a
+ * {@code HOUSEHOLD} entry with the account reference redacted, while a private entry stays a
+ * generic 404 for them. Expense category/visibility patches propagate atomically to every linked
+ * refund, including retained voided refunds, and any state-changing refund create/correct/void
+ * bumps its source expense version and timestamp once so stale expense forms conflict.
  */
 @Service
 public class FinancialTransactionService {
 
   private static final String CREATE_OPERATION = "TRANSACTION_CREATE";
   private static final String PRIVATE_VISIBILITY = "PRIVATE";
+  private static final String HOUSEHOLD_VISIBILITY = "HOUSEHOLD";
+  private static final String HOUSEHOLD_VIEW = "HOUSEHOLD";
   private static final LocalDate MIN_OCCURRED_ON = LocalDate.of(1900, 1, 1);
   private static final LocalDate MAX_OCCURRED_ON = LocalDate.of(9999, 12, 30);
 
   private final FinancialTransactionRepository transactions;
   private final TransactionIdempotencyRepository idempotency;
   private final FinancialAccountRepository accounts;
+  private final FinancialTransactionAllocationRepository allocations;
   private final HouseholdService households;
   private final Clock clock;
   private final EntityManager entityManager;
@@ -73,12 +89,14 @@ public class FinancialTransactionService {
       FinancialTransactionRepository transactions,
       TransactionIdempotencyRepository idempotency,
       FinancialAccountRepository accounts,
+      FinancialTransactionAllocationRepository allocations,
       HouseholdService households,
       Clock clock,
       EntityManager entityManager) {
     this.transactions = transactions;
     this.idempotency = idempotency;
     this.accounts = accounts;
+    this.allocations = allocations;
     this.households = households;
     this.clock = clock;
     this.entityManager = entityManager;
@@ -94,6 +112,8 @@ public class FinancialTransactionService {
       String description,
       String visibility,
       boolean visibilityPresent,
+      String category,
+      boolean categoryPresent,
       String refundOfTransactionId,
       boolean refundOfTransactionIdPresent) {}
 
@@ -142,6 +162,14 @@ public class FinancialTransactionService {
     }
 
     Instant now = now();
+    String visibility =
+        values.kind() == TransactionKind.REFUND
+            ? source.getVisibility()
+            : (values.rawVisibility() == null ? PRIVATE_VISIBILITY : values.rawVisibility());
+    String category =
+        values.kind() == TransactionKind.REFUND
+            ? source.getCategory()
+            : values.category() == null ? null : values.category().name();
     FinancialTransactionEntity transaction =
         new FinancialTransactionEntity(
             UUID.randomUUID(),
@@ -153,19 +181,39 @@ public class FinancialTransactionService {
             values.currency(),
             values.occurredOn(),
             values.description(),
+            visibility,
+            category,
             source == null ? null : source.getId(),
             now);
     transactions.save(transaction);
     idempotency.save(new TransactionIdempotencyEntity(key, fingerprint, transaction.getId(), now));
+    if (source != null) {
+      // A state-changing refund create moves its source expense version once, so a stale
+      // expense form cannot later share or re-disclose an unaware refund group.
+      bumpRefundSource(source, now);
+    }
     transactions.flush();
     idempotency.flush();
     return new CreateResult(toResponse(transaction), false);
   }
 
   @Transactional(readOnly = true)
+  public TransactionCategoryListResponse listCategories(UUID householdId, UUID actorId) {
+    // A bounded fixed list, not a paginated collection; only the closed enum feeds it.
+    households.requireFinanceMembership(householdId, actorId);
+    return new TransactionCategoryListResponse(
+        Arrays.stream(TransactionCategory.values())
+            .map(
+                category ->
+                    new TransactionCategoryListResponse.Item(category.name(), category.label()))
+            .toList());
+  }
+
+  @Transactional(readOnly = true)
   public FinancialTransactionListResponse list(
       UUID householdId,
       UUID actorId,
+      String view,
       String status,
       UUID accountId,
       String currency,
@@ -173,6 +221,26 @@ public class FinancialTransactionService {
       LocalDate to,
       int limit,
       int offset) {
+    if (HOUSEHOLD_VIEW.equals(view)) {
+      // Household feed: only HOUSEHOLD entries from any owner, including departed owners;
+      // the membership join is the authorization, and every filter applies in SQL.
+      List<FinancialTransactionEntity> page =
+          findHouseholdPage(householdId, actorId, status, currency, from, to, limit + 1, offset);
+      if (page.isEmpty()) {
+        // Preserve missing/non-member equivalence without a separate broad transaction read.
+        households.requireFinanceMembership(householdId, actorId);
+      }
+      boolean hasMore = page.size() > limit;
+      List<FinancialTransactionResponse> items =
+          page.stream()
+              .limit(limit)
+              .map(
+                  transaction ->
+                      toResponse(transaction, !transaction.getOwnerUserId().equals(actorId)))
+              .toList();
+      return new FinancialTransactionListResponse(items, limit, offset, hasMore);
+    }
+
     if (accountId != null) {
       // A filtered feed resolves membership first so a non-member gets the household 404
       // rather than a resource-shaped one, then requires private account ownership.
@@ -185,7 +253,6 @@ public class FinancialTransactionService {
         findOwnedPage(
             householdId, actorId, status, accountId, currency, from, to, limit + 1, offset);
     if (page.isEmpty()) {
-      // Preserve missing/non-member equivalence without a separate broad transaction read.
       households.requireFinanceMembership(householdId, actorId);
     }
     boolean hasMore = page.size() > limit;
@@ -197,8 +264,8 @@ public class FinancialTransactionService {
   @Transactional(readOnly = true)
   public FinancialTransactionResponse get(UUID householdId, UUID transactionId, UUID actorId) {
     return transactions
-        .findOwnedScoped(householdId, transactionId, actorId)
-        .map(FinancialTransactionService::toResponse)
+        .findVisibleScoped(householdId, transactionId, actorId)
+        .map(transaction -> toResponse(transaction, !transaction.getOwnerUserId().equals(actorId)))
         .orElseGet(
             () -> {
               // A miss is either a foreign/hidden entry for a current member (generic resource
@@ -221,6 +288,8 @@ public class FinancialTransactionService {
       boolean descriptionPresent,
       String visibility,
       boolean visibilityPresent,
+      String category,
+      boolean categoryPresent,
       String status,
       boolean statusPresent) {}
 
@@ -230,26 +299,39 @@ public class FinancialTransactionService {
     PatchValues values = validatePatch(raw);
     households.lockForFinance(householdId, actorId);
     // Pre-read under the household lifecycle lock (no concurrent finance mutation can
-    // commit while it is held) to learn the row's kind, account, and refund source, then
-    // take row locks in the documented deterministic order: household/account context,
-    // source expense first, then all linked refund rows in ascending UUID order, with
-    // the patched row selected from the locked set. expectedVersion is compared only
-    // after the relevant rows are locked.
+    // commit while it is held) through the authorized scope: own entry at any visibility,
+    // or a household-disclosed entry. A visible row owned by someone else answers the
+    // 403 before any resource state or lock is taken; a miss falls back to membership
+    // to separate the resource 404 from the household 404.
     FinancialTransactionEntity peek =
         transactions
-            .findOwnedScoped(householdId, transactionId, actorId)
-            .orElseThrow(TransactionNotFoundException::new);
+            .findVisibleScoped(householdId, transactionId, actorId)
+            .orElseGet(
+                () -> {
+                  households.requireFinanceMembership(householdId, actorId);
+                  throw new TransactionNotFoundException();
+                });
+    if (!peek.getOwnerUserId().equals(actorId)) {
+      // Sharing authorizes reading only; mutation stays financial-owner-only.
+      throw new TransactionForbiddenException();
+    }
+    // Row locks in the documented deterministic order: household/account context, source
+    // expense first, then all linked refund rows in ascending UUID order, with the patched
+    // row selected from the locked set. expectedVersion is compared only after the relevant
+    // rows are locked.
     accounts
         .findOwnedForUpdate(householdId, peek.getAccountId(), actorId)
         .orElseThrow(FinancialAccountNotFoundException::new);
+    FinancialTransactionEntity source = null;
     FinancialTransactionEntity transaction;
     if (peek.getKind() == TransactionKind.REFUND) {
-      // Refund-group operations lock the source expense before any refund UUID; the
-      // ordered group lock covers posted and voided members, so a correction, a void,
-      // and a retained no-op all observe the same acquisition sequence.
-      transactions
-          .findOwnedForUpdate(householdId, peek.getRefundOfTransactionId(), actorId)
-          .orElseThrow(RefundConflictException::new);
+      // Refund-group operations lock the source expense before any refund UUID; the ordered
+      // group lock covers posted and voided members, so a correction, a void, and a retained
+      // no-op all observe the same acquisition sequence.
+      source =
+          transactions
+              .findOwnedForUpdate(householdId, peek.getRefundOfTransactionId(), actorId)
+              .orElseThrow(RefundConflictException::new);
       transaction =
           transactions.findGroupForUpdate(peek.getRefundOfTransactionId()).stream()
               .filter(refund -> refund.getId().equals(transactionId))
@@ -264,11 +346,15 @@ public class FinancialTransactionService {
     if (transaction.getVersion() != values.expectedVersion()) {
       throw new TransactionVersionConflictException();
     }
-    // Refund visibility is inherited through the whole linked group; a direct patch is
-    // never accepted in any state because sharing owns that behavior.
+    // Refund disclosure is inherited through the whole linked group; a direct patch is never
+    // accepted in any state.
     if (values.visibilityPresent() && transaction.getKind() == TransactionKind.REFUND) {
       throw new ValidationFailedException(
           Map.of("visibility", "Refund visibility follows its expense."));
+    }
+    if (values.categoryPresent() && transaction.getKind() == TransactionKind.REFUND) {
+      throw new ValidationFailedException(
+          Map.of("category", "Refund category follows its expense."));
     }
 
     if (values.statusPresent()) {
@@ -286,25 +372,45 @@ public class FinancialTransactionService {
       if (transaction.getVersion() == Integer.MAX_VALUE) {
         throw new TransactionVersionExhaustedException();
       }
-      transaction.voided(now());
+      Instant now = now();
+      if (transaction.getKind() == TransactionKind.EXPENSE) {
+        // Voiding the expense deactivates its active allocation in this same transaction,
+        // after the linked refund rows were locked in ascending UUID order. The voided
+        // expense and its deactivated allocation contribute nothing to derived balances.
+        allocations
+            .findActiveForUpdate(transaction.getId(), AllocationStatus.ACTIVE)
+            .ifPresent(allocation -> allocation.revoked(now));
+      }
+      transaction.voided(now);
+      if (source != null) {
+        bumpRefundSource(source, now);
+      }
       transactions.saveAndFlush(transaction);
       return toResponse(transaction);
     }
 
     if (transaction.getStatus() == TransactionStatus.VOIDED) {
+      boolean categoryChanges =
+          values.categoryPresent() && !Objects.equals(values.category(), transaction.getCategory());
       boolean economicEdit =
-          values.currency() != null || values.occurredOn() != null || values.description() != null;
+          values.currency() != null
+              || values.occurredOn() != null
+              || values.description() != null
+              || categoryChanges;
       if (economicEdit) {
-        // Voided economic fields cannot be edited or restored.
+        // Voided economic fields cannot be edited or restored; a same-value category touch
+        // is a no-op like a same-value visibility touch.
         throw new TransactionVoidedException();
       }
-      // A same-value visibility touch on a retained voided entry stays a no-op here and
-      // remains allowed by the sharing rules.
+      // A visibility-only patch on a retained voided entry stays allowed in C, including
+      // refund-group propagation below.
     }
 
     BigDecimal nextAmount = transaction.getAmount();
     LocalDate nextOccurredOn = transaction.getOccurredOn();
     String nextDescription = transaction.getDescription();
+    String nextVisibility = transaction.getVisibility();
+    String nextCategory = transaction.getCategory();
     if (values.currency() != null) {
       if (values.currency() != transaction.getCurrency()) {
         throw new ValidationFailedException(
@@ -323,24 +429,83 @@ public class FinancialTransactionService {
     if (values.description() != null) {
       nextDescription = values.description();
     }
+    if (values.visibility() != null) {
+      nextVisibility = values.visibility();
+    }
+    if (values.categoryPresent()) {
+      nextCategory = values.category();
+    }
 
     boolean amountChanged = nextAmount.compareTo(transaction.getAmount()) != 0;
     boolean dateChanged = !nextOccurredOn.equals(transaction.getOccurredOn());
     boolean descriptionChanged = !nextDescription.equals(transaction.getDescription());
-    boolean visibilityChanged =
-        values.visibility() != null && !values.visibility().equals(transaction.getVisibility());
-    if (!amountChanged && !dateChanged && !descriptionChanged && !visibilityChanged) {
+    boolean visibilityChanged = !nextVisibility.equals(transaction.getVisibility());
+    boolean categoryChanged = !Objects.equals(nextCategory, transaction.getCategory());
+    if (!amountChanged
+        && !dateChanged
+        && !descriptionChanged
+        && !visibilityChanged
+        && !categoryChanged) {
       // Authorized no-op returns the unchanged representation without a version bump.
       return toResponse(transaction);
+    }
+
+    if (transaction.getKind() == TransactionKind.EXPENSE
+        && (amountChanged || (visibilityChanged && PRIVATE_VISIBILITY.equals(nextVisibility)))
+        && allocations
+            .findActiveByTransactionId(transaction.getId(), AllocationStatus.ACTIVE)
+            .isPresent()) {
+      // An active allocation freezes what participants owe: privacy revocation and money
+      // correction would rewrite recorded shares, so both are blocked until the allocation
+      // is revoked. Description, occurredOn, and category changes never affect shares.
+      // This allocation read is deliberately unlocked and stays race-free only because every
+      // allocation writer (allocation create, revoke, expense void) holds this same expense
+      // row lock under the household lifecycle lock before writing allocation rows, so no
+      // uncommitted allocation change can be in flight while the locked row is patched.
+      throw new AllocationConflictException();
     }
 
     if (amountChanged || dateChanged) {
       checkRefundGroupBounds(transaction, nextAmount, nextOccurredOn);
     }
+    // Disclosure changes on a non-refund entry propagate to every linked refund, including
+    // retained voided refunds, in this same transaction. Refund rows are locked after the
+    // source expense in ascending UUID order; each refund whose value changes is versioned
+    // exactly like a direct patch would have been.
+    List<FinancialTransactionEntity> group = List.of();
+    boolean groupPropagation =
+        (visibilityChanged || categoryChanged) && transaction.getKind() != TransactionKind.REFUND;
+    if (groupPropagation) {
+      group = transactions.findGroupForUpdate(transaction.getId());
+      for (FinancialTransactionEntity refund : group) {
+        boolean refundChanges =
+            (visibilityChanged && !nextVisibility.equals(refund.getVisibility()))
+                || (categoryChanged && !Objects.equals(nextCategory, refund.getCategory()));
+        if (refundChanges && refund.getVersion() == Integer.MAX_VALUE) {
+          throw new TransactionVersionExhaustedException();
+        }
+      }
+    }
     if (transaction.getVersion() == Integer.MAX_VALUE) {
       throw new TransactionVersionExhaustedException();
     }
-    transaction.correct(nextAmount, nextOccurredOn, nextDescription, now());
+    Instant now = now();
+    transaction.correct(
+        nextAmount, nextOccurredOn, nextDescription, nextCategory, nextVisibility, now);
+    if (source != null) {
+      // A state-changing refund correction bumps its source expense version once.
+      bumpRefundSource(source, now);
+    }
+    if (groupPropagation) {
+      for (FinancialTransactionEntity refund : group) {
+        boolean refundChanges =
+            (visibilityChanged && !nextVisibility.equals(refund.getVisibility()))
+                || (categoryChanged && !Objects.equals(nextCategory, refund.getCategory()));
+        if (refundChanges) {
+          refund.groupChanged(nextCategory, nextVisibility, now);
+        }
+      }
+    }
     transactions.saveAndFlush(transaction);
     return toResponse(transaction);
   }
@@ -389,6 +554,53 @@ public class FinancialTransactionService {
     if (accountId != null) {
       query.setParameter("accountId", accountId);
     }
+    bindCommonFilters(query, currency, from, to, limit, offset);
+    return (List<FinancialTransactionEntity>) query.getResultList();
+  }
+
+  /**
+   * Household feed page: every owner's {@code HOUSEHOLD} entry in the household, including departed
+   * owners, scoped and filtered in SQL. The actor's membership is the only membership join, so
+   * owner departure never hides shared history.
+   */
+  private List<FinancialTransactionEntity> findHouseholdPage(
+      UUID householdId,
+      UUID actorId,
+      String status,
+      String currency,
+      LocalDate from,
+      LocalDate to,
+      int limit,
+      int offset) {
+    StringBuilder sql =
+        new StringBuilder(
+            "SELECT t.* FROM financial_transactions t"
+                + " JOIN household_members m ON m.household_id = t.household_id"
+                + " AND m.user_id = :actorId"
+                + " WHERE t.household_id = :householdId AND t.visibility = 'HOUSEHOLD'"
+                + " AND (:status = 'ALL' OR t.status = :status)");
+    if (currency != null) {
+      sql.append(" AND t.currency = :currency");
+    }
+    if (from != null) {
+      sql.append(" AND t.occurred_on >= :fromDate");
+    }
+    if (to != null) {
+      sql.append(" AND t.occurred_on < :toDate");
+    }
+    sql.append(" ORDER BY t.occurred_on DESC, t.created_at DESC, t.id DESC");
+    sql.append(" LIMIT :limit OFFSET :offset");
+
+    Query query = entityManager.createNativeQuery(sql.toString(), FinancialTransactionEntity.class);
+    query.setParameter("householdId", householdId);
+    query.setParameter("actorId", actorId);
+    query.setParameter("status", status);
+    bindCommonFilters(query, currency, from, to, limit, offset);
+    return (List<FinancialTransactionEntity>) query.getResultList();
+  }
+
+  private void bindCommonFilters(
+      Query query, String currency, LocalDate from, LocalDate to, int limit, int offset) {
     if (currency != null) {
       query.setParameter("currency", currency);
     }
@@ -400,13 +612,13 @@ public class FinancialTransactionService {
     }
     query.setParameter("limit", limit);
     query.setParameter("offset", offset);
-    return (List<FinancialTransactionEntity>) query.getResultList();
   }
 
   /**
    * Loads the refund source under lock after reference access is resolved: missing and foreign
    * sources give the generic transaction 404, while a visible but invalid source surfaces the
-   * semantic refund conflict before any state changes.
+   * semantic refund conflict before any state changes. Refund visibility and category inheritance
+   * are validated against the source's current values.
    */
   private FinancialTransactionEntity loadRefundSource(
       UUID householdId, UUID actorId, CreateValues values) {
@@ -425,6 +637,11 @@ public class FinancialTransactionService {
     if (values.rawVisibility() != null && !values.rawVisibility().equals(source.getVisibility())) {
       throw new ValidationFailedException(
           Map.of("visibility", "Refund visibility must match its expense."));
+    }
+    if (values.categoryPresent() && !Objects.equals(values.rawCategory(), source.getCategory())) {
+      // Omission inherits; explicit null is a mismatch unless the source is uncategorized.
+      throw new ValidationFailedException(
+          Map.of("category", "Refund category must match its expense."));
     }
     return source;
   }
@@ -485,6 +702,14 @@ public class FinancialTransactionService {
     }
   }
 
+  /** Source-expense version exhaustion fails safely before any refund-group change commits. */
+  private void bumpRefundSource(FinancialTransactionEntity source, Instant now) {
+    if (source.getVersion() == Integer.MAX_VALUE) {
+      throw new TransactionVersionExhaustedException();
+    }
+    source.refunded(now);
+  }
+
   private CreateValues validateCreate(CreateFields raw) {
     Map<String, String> errors = new LinkedHashMap<>();
     UUID accountId = parseAccountId(raw.accountId(), errors);
@@ -502,11 +727,22 @@ public class FinancialTransactionService {
     if (descriptionError != null) {
       errors.put("description", descriptionError);
     }
-    if (raw.visibility() != null && !PRIVATE_VISIBILITY.equals(raw.visibility())) {
-      errors.put("visibility", "Only private entries are accepted.");
+    if (raw.visibility() != null
+        && !PRIVATE_VISIBILITY.equals(raw.visibility())
+        && !HOUSEHOLD_VISIBILITY.equals(raw.visibility())) {
+      errors.put("visibility", "Choose a supported entry privacy.");
     } else if (raw.visibilityPresent() && raw.visibility() == null) {
       // Explicit null is invalid for create fields; only omission carries the default.
       errors.put("visibility", "Choose an entry privacy.");
+    }
+    TransactionCategory category = null;
+    if (raw.categoryPresent() && raw.category() != null) {
+      try {
+        category = TransactionCategory.valueOf(raw.category());
+      } catch (IllegalArgumentException rejected) {
+        // Unknown, lowercase-mismatched, or empty tokens share one safe field error.
+        errors.put("category", "Choose a supported category.");
+      }
     }
     UUID refundOfTransactionId = null;
     if (kind == TransactionKind.REFUND) {
@@ -535,6 +771,10 @@ public class FinancialTransactionService {
         occurredOn,
         normalize(raw.description()),
         raw.visibility(),
+        raw.visibilityPresent(),
+        raw.category(),
+        raw.categoryPresent(),
+        category,
         refundOfTransactionId);
   }
 
@@ -571,8 +811,18 @@ public class FinancialTransactionService {
       }
     }
     if (raw.visibilityPresent()
-        && (raw.visibility() == null || !PRIVATE_VISIBILITY.equals(raw.visibility()))) {
-      errors.put("visibility", "Only private entries are accepted.");
+        && (raw.visibility() == null
+            || (!PRIVATE_VISIBILITY.equals(raw.visibility())
+                && !HOUSEHOLD_VISIBILITY.equals(raw.visibility())))) {
+      errors.put("visibility", "Choose a supported entry privacy.");
+    }
+    String category = null;
+    if (raw.categoryPresent() && raw.category() != null) {
+      try {
+        category = TransactionCategory.valueOf(raw.category()).name();
+      } catch (IllegalArgumentException rejected) {
+        errors.put("category", "Choose a supported category.");
+      }
     }
     if (raw.statusPresent()) {
       if (raw.status() == null || !"VOIDED".equals(raw.status())) {
@@ -582,7 +832,8 @@ public class FinancialTransactionService {
           raw.moneyPresent()
               || raw.occurredOnPresent()
               || raw.descriptionPresent()
-              || raw.visibilityPresent();
+              || raw.visibilityPresent()
+              || raw.categoryPresent();
       if (otherMutableField) {
         errors.put("status", "Voiding accepts no other field.");
       }
@@ -593,6 +844,7 @@ public class FinancialTransactionService {
             || raw.occurredOnPresent()
             || raw.descriptionPresent()
             || raw.visibilityPresent()
+            || raw.categoryPresent()
             || raw.statusPresent();
     if (!anyFieldPresent) {
       // Body-level rule with no real field to name; the shared shape omits empty fieldErrors.
@@ -615,6 +867,8 @@ public class FinancialTransactionService {
         description,
         raw.visibility(),
         raw.visibilityPresent(),
+        category,
+        raw.categoryPresent(),
         raw.statusPresent());
   }
 
@@ -673,15 +927,26 @@ public class FinancialTransactionService {
 
   /**
    * Canonical request fingerprint over normalized values only: equivalent money strings such as "1"
-   * and "1.00" collapse after scale validation, omitted refund visibility stays an INHERIT
-   * instruction rather than the source's mutable value, and omitted non-refund visibility
-   * normalizes to PRIVATE.
+   * and "1.00" collapse after scale validation. Visibility records an inheritance instruction for
+   * omitted refund visibility and normalizes omission to PRIVATE for non-refunds. Category records
+   * an inheritance instruction for omitted refund category, a null instruction for explicit null
+   * (the one field where the contract permits explicit null), and normalizes omitted and
+   * explicit-null non-refund category to uncategorized.
    */
   private static String fingerprint(CreateValues values) {
     String visibility =
         values.kind() == TransactionKind.REFUND
             ? (values.rawVisibility() == null ? "INHERIT" : values.rawVisibility())
-            : PRIVATE_VISIBILITY;
+            : (values.rawVisibility() == null ? PRIVATE_VISIBILITY : values.rawVisibility());
+    String category;
+    if (values.kind() == TransactionKind.REFUND) {
+      category =
+          values.categoryPresent()
+              ? (values.rawCategory() == null ? "NULL" : values.rawCategory())
+              : "INHERIT";
+    } else {
+      category = values.category() == null ? "UNCATEGORIZED" : values.category().name();
+    }
     String canonical =
         values.accountId()
             + "\u0000"
@@ -696,6 +961,8 @@ public class FinancialTransactionService {
             + values.description()
             + "\u0000"
             + visibility
+            + "\u0000"
+            + category
             + "\u0000"
             + values.refundOfTransactionId();
     try {
@@ -713,17 +980,24 @@ public class FinancialTransactionService {
   }
 
   private static FinancialTransactionResponse toResponse(FinancialTransactionEntity transaction) {
+    return toResponse(transaction, false);
+  }
+
+  /** Redacts the account reference for a non-owner reading a household-disclosed entry. */
+  private static FinancialTransactionResponse toResponse(
+      FinancialTransactionEntity transaction, boolean redactAccountId) {
     return new FinancialTransactionResponse(
         transaction.getId(),
         transaction.getHouseholdId(),
         transaction.getOwnerUserId(),
-        transaction.getAccountId(),
+        redactAccountId ? null : transaction.getAccountId(),
         transaction.getKind().name(),
         new FinancialTransactionResponse.MoneyResponse(
             toResponseString(transaction.getAmount(), transaction.getCurrency()),
             transaction.getCurrency().name()),
         transaction.getOccurredOn().toString(),
         transaction.getDescription(),
+        transaction.getCategory(),
         transaction.getVisibility(),
         transaction.getSource(),
         transaction.getStatus().name(),
@@ -741,6 +1015,10 @@ public class FinancialTransactionService {
       LocalDate occurredOn,
       String description,
       String rawVisibility,
+      boolean visibilityPresent,
+      String rawCategory,
+      boolean categoryPresent,
+      TransactionCategory category,
       UUID refundOfTransactionId) {}
 
   private record PatchValues(
@@ -751,5 +1029,7 @@ public class FinancialTransactionService {
       String description,
       String visibility,
       boolean visibilityPresent,
+      String category,
+      boolean categoryPresent,
       boolean statusPresent) {}
 }

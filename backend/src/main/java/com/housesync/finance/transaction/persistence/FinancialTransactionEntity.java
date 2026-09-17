@@ -52,6 +52,10 @@ public class FinancialTransactionEntity {
   @Column(nullable = false, length = 200)
   private String description;
 
+  /** Taxonomy token or null for uncategorized; the V8 check constraint bounds the stored values. */
+  @Column(length = 24)
+  private String category;
+
   @Column(nullable = false, length = 16)
   private String source;
 
@@ -86,6 +90,8 @@ public class FinancialTransactionEntity {
       SupportedCurrency currency,
       LocalDate occurredOn,
       String description,
+      String visibility,
+      String category,
       UUID refundOfTransactionId,
       Instant createdAt) {
     this.id = id;
@@ -97,8 +103,9 @@ public class FinancialTransactionEntity {
     this.currency = currency;
     this.occurredOn = occurredOn;
     this.description = description;
+    this.category = category;
     this.source = "MANUAL";
-    this.visibility = "PRIVATE";
+    this.visibility = visibility;
     this.status = TransactionStatus.POSTED;
     this.refundOfTransactionId = refundOfTransactionId;
     this.version = 0;
@@ -142,6 +149,10 @@ public class FinancialTransactionEntity {
     return description;
   }
 
+  public String getCategory() {
+    return category;
+  }
+
   public String getSource() {
     return source;
   }
@@ -177,12 +188,48 @@ public class FinancialTransactionEntity {
     this.updatedAt = updatedAt;
   }
 
-  /** Economic correction of a posted entry; refund bounds are rechecked by the service. */
+  /**
+   * One authorized correction of a posted entry: economic fields plus the disclosure fields
+   * (category, visibility) the patch resolved, applied as a single version bump.
+   */
   public void correct(
-      BigDecimal amount, LocalDate occurredOn, String description, Instant updatedAt) {
+      BigDecimal amount,
+      LocalDate occurredOn,
+      String description,
+      String category,
+      String visibility,
+      Instant updatedAt) {
     this.amount = amount;
     this.occurredOn = occurredOn;
     this.description = description;
+    this.category = category;
+    this.visibility = visibility;
+    this.version += 1;
+    this.updatedAt = updatedAt;
+  }
+
+  /**
+   * Group side effect on a linked refund: its own value changed, so it is versioned like a patch.
+   */
+  public void groupChanged(String category, String visibility, Instant updatedAt) {
+    this.category = category;
+    this.visibility = visibility;
+    this.version += 1;
+    this.updatedAt = updatedAt;
+  }
+
+  /** Source-expense version/timestamp bump caused by a state-changing refund group operation. */
+  public void refunded(Instant updatedAt) {
+    this.version += 1;
+    this.updatedAt = updatedAt;
+  }
+
+  /**
+   * Source-expense version/timestamp bump caused by a state-changing allocation create or revoke:
+   * one bump per allocation state change so the expense version stays the single allocation
+   * concurrency token.
+   */
+  public void allocationChanged(Instant updatedAt) {
     this.version += 1;
     this.updatedAt = updatedAt;
   }

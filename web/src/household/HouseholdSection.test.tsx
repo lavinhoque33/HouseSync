@@ -41,6 +41,25 @@ const OTHER_MEMBER = {
   role: 'MEMBER' as const,
 };
 
+const CATEGORY_ITEMS = [
+  { code: 'HOUSING', label: 'Housing' },
+  { code: 'GROCERIES', label: 'Food shopping' },
+  { code: 'DINING', label: 'Dining' },
+  { code: 'UTILITIES', label: 'Utilities' },
+  { code: 'TRANSPORTATION', label: 'Transportation' },
+  { code: 'SHOPPING', label: 'Shopping' },
+  { code: 'ENTERTAINMENT', label: 'Entertainment' },
+  { code: 'HEALTHCARE', label: 'Healthcare' },
+  { code: 'TRAVEL', label: 'Travel' },
+  { code: 'EDUCATION', label: 'Education' },
+  { code: 'PERSONAL', label: 'Personal' },
+  { code: 'HOUSEHOLD_SUPPLIES', label: 'Household supplies' },
+  { code: 'SUBSCRIPTIONS', label: 'Subscriptions' },
+  { code: 'INCOME', label: 'Income' },
+  { code: 'TRANSFERS', label: 'Transfers' },
+  { code: 'MISCELLANEOUS', label: 'Miscellaneous' },
+];
+
 function jsonResponse(body: unknown, status = 200, headers?: HeadersInit) {
   return headers === undefined
     ? Response.json(body, { status })
@@ -92,6 +111,7 @@ interface RouteHandlers {
   ) => Response | Promise<Response>;
   financialAccountsGet?: (householdId?: string) => Response | Promise<Response>;
   transactionsGet?: (householdId?: string) => Response | Promise<Response>;
+  categoriesGet?: () => Response | Promise<Response>;
 }
 
 function stubFetch(routes: RouteHandlers) {
@@ -200,6 +220,9 @@ function stubFetch(routes: RouteHandlers) {
           jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
         );
       }
+      if (/\/transaction-categories$/.test(url)) {
+        return routes.categoriesGet?.() ?? jsonResponse({ items: [] });
+      }
       throw new Error(`unexpected fetch ${url} ${init?.method ?? ''}`);
     },
   );
@@ -248,11 +271,15 @@ describe('transaction section integration', () => {
         jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
       transactionsGet: () =>
         jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+      categoriesGet: () => jsonResponse({ items: CATEGORY_ITEMS }),
     });
     render(<AuthSection />);
     expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
     expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Transactions' })).toBeVisible();
+    expect(
+      screen.getByRole('radio', { name: 'My transactions' }),
+    ).toBeEnabled();
     expect(
       screen.getByRole('button', { name: 'Record transaction' }),
     ).toBeEnabled();
@@ -287,6 +314,7 @@ describe('transaction section authority gating', () => {
       },
       transactionsGet: () =>
         jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+      categoriesGet: () => jsonResponse({ items: CATEGORY_ITEMS }),
     });
     const { rerender } = render(transactionSection(0));
     expect(

@@ -494,6 +494,7 @@ export function HouseholdSection({
               <TransactionsSection
                 key={`${household.id}-transactions`}
                 household={household}
+                currentUserId={currentUserId}
                 csrf={csrf}
                 onCsrfRefreshed={onCsrfRefreshed}
                 onSessionExpired={onSessionExpired}

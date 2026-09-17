@@ -1092,6 +1092,88 @@ code {
   line-height: 1.2;
 }
 
+.finance-category-chip,
+.finance-note-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0.25rem 0.65rem;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font-size: 0.72rem;
+  font-weight: 750;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.finance-note-chip {
+  background: var(--color-soft);
+  color: var(--color-muted);
+  font-weight: 650;
+}
+
+.finance-feed-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 45%, white);
+  border-radius: 0.75rem;
+  min-width: 0;
+  background: #e9f1e8;
+}
+
+.finance-feed-toggle legend {
+  font-weight: 650;
+  font-size: 0.9rem;
+  padding-inline: 0.25rem;
+}
+
+.finance-feed-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.finance-feed-option input {
+  width: 1.35rem;
+  height: 1.35rem;
+  accent-color: var(--color-accent);
+}
+
+.finance-feed-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.finance-share-confirm {
+  gap: var(--space-1);
+}
+
+.finance-share-confirm h5 {
+  margin: 0;
+  color: var(--color-ink);
+  overflow-wrap: break-word;
+}
+
+.finance-disclosure-list {
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+  padding: var(--space-2);
+}
+
+.finance-share-confirm p {
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
 .finance-amount-preview {
   color: var(--color-muted);
   font-size: 0.82rem;
@@ -1163,6 +1245,204 @@ code {
   max-width: 100%;
   padding-top: var(--space-2);
   border-top: 1px solid var(--color-line);
+}
+
+.finance-allocation-panel {
+  gap: var(--space-2);
+}
+
+.finance-allocation-form {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+
+.finance-allocation-form > *,
+.finance-allocation-active > * {
+  min-width: 0;
+}
+
+.finance-allocation-form p,
+.finance-allocation-active p {
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
+.finance-participants-fieldset {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-1) var(--space-2) var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  min-width: 0;
+}
+
+.finance-participants-fieldset legend {
+  font-weight: 650;
+  font-size: 0.9rem;
+  padding-inline: 0.25rem;
+}
+
+.finance-participants-fieldset .household-hint {
+  margin: 0;
+}
+
+.finance-participant-option {
+  display: grid;
+  grid-template-columns: 1.35rem minmax(0, 1fr);
+  align-items: start;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding-block: 0.35rem;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.finance-participant-option input {
+  width: 1.35rem;
+  height: 1.35rem;
+  margin-top: 0.15rem;
+  accent-color: var(--color-accent);
+}
+
+.finance-participant-option > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.finance-participant-uuid {
+  display: block;
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.finance-share-preview {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+  overflow-wrap: anywhere;
+}
+
+.finance-allocation-shares {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-2);
+  list-style: none;
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+  min-width: 0;
+}
+
+.finance-allocation-shares li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.finance-allocation-guide {
+  overflow-wrap: break-word;
+}
+
+.member-balances {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-line);
+}
+
+.member-balances > * {
+  min-width: 0;
+}
+
+.member-balances p {
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
+.member-balances-groups {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.member-balances-group {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 0.85rem;
+  background: var(--color-soft);
+  min-width: 0;
+}
+
+.member-balances-group > * {
+  min-width: 0;
+}
+
+.member-balances-currency {
+  font-weight: 650;
+  color: var(--color-ink);
+}
+
+.member-balances-rows {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.member-balance-row {
+  display: grid;
+  gap: 0.15rem;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+  min-width: 0;
+}
+
+.member-balance-row > * {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.member-balance-uuid {
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.member-balance-amount {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.member-balance-status {
+  color: var(--color-muted);
+  font-size: 0.82rem;
 }
 
 .finance-detail-panel {
@@ -1242,6 +1522,15 @@ code {
   .finance-transaction-card,
   .finance-detail-panel,
   .finance-refund-context,
+  .finance-share-confirm,
+  .finance-disclosure-list,
+  .finance-feed-toggle,
+  .finance-participants-fieldset,
+  .finance-allocation-shares,
+  .finance-share-preview,
+  .member-balances,
+  .member-balances-group,
+  .member-balance-row,
   .invite-notice,
   .join-notice,
   .join-card {

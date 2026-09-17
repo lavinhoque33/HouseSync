@@ -5,7 +5,11 @@ import com.housesync.finance.account.web.FinancialAccountExceptions.IdempotencyC
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionExhaustedException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AccountArchivedException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AllocationConflictException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AllocationIdempotencyConflictException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AllocationNotFoundException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.RefundConflictException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionForbiddenException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionIdempotencyConflictException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionNotFoundException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionVersionConflictException;
@@ -112,6 +116,16 @@ public class FinancialAccountExceptionHandler {
         failure);
   }
 
+  @ExceptionHandler(TransactionForbiddenException.class)
+  public ResponseEntity<ApiError> transactionForbidden(TransactionForbiddenException failure) {
+    return error(
+        HttpStatus.FORBIDDEN,
+        ErrorCodes.FORBIDDEN,
+        "Only the entry's owner can change it.",
+        null,
+        failure);
+  }
+
   @ExceptionHandler(AccountArchivedException.class)
   public ResponseEntity<ApiError> accountArchived(AccountArchivedException failure) {
     return error(
@@ -138,6 +152,37 @@ public class FinancialAccountExceptionHandler {
         HttpStatus.CONFLICT,
         ErrorCodes.TRANSACTION_VOIDED,
         "The transaction is voided.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(AllocationNotFoundException.class)
+  public ResponseEntity<ApiError> allocationNotFound(AllocationNotFoundException failure) {
+    return error(
+        HttpStatus.NOT_FOUND,
+        ErrorCodes.ALLOCATION_NOT_FOUND,
+        "No active allocation was found for this expense.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(AllocationConflictException.class)
+  public ResponseEntity<ApiError> allocationConflict(AllocationConflictException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.ALLOCATION_CONFLICT,
+        "The allocation conflicts with the expense state.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(AllocationIdempotencyConflictException.class)
+  public ResponseEntity<ApiError> allocationIdempotencyConflict(
+      AllocationIdempotencyConflictException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.IDEMPOTENCY_CONFLICT,
+        "That request key was already used for different allocation details.",
         null,
         failure);
   }

@@ -63,4 +63,12 @@ public interface HouseholdMemberRepository
       @Param("householdId") UUID householdId, @Param("userId") UUID userId);
 
   long countByHouseholdIdAndRole(UUID householdId, MemberRole role);
+
+  /**
+   * Current member user IDs of one household for finance reads that must label CURRENT versus
+   * DEPARTED participants. Callers hold the household lifecycle lock, so the result is part of one
+   * consistent authorized snapshot.
+   */
+  @Query("SELECT m.userId FROM HouseholdMemberEntity m WHERE m.householdId = :householdId")
+  List<UUID> findCurrentUserIdsByHouseholdId(@Param("householdId") UUID householdId);
 }

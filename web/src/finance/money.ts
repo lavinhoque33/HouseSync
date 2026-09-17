@@ -202,6 +202,63 @@ export function decodeMoneyAmount(
   return { magnitude: unsigned, sign: negative ? 'negative' : 'positive' };
 }
 
+/**
+ * Exact minor-unit integer for a magnitude string already validated at the
+ * currency scale (documented grammar, no sign). All arithmetic is `bigint`,
+ * so no float or Number rounding can touch financial values.
+ */
+export function minorUnitsOfMagnitude(
+  magnitude: string,
+  currency: FinancialAccountCurrency,
+): bigint {
+  const scale = CURRENCY_SCALES[currency];
+  const [integral, fractional] = splitParts(magnitude);
+  return BigInt(`${integral}${(fractional ?? '').padEnd(scale, '0')}`);
+}
+
+/**
+ * Inverse of `minorUnitsOfMagnitude`: the exact scale-correct magnitude
+ * string for non-negative checked minor units, rebuilt from decimal digits
+ * only. Precondition: `units` is a non-negative integer.
+ */
+export function magnitudeOfMinorUnits(
+  units: bigint,
+  currency: FinancialAccountCurrency,
+): string {
+  const scale = CURRENCY_SCALES[currency];
+  if (scale === 0) return units.toString();
+  const base = 10n ** BigInt(scale);
+  return `${units / base}.${(units % base).toString().padStart(scale, '0')}`;
+}
+
+/**
+ * Aggregate/response amount strings (allocation shares, member balances)
+ * keep the currency scale but may exceed the per-record 12 integral-digit
+ * input bound, so they get a dedicated bounded grammar: optional single
+ * minus, no leading zeros, no exponent, exactly the currency's scale, zero
+ * allowed. Negative zero (`-0`, `-0.00`, …) is a signed artifact, never a
+ * distinct balance, and is rejected. Length stays bounded before any
+ * parsing.
+ */
+const AGGREGATE_AMOUNT_GRAMMAR = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/;
+const AGGREGATE_NEGATIVE_ZERO = /^-0+(\.0+)?$/;
+const MAX_AGGREGATE_AMOUNT_LENGTH = 64;
+
+export function isAggregateAmountString(
+  amount: string,
+  currency: FinancialAccountCurrency,
+): boolean {
+  if (amount.length === 0 || amount.length > MAX_AGGREGATE_AMOUNT_LENGTH) {
+    return false;
+  }
+  if (!AGGREGATE_AMOUNT_GRAMMAR.test(amount)) return false;
+  if (AGGREGATE_NEGATIVE_ZERO.test(amount)) return false;
+  const scale = CURRENCY_SCALES[currency];
+  const point = amount.indexOf('.');
+  if (point === -1) return scale === 0;
+  return scale > 0 && amount.length - point - 1 === scale;
+}
+
 /** Display string preserving every stored digit with the currency code. */
 export function formatMoney(amount: string, currency: string): string {
   return `${amount} ${currency}`;

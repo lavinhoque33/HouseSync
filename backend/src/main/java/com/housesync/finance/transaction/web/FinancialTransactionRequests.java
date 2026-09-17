@@ -17,6 +17,8 @@ public final class FinancialTransactionRequests {
     private String description;
     private String visibility;
     private boolean visibilityPresent;
+    private String category;
+    private boolean categoryPresent;
     private String refundOfTransactionId;
     private boolean refundOfTransactionIdPresent;
 
@@ -49,6 +51,12 @@ public final class FinancialTransactionRequests {
     public void setVisibility(String visibility) {
       this.visibilityPresent = true;
       this.visibility = visibility;
+    }
+
+    @JsonSetter("category")
+    public void setCategory(String category) {
+      this.categoryPresent = true;
+      this.category = category;
     }
 
     @JsonSetter("refundOfTransactionId")
@@ -85,6 +93,14 @@ public final class FinancialTransactionRequests {
       return visibilityPresent;
     }
 
+    public String category() {
+      return category;
+    }
+
+    public boolean categoryPresent() {
+      return categoryPresent;
+    }
+
     public String refundOfTransactionId() {
       return refundOfTransactionId;
     }
@@ -106,6 +122,8 @@ public final class FinancialTransactionRequests {
     private boolean descriptionPresent;
     private String visibility;
     private boolean visibilityPresent;
+    private String category;
+    private boolean categoryPresent;
     private String status;
     private boolean statusPresent;
 
@@ -137,6 +155,12 @@ public final class FinancialTransactionRequests {
     public void setVisibility(String visibility) {
       this.visibilityPresent = true;
       this.visibility = visibility;
+    }
+
+    @JsonSetter("category")
+    public void setCategory(String category) {
+      this.categoryPresent = true;
+      this.category = category;
     }
 
     @JsonSetter("status")
@@ -183,6 +207,14 @@ public final class FinancialTransactionRequests {
 
     public boolean visibilityPresent() {
       return visibilityPresent;
+    }
+
+    public String category() {
+      return category;
+    }
+
+    public boolean categoryPresent() {
+      return categoryPresent;
     }
 
     public String status() {

@@ -121,6 +121,7 @@ class FinancialTransactionHttpIT {
       assertThat(entry.json().path("visibility").asText()).isEqualTo("PRIVATE");
       assertThat(entry.json().path("source").asText()).isEqualTo("MANUAL");
       assertThat(entry.json().path("status").asText()).isEqualTo("POSTED");
+      assertThat(entry.json().path("category").isNull()).isTrue();
       assertThat(entry.json().path("version").asInt()).isZero();
       assertThat(entry.json().path("refundOfTransactionId").isNull()).isTrue();
       assertThat(entry.json().path("money").propertyNames()).containsExactly("amount", "currency");
@@ -339,8 +340,9 @@ class FinancialTransactionHttpIT {
         .isEqualTo(1);
 
     Resp householdView = actor.get(transactionPath(householdId) + "?view=HOUSEHOLD");
-    assertThat(householdView.status).isEqualTo(400);
-    assertThat(householdView.json().path("fieldErrors").propertyNames()).containsExactly("view");
+    assertThat(householdView.status).isEqualTo(200);
+    assertThat(items(householdView.json()).size()).isZero();
+    assertThat(householdView.cacheControl()).contains("no-store");
 
     Resp foreignAccount =
         actor.get(transactionPath(householdId) + "?accountId=" + UUID.randomUUID());
@@ -453,16 +455,16 @@ class FinancialTransactionHttpIT {
         actor.patchTransaction(
             householdId,
             expenseId,
-            "{\"expectedVersion\":0,\"money\":{\"amount\":\"-90.00\",\"currency\":\"BRL\"}}");
+            "{\"expectedVersion\":2,\"money\":{\"amount\":\"-90.00\",\"currency\":\"BRL\"}}");
     assertThat(shrinkExpense.status).isEqualTo(409);
     assertThat(shrinkExpense.json().path("code").asText()).isEqualTo("REFUND_CONFLICT");
     Resp moveExpenseAfterRefunds =
         actor.patchTransaction(
-            householdId, expenseId, "{\"expectedVersion\":0,\"occurredOn\":\"2026-09-18\"}");
+            householdId, expenseId, "{\"expectedVersion\":2,\"occurredOn\":\"2026-09-18\"}");
     assertThat(moveExpenseAfterRefunds.status).isEqualTo(409);
     Resp voidExpenseWithLiveRefunds =
         actor.patchTransaction(
-            householdId, expenseId, "{\"expectedVersion\":0,\"status\":\"VOIDED\"}");
+            householdId, expenseId, "{\"expectedVersion\":2,\"status\":\"VOIDED\"}");
     assertThat(voidExpenseWithLiveRefunds.status).isEqualTo(409);
     assertThat(voidExpenseWithLiveRefunds.json().path("code").asText())
         .isEqualTo("REFUND_CONFLICT");
@@ -475,7 +477,8 @@ class FinancialTransactionHttpIT {
     assertThat(voidRefund.json().path("description").asText()).isEqualTo("Rest");
     assertThat(voidRefund.json().path("version").asInt()).isEqualTo(1);
 
-    // The freed cap allows a new refund; the source expense version stays untouched in B.
+    // Voiding one refund frees the cap; each state-changing refund group operation
+    // also moves the source expense version for stale-form protection.
     Resp freedRefund =
         actor.createTransaction(
             householdId,
@@ -488,12 +491,13 @@ class FinancialTransactionHttpIT {
                 "SELECT version FROM financial_transactions WHERE id = ?::uuid",
                 Integer.class,
                 expenseId))
-        .isZero();
+        .isEqualTo(4);
 
     Resp voidExpenseAgain =
         actor.patchTransaction(
-            householdId, expenseId, "{\"expectedVersion\":0,\"status\":\"VOIDED\"}");
+            householdId, expenseId, "{\"expectedVersion\":4,\"status\":\"VOIDED\"}");
     assertThat(voidExpenseAgain.status).isEqualTo(409);
+    assertThat(voidExpenseAgain.json().path("code").asText()).isEqualTo("REFUND_CONFLICT");
 
     Resp voidOtherRefund =
         actor.patchTransaction(
@@ -505,9 +509,9 @@ class FinancialTransactionHttpIT {
     assertThat(voidFreedRefund.status).isEqualTo(200);
     Resp voidExpenseNow =
         actor.patchTransaction(
-            householdId, expenseId, "{\"expectedVersion\":0,\"status\":\"VOIDED\"}");
+            householdId, expenseId, "{\"expectedVersion\":6,\"status\":\"VOIDED\"}");
     assertThat(voidExpenseNow.status).isEqualTo(200);
-    assertThat(voidExpenseNow.json().path("version").asInt()).isEqualTo(1);
+    assertThat(voidExpenseNow.json().path("version").asInt()).isEqualTo(7);
   }
 
   @Test
@@ -628,13 +632,13 @@ class FinancialTransactionHttpIT {
     assertThat(moneyAmount(corrected.json())).isEqualTo("30.00");
     assertThat(corrected.json().path("version").asInt()).isEqualTo(1);
 
-    // Refund mutations never move the source expense version here.
+    // A state-changing refund correction also moves the source expense version.
     assertThat(
             jdbc.queryForObject(
                 "SELECT version FROM financial_transactions WHERE id = ?::uuid",
                 Integer.class,
                 expenseId))
-        .isZero();
+        .isEqualTo(3);
 
     // Correcting above the remaining bound conflicts under the locked group.
     Resp overCap =
@@ -669,6 +673,19 @@ class FinancialTransactionHttpIT {
     assertThat(described.status).isEqualTo(200);
     assertThat(described.json().path("description").asText()).isEqualTo("Adjusted partial");
     assertThat(described.json().path("version").asInt()).isEqualTo(2);
+
+    // A no-op refund correction bumps nothing: neither the refund nor its source expense.
+    Resp refundNoOp =
+        actor.patchTransaction(
+            householdId, refundId, "{\"expectedVersion\":2,\"description\":\"Adjusted partial\"}");
+    assertThat(refundNoOp.status).isEqualTo(200);
+    assertThat(refundNoOp.json().path("version").asInt()).isEqualTo(2);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT version FROM financial_transactions WHERE id = ?::uuid",
+                Integer.class,
+                expenseId))
+        .isEqualTo(4);
 
     // The untouched second refund still stands and the posted sum stays conserved.
     Resp secondDetail = actor.get(transactionPath(householdId) + "/" + secondRefundId);
@@ -855,7 +872,7 @@ class FinancialTransactionHttpIT {
                 "SELECT version FROM financial_transactions WHERE id = ?::uuid",
                 Integer.class,
                 expenseId))
-        .isZero();
+        .isEqualTo(4);
   }
 
   @Test
@@ -1018,10 +1035,13 @@ class FinancialTransactionHttpIT {
             householdId, transactionId, "{\"expectedVersion\":1,\"status\":\"POSTED\"}");
     assertThat(postedStatus.status).isEqualTo(400);
 
+    // Sharing accepts the disclosed visibility on the owner's own entry.
     Resp householdVisibility =
         actor.patchTransaction(
             householdId, transactionId, "{\"expectedVersion\":1,\"visibility\":\"HOUSEHOLD\"}");
-    assertThat(householdVisibility.status).isEqualTo(400);
+    assertThat(householdVisibility.status).isEqualTo(200);
+    assertThat(householdVisibility.json().path("visibility").asText()).isEqualTo("HOUSEHOLD");
+    assertThat(householdVisibility.json().path("version").asInt()).isEqualTo(2);
 
     // Version exhaustion fails safely on a posted entry; no-op touches still return 200.
     jdbc.update(

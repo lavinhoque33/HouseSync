@@ -2,6 +2,7 @@ package com.housesync.finance.transaction.persistence;
 
 import com.housesync.finance.transaction.domain.TransactionStatus;
 import jakarta.persistence.LockModeType;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -19,6 +20,21 @@ public interface FinancialTransactionRepository
           + " AND t.ownerUserId = :actorId"
           + " AND m.householdId = t.householdId AND m.userId = :actorId")
   Optional<FinancialTransactionEntity> findOwnedScoped(
+      @Param("householdId") UUID householdId,
+      @Param("transactionId") UUID transactionId,
+      @Param("actorId") UUID actorId);
+
+  /**
+   * Authorized detail scope: the actor's own entry at any visibility, or another
+   * owner's entry currently disclosed to the household. Membership is joined in the same query so a
+   * removed or non-member actor never resolves the row at all.
+   */
+  @Query(
+      "SELECT t FROM FinancialTransactionEntity t, HouseholdMemberEntity m"
+          + " WHERE t.id = :transactionId AND t.householdId = :householdId"
+          + " AND (t.ownerUserId = :actorId OR t.visibility = 'HOUSEHOLD')"
+          + " AND m.householdId = t.householdId AND m.userId = :actorId")
+  Optional<FinancialTransactionEntity> findVisibleScoped(
       @Param("householdId") UUID householdId,
       @Param("transactionId") UUID transactionId,
       @Param("actorId") UUID actorId);
@@ -58,4 +74,26 @@ public interface FinancialTransactionRepository
           + " WHERE t.refundOfTransactionId = :expenseId"
           + " ORDER BY t.id ASC")
   List<FinancialTransactionEntity> findGroupForUpdate(@Param("expenseId") UUID expenseId);
+
+  /**
+   * Authorized rows for derived balances: allocations are already household-scoped, so this only
+   * re-checks the household bound while loading the contributing expenses and their currencies.
+   */
+  @Query(
+      "SELECT t FROM FinancialTransactionEntity t"
+          + " WHERE t.householdId = :householdId AND t.id IN :transactionIds")
+  List<FinancialTransactionEntity> findHouseholdScopedByIds(
+      @Param("householdId") UUID householdId,
+      @Param("transactionIds") Collection<UUID> transactionIds);
+
+  /**
+   * Cumulative posted refund magnitude per expense, derived at read time for balances. Each row is
+   * [expenseId, SUM(amount)]; empty result means the expense carries no posted refunds.
+   */
+  @Query(
+      "SELECT t.refundOfTransactionId, SUM(t.amount) FROM FinancialTransactionEntity t"
+          + " WHERE t.refundOfTransactionId IN :expenseIds AND t.status = :posted"
+          + " GROUP BY t.refundOfTransactionId")
+  List<Object[]> sumPostedRefunds(
+      @Param("expenseIds") Collection<UUID> expenseIds, @Param("posted") TransactionStatus posted);
 }

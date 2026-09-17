@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   ApiError,
   fetchTransaction,
+  fetchTransactionCategories,
   fetchTransactions,
   patchTransaction,
   postTransaction,
@@ -23,6 +24,7 @@ function validTransaction(overrides: Record<string, unknown> = {}) {
     money: { amount: '-12.34', currency: 'BRL' },
     occurredOn: '2026-09-16',
     description: 'Groceries',
+    category: null,
     visibility: 'PRIVATE',
     source: 'MANUAL',
     status: 'POSTED',
@@ -73,7 +75,7 @@ describe('transaction typed client', () => {
         hasMore: false,
       });
     });
-    const page = await fetchTransactions(HOUSEHOLD_ID);
+    const page = await fetchTransactions(HOUSEHOLD_ID, 'OWN');
     expect(page).toEqual({
       items: [validTransaction()],
       limit: 100,
@@ -88,14 +90,12 @@ describe('transaction typed client', () => {
     });
   });
 
-  it('rejects an item outside the exact 15-field transaction contract', async () => {
+  it('rejects an item outside the exact 16-field transaction contract', async () => {
     const malformed: Array<Record<string, unknown>> = [
       // Unsupported kind.
       validTransaction({ kind: 'FEE' }),
       // Unsupported status.
       validTransaction({ status: 'PENDING' }),
-      // Household disclosure is not parsed here.
-      validTransaction({ visibility: 'HOUSEHOLD' }),
       // Non-manual source.
       validTransaction({ source: 'PROVIDER' }),
       // Money as a JSON number is never coerced.
@@ -130,11 +130,21 @@ describe('transaction typed client', () => {
       validTransaction({ refundOfTransactionId: TRANSACTION_ID }),
       // Missing refund source on a refund.
       validTransaction({ kind: 'REFUND', refundOfTransactionId: null }),
-      // A null accountId belongs to household-feed redaction only.
-      validTransaction({ accountId: null }),
+      // A category must be null or exactly one taxonomy token.
+      validTransaction({ category: 'GROCERIES ' }),
+      // Lowercase-mismatched tokens are rejected.
+      validTransaction({ category: 'groceries' }),
+      // Empty-string categories are rejected.
+      validTransaction({ category: '' }),
+      // Wrong-type categories are rejected.
+      validTransaction({ category: 5 }),
+      // The category field is always present.
+      { ...validTransaction(), category: undefined },
+      // A redacted accountId must stay null or a UUID.
+      validTransaction({ accountId: 'not-a-uuid' }),
       // Missing server timestamps.
       { ...validTransaction(), updatedAt: undefined },
-      // Extra top-level field: the DTO is exactly 15 fields.
+      // Extra top-level field: the DTO is exactly 16 fields.
       {
         ...validTransaction(),
         accountName: 'Daily spending',
@@ -146,7 +156,7 @@ describe('transaction typed client', () => {
       stubFetch(() =>
         jsonResponse({ items: [item], limit: 100, offset: 0, hasMore: false }),
       );
-      const failure = await fetchTransactions(HOUSEHOLD_ID).then(
+      const failure = await fetchTransactions(HOUSEHOLD_ID, 'OWN').then(
         () => null,
         (error: unknown) => error,
       );
@@ -156,6 +166,40 @@ describe('transaction typed client', () => {
         message: 'The server returned an unexpected transaction response.',
       });
     }
+  });
+
+  it('parses disclosure: household visibility, redacted account, categories', async () => {
+    stubFetch(() =>
+      jsonResponse({
+        items: [
+          validTransaction({
+            category: 'GROCERIES',
+          }),
+          validTransaction({
+            visibility: 'HOUSEHOLD',
+            accountId: null,
+            description: 'Shared internet bill',
+            category: 'UTILITIES',
+          }),
+          validTransaction({
+            visibility: 'HOUSEHOLD',
+            category: null,
+          }),
+        ],
+        limit: 100,
+        offset: 0,
+        hasMore: false,
+      }),
+    );
+    const page = await fetchTransactions(HOUSEHOLD_ID, 'HOUSEHOLD');
+    expect(page.items).toHaveLength(3);
+    expect(page.items[0]).toMatchObject({ category: 'GROCERIES' });
+    expect(page.items[1]).toMatchObject({
+      accountId: null,
+      visibility: 'HOUSEHOLD',
+      category: 'UTILITIES',
+    });
+    expect(page.items[2]).toMatchObject({ category: null });
   });
 
   it('accepts documented scale padding, refund shapes, and the version bound', async () => {
@@ -189,7 +233,7 @@ describe('transaction typed client', () => {
         hasMore: true,
       }),
     );
-    const page = await fetchTransactions(HOUSEHOLD_ID);
+    const page = await fetchTransactions(HOUSEHOLD_ID, 'OWN');
     expect(page.items).toHaveLength(6);
     expect(page.hasMore).toBe(true);
   });
@@ -473,7 +517,7 @@ describe('transaction typed client', () => {
         401,
       ),
     );
-    const failure = await fetchTransactions(HOUSEHOLD_ID).then(
+    const failure = await fetchTransactions(HOUSEHOLD_ID, 'OWN').then(
       () => null,
       (error: unknown) => error,
     );
@@ -482,4 +526,184 @@ describe('transaction typed client', () => {
       code: 'UNAUTHENTICATED',
     });
   });
+
+  it('loads the fixed taxonomy from the documented bounded route', async () => {
+    const categories = validCategoryItems();
+    const calls = stubFetch((url) => {
+      expect(url).toBe(
+        `/api/households/${HOUSEHOLD_ID}/transaction-categories`,
+      );
+      return jsonResponse({ items: categories });
+    });
+    const result = await fetchTransactionCategories(HOUSEHOLD_ID);
+    expect(result.items).toEqual(categories);
+    expect(calls[0]?.init?.method).toBe('GET');
+    expect(calls[0]?.init?.credentials).toBe('include');
+    expect(calls[0]?.init?.cache).toBe('no-store');
+  });
+
+  it('rejects a taxonomy response outside the fixed 16-item contract', async () => {
+    const malformed: Array<unknown> = [
+      // Fewer than the fixed 16 items.
+      { items: validCategoryItems().slice(1) },
+      // More than the fixed 16 items.
+      { items: [...validCategoryItems(), ...validCategoryItems()] },
+      // Not an items array.
+      {},
+      // An unknown token.
+      {
+        items: [...validCategoryItems().slice(1), { code: 'XYZ', label: 'X' }],
+      },
+      // A missing label.
+      {
+        items: [...validCategoryItems().slice(1), { code: 'HOUSING' }],
+      },
+      // A non-string label.
+      {
+        items: [
+          ...validCategoryItems().slice(1),
+          { code: 'HOUSING', label: 7 },
+        ],
+      },
+      // A duplicated code.
+      {
+        items: [...validCategoryItems().slice(1), validCategoryItems()[2]],
+      },
+      // A non-object item.
+      { items: [...validCategoryItems().slice(1), 'HOUSING'] },
+    ];
+    for (const body of malformed) {
+      stubFetch(() => jsonResponse(body));
+      const failure = await fetchTransactionCategories(HOUSEHOLD_ID).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(ApiError);
+      expect(failure as ApiError).toMatchObject({
+        code: 'UNKNOWN_ERROR',
+        message: 'The server returned an unexpected transaction response.',
+      });
+    }
+  });
+
+  it('creates with a taxonomy token category in the exact body', async () => {
+    const input: CreateTransactionInput = {
+      ...EXPENSE_INPUT,
+      category: 'GROCERIES',
+    };
+    const calls = stubFetch((url) => {
+      expect(url).toBe(`/api/households/${HOUSEHOLD_ID}/transactions`);
+      return jsonResponse(validTransaction({ category: 'GROCERIES' }), 201);
+    });
+    const created = await postTransaction(
+      HOUSEHOLD_ID,
+      input,
+      '11111111-2222-4333-8444-555555555555',
+      CSRF,
+    );
+    expect(created.category).toBe('GROCERIES');
+    expect(calls[0]?.init?.method).toBe('POST');
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual(input);
+  });
+
+  it('creates an uncategorized entry with an explicit null category', async () => {
+    const calls = stubFetch(() => jsonResponse(validTransaction(), 201));
+    await postTransaction(
+      HOUSEHOLD_ID,
+      {
+        ...EXPENSE_INPUT,
+        category: null,
+      },
+      '11111111-2222-4333-8444-555555555555',
+      CSRF,
+    );
+    const body = JSON.parse(String(calls[0]?.init?.body)) as Record<
+      string,
+      unknown
+    >;
+    expect(body.category).toBeNull();
+    expect(body.visibility).toBe('PRIVATE');
+  });
+
+  it('patches category and visibility shares in one expectedVersion request', async () => {
+    const calls = stubFetch((url) => {
+      expect(url).toBe(
+        `/api/households/${HOUSEHOLD_ID}/transactions/${TRANSACTION_ID}`,
+      );
+      return jsonResponse(
+        validTransaction({ category: 'DINING', visibility: 'HOUSEHOLD' }),
+      );
+    });
+    const updated = await patchTransaction(
+      HOUSEHOLD_ID,
+      TRANSACTION_ID,
+      {
+        expectedVersion: 1,
+        category: 'DINING',
+        visibility: 'HOUSEHOLD',
+      },
+      CSRF,
+    );
+    expect(updated.visibility).toBe('HOUSEHOLD');
+    expect(updated.category).toBe('DINING');
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      expectedVersion: 1,
+      category: 'DINING',
+      visibility: 'HOUSEHOLD',
+    });
+  });
+
+  it('patches a category clear with explicit null only', async () => {
+    const calls = stubFetch(() =>
+      jsonResponse(validTransaction({ category: null, version: 2 })),
+    );
+    const updated = await patchTransaction(
+      HOUSEHOLD_ID,
+      TRANSACTION_ID,
+      { expectedVersion: 1, category: null },
+      CSRF,
+    );
+    expect(updated.category).toBeNull();
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      expectedVersion: 1,
+      category: null,
+    });
+  });
+
+  it('rejects a refund payload carrying a category or visibility override', () => {
+    // The refund union variant simply has no category/visibility keys; this
+    // compile-time shape is asserted by the type-level structure below.
+    const refundInput: CreateTransactionInput = {
+      accountId: ACCOUNT_ID,
+      kind: 'REFUND',
+      money: { amount: '5.00', currency: 'BRL' },
+      occurredOn: '2026-09-17',
+      description: 'Returned one item',
+      refundOfTransactionId: TRANSACTION_ID,
+    };
+    const body = refundInput as Record<string, unknown>;
+    expect('category' in body).toBe(false);
+    expect('visibility' in body).toBe(false);
+  });
 });
+
+function validCategoryItems(): Array<{ code: string; label: string }> {
+  return [
+    { code: 'HOUSING', label: 'Housing' },
+    { code: 'GROCERIES', label: 'Groceries' },
+    { code: 'DINING', label: 'Dining' },
+    { code: 'UTILITIES', label: 'Utilities' },
+    { code: 'TRANSPORTATION', label: 'Transportation' },
+    { code: 'SHOPPING', label: 'Shopping' },
+    { code: 'ENTERTAINMENT', label: 'Entertainment' },
+    { code: 'HEALTHCARE', label: 'Healthcare' },
+    { code: 'TRAVEL', label: 'Travel' },
+    { code: 'EDUCATION', label: 'Education' },
+    { code: 'PERSONAL', label: 'Personal' },
+    { code: 'HOUSEHOLD_SUPPLIES', label: 'Household supplies' },
+    { code: 'SUBSCRIPTIONS', label: 'Subscriptions' },
+    { code: 'INCOME', label: 'Income' },
+    { code: 'TRANSFERS', label: 'Transfers' },
+    { code: 'MISCELLANEOUS', label: 'Miscellaneous' },
+  ];
+}

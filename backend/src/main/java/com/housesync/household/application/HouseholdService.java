@@ -20,8 +20,10 @@ import jakarta.persistence.EntityManager;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -178,6 +180,16 @@ public class HouseholdService {
     memberships
         .findScopedByHouseholdAndActor(householdId, actorId)
         .orElseThrow(HouseholdNotFoundException::new);
+  }
+
+  /**
+   * Current member user IDs for finance flows that validate participants or label membership
+   * states. The caller owns the surrounding finance transaction and already holds the household
+   * lifecycle lock, so membership cannot move between this read and the caller's write.
+   */
+  @Transactional(readOnly = true, propagation = Propagation.MANDATORY)
+  public Set<UUID> currentMemberUserIds(UUID householdId) {
+    return new LinkedHashSet<>(memberships.findCurrentUserIdsByHouseholdId(householdId));
   }
 
   /** Membership-scoped view to the authorized household DTO. Shared with invitations. */

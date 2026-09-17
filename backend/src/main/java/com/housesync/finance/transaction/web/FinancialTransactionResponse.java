@@ -13,6 +13,7 @@ public record FinancialTransactionResponse(
     MoneyResponse money,
     String occurredOn,
     String description,
+    String category,
     String visibility,
     String source,
     String status,

@@ -18,6 +18,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.housesync.finance.account.application.FinancialAccountService;
+import com.housesync.finance.transaction.application.FinancialAllocationService;
 import com.housesync.finance.transaction.application.FinancialTransactionService;
 import com.housesync.household.application.HouseholdService;
 import com.housesync.household.invitation.application.InvitationService;
@@ -67,6 +68,7 @@ class SecurityConfigurationTest {
   @MockitoBean private InvitationService invitations;
   @MockitoBean private FinancialAccountService financialAccounts;
   @MockitoBean private FinancialTransactionService financialTransactions;
+  @MockitoBean private FinancialAllocationService financialAllocations;
 
   @ParameterizedTest
   @ValueSource(
@@ -110,6 +112,11 @@ class SecurityConfigurationTest {
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001",
     "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/transaction-categories",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001/allocation",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001/allocation",
+    "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001/allocation",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/member-balances",
     "POST, /actuator/health",
     "PUT, /actuator/health",
     "PATCH, /actuator/health",
@@ -174,6 +181,11 @@ class SecurityConfigurationTest {
     "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions",
     "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001",
     "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001/allocation",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001/allocation",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/member-balances",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/member-balances",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/member-balances",
     "GET, /api/households/a/b",
   })
   void authenticatedRequestsToUnimplementedRoutesAreForbidden(String method, String path)

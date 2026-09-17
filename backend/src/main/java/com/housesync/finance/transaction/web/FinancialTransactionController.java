@@ -34,8 +34,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Transaction endpoints: OWN-view only, PRIVATE visibility only. Query parameters are
- * filtered in SQL after membership and ownership authorization, never in memory.
+ * Transaction endpoints: own entries at any visibility plus the household feed. Query
+ * parameters are filtered in SQL after membership and visibility authorization, never in memory;
+ * non-owner account references are redacted to null in the authorized projection.
  */
 @RestController
 @RequestMapping("/api/households/{householdId}/transactions")
@@ -43,6 +44,7 @@ public class FinancialTransactionController {
 
   private static final Set<String> LIST_PARAMETERS =
       Set.of("limit", "offset", "view", "accountId", "currency", "from", "to", "status");
+  private static final Set<String> VIEWS = Set.of("OWN", "HOUSEHOLD");
   private static final Set<String> CURRENCIES = Set.of("BRL", "USD", "EUR", "GBP", "JPY", "KWD");
   private static final LocalDate MIN_FILTER_DATE = LocalDate.of(1900, 1, 1);
   private static final LocalDate MAX_FILTER_DATE = LocalDate.of(9999, 12, 31);
@@ -93,6 +95,8 @@ public class FinancialTransactionController {
                 body.description(),
                 body.visibility(),
                 body.visibilityPresent(),
+                body.category(),
+                body.categoryPresent(),
                 body.refundOfTransactionId(),
                 body.refundOfTransactionIdPresent()));
     return noCache(created.replayed() ? HttpStatus.OK : HttpStatus.CREATED, created.transaction());
@@ -107,16 +111,19 @@ public class FinancialTransactionController {
     int limit = parseInt(query, "limit", 50, 1, 100);
     int offset = parseInt(query, "offset", 0, 0, 10_000);
     String view = single(query, "view", "OWN");
-    if (!"OWN".equals(view)) {
-      // The household feed arrives with its own authorization/projection checks.
-      throw new ValidationFailedException(
-          Map.of("view", "Only your own entries are available."));
+    if (!VIEWS.contains(view)) {
+      throw new ValidationFailedException(Map.of("view", "Choose your own or household entries."));
     }
     String status = single(query, "status", "POSTED");
     if (!Set.of("POSTED", "VOIDED", "ALL").contains(status)) {
       throw new ValidationFailedException(Map.of("status", "Choose posted, voided, or all."));
     }
     UUID accountId = parseUuidQuery(query, "accountId");
+    if (accountId != null && !"OWN".equals(view)) {
+      // A private account filter is meaningful only inside the actor's own view.
+      throw new ValidationFailedException(
+          Map.of("accountId", "Account filtering is available for your own entries."));
+    }
     String currency = single(query, "currency", null);
     if (currency != null && !CURRENCIES.contains(currency)) {
       throw new ValidationFailedException(Map.of("currency", "Choose a supported currency."));
@@ -127,6 +134,7 @@ public class FinancialTransactionController {
         transactions.list(
             householdId,
             actorId(authentication),
+            view,
             status,
             accountId,
             currency,
@@ -180,6 +188,8 @@ public class FinancialTransactionController {
                 body.descriptionPresent(),
                 body.visibility(),
                 body.visibilityPresent(),
+                body.category(),
+                body.categoryPresent(),
                 body.status(),
                 body.statusPresent())));
   }
