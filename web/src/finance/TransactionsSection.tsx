@@ -35,8 +35,6 @@ import {
   decodeMoneyAmount,
   encodeMoneyMagnitude,
   formatMoney,
-  householdZoneToday,
-  isFutureDate,
   isSupportedTransactionDate,
   magnitudeOfMinorUnits,
   minorUnitsOfMagnitude,
@@ -45,6 +43,13 @@ import {
 } from './money';
 import { previewEqualShares, sortCanonicalUserIds } from './allocation';
 import { MemberBalancesSection } from './MemberBalancesSection';
+import { ReportingSettingsSection } from './ReportingSettingsSection';
+import { SpendingDashboardSection } from './SpendingDashboardSection';
+import {
+  isFutureDateInZone,
+  resolveCalculationZone,
+  todayInZone,
+} from './reporting';
 
 interface Notice {
   kind: 'info' | 'error' | 'warning';
@@ -100,6 +105,8 @@ interface TransactionsSectionProps {
   onHouseholdAccessChanged: () => void;
   authorityConfirmed: boolean;
   currentUserId: string;
+  /** Injected clock for zone-derived entry-date defaults; test seams only. */
+  nowProvider?: (() => Date) | undefined;
 }
 
 const KIND_OPTIONS: Array<{
@@ -246,7 +253,11 @@ export function TransactionsSection({
   onHouseholdAccessChanged,
   authorityConfirmed,
   currentUserId,
+  nowProvider,
 }: TransactionsSectionProps) {
+  function clockNow(): Date {
+    return nowProvider ? nowProvider() : new Date();
+  }
   const [accounts, setAccounts] = useState<FinancialAccount[] | null>(null);
   const [categories, setCategories] = useState<TransactionCategory[] | null>(
     null,
@@ -263,15 +274,26 @@ export function TransactionsSection({
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
 
-  // Create-form draft state. Date defaults to the household reporting zone
-  // (`Etc/UTC` before reporting settings exist), never the browser zone.
+  // Create-form draft state. The date default follows the household
+  // reporting zone for the injected clock, never the browser zone; it starts
+  // at the documented initial zone until the settings section reports the
+  // stored one.
   const [createAccountId, setCreateAccountId] = useState('');
   const [createKind, setCreateKind] = useState<
     'EXPENSE' | 'INCOME' | 'TRANSFER'
   >('EXPENSE');
   const [createAmount, setCreateAmount] = useState('');
   const [createDirection, setCreateDirection] = useState<'OUT' | 'IN'>('OUT');
-  const [createDate, setCreateDate] = useState(householdZoneToday());
+  const [createDate, setCreateDate] = useState(() =>
+    todayInZone('Etc/UTC', clockNow()),
+  );
+  /**
+   * True once the viewer edits the date input. A loaded zone recomputes the
+   * default only while the draft is pristine; user-edited dates survive
+   * every zone change. A ref suffices because the flag is only read when a
+   * zone arrives, never rendered.
+   */
+  const createDateTouchedRef = useRef(false);
   const [createDescription, setCreateDescription] = useState('');
   // '' means the explicit uncategorized option; a token otherwise.
   const [createCategory, setCreateCategory] = useState('');
@@ -323,6 +345,11 @@ export function TransactionsSection({
     useState<PendingAllocationRevoke | null>(null);
   // Derived balances refresh after every mutation that can change them.
   const [balancesRefresh, setBalancesRefresh] = useState(0);
+  // Reporting: the authoritative zone reported up by the settings
+  // section (initially the documented Etc/UTC) and a refresh signal that
+  // refetches the spending dashboard after relevant mutations.
+  const [reportingZone, setReportingZone] = useState('Etc/UTC');
+  const [reportingRefresh, setReportingRefresh] = useState(0);
 
   const csrfRef = useRef(csrf);
   const generationRef = useRef(0);
@@ -350,6 +377,34 @@ export function TransactionsSection({
   // Synchronous source of truth for in-flight split-panel work: state
   // updates are async, so a same-flush second activation reads this ref.
   const splitLoadingRef = useRef(false);
+  // Latest reporting zone for async mutation continuations, which otherwise
+  // close over a stale render's value when resetting the entry-date draft.
+  const reportingZoneRef = useRef(reportingZone);
+  useEffect(() => {
+    reportingZoneRef.current = reportingZone;
+  }, [reportingZone]);
+
+  // Intl-safe zone for every local date calculation below. The stored zone
+  // itself stays authoritative for display; a host that cannot support it
+  // computes against the explicit fallback instead of throwing.
+  const calculationZone = resolveCalculationZone(reportingZone).zone;
+
+  /**
+   * Adopt the stored zone and, while the date draft is pristine, its
+   * zone-derived default for the injected clock. A user-edited date is never
+   * overwritten by a zone arrival.
+   */
+  function handleZoneLoaded(zone: string) {
+    setReportingZone(zone);
+    if (!createDateTouchedRef.current) {
+      setCreateDate(
+        todayInZone(
+          resolveCalculationZone(zone).zone,
+          nowProvider ? nowProvider() : new Date(),
+        ),
+      );
+    }
+  }
 
   useEffect(() => {
     csrfRef.current = csrf;
@@ -478,6 +533,11 @@ export function TransactionsSection({
    */
   function reloadTransactions(preserveNotice = false) {
     reloadViews(loadedViews(), false, preserveNotice);
+    // Every committed transaction/share/refund mutation can move household
+    // spending, so the dashboard refetches the shown period alongside the
+    // feeds. Manual feed refreshes keep their own scope; the dashboard has
+    // its own refresh control.
+    setReportingRefresh((value) => value + 1);
   }
 
   function reloadViews(
@@ -555,6 +615,8 @@ export function TransactionsSection({
     splitTriggerRef.current = null;
     revokeTriggerRef.current = null;
     splitLoadingRef.current = false;
+    setReportingZone('Etc/UTC');
+    createDateTouchedRef.current = false;
   }
 
   useEffect(() => {
@@ -833,11 +895,18 @@ export function TransactionsSection({
     void submitCreate(request);
   }
 
+  /** Intl-safe zone for continuations that outlive their render's closure. */
+  function effectiveZone(): string {
+    return resolveCalculationZone(reportingZoneRef.current).zone;
+  }
+
   function resetCreateForm() {
     // Like the accounts section, a known outcome clears the entry draft
     // but keeps the chosen account, type, and direction for convenience.
+    // The date returns to the pristine zone default for the injected clock.
     setCreateAmount('');
-    setCreateDate(householdZoneToday());
+    setCreateDate(todayInZone(effectiveZone(), clockNow()));
+    createDateTouchedRef.current = false;
     setCreateDescription('');
     setCreateCategory('');
     setCreateFieldErrors({});
@@ -2319,7 +2388,8 @@ export function TransactionsSection({
     setCreateAccountId(expense.accountId);
     setCreateKind('EXPENSE');
     setCreateAmount('');
-    setCreateDate(householdZoneToday());
+    setCreateDate(todayInZone(effectiveZone(), clockNow()));
+    createDateTouchedRef.current = false;
     setCreateDescription('');
     setCreateCategory('');
     setCreateFieldErrors({});
@@ -2345,7 +2415,7 @@ export function TransactionsSection({
   );
   const selectedCurrency = selectedAccount?.currency;
   const createMinDate = refundSource ? refundSource.occurredOn : MIN_DATE;
-  const createFutureWarning = isFutureDate(createDate);
+  const createFutureWarning = isFutureDateInZone(createDate, calculationZone);
 
   const transactions = activeTransactions();
   const hasMore = activeHasMore();
@@ -2588,6 +2658,7 @@ export function TransactionsSection({
                     categories={categories}
                     busy={busy}
                     authorityConfirmed={authorityConfirmed}
+                    reportingZone={calculationZone}
                     minDate={
                       transaction.kind === 'REFUND'
                         ? (findTransactionById(
@@ -3426,6 +3497,7 @@ export function TransactionsSection({
                 max={MAX_DATE}
                 onChange={(event) => {
                   setCreateDate(event.target.value);
+                  createDateTouchedRef.current = true;
                   setCreateFieldErrors({});
                 }}
                 disabled={busy || pendingCreate !== null || !authorityConfirmed}
@@ -3560,6 +3632,22 @@ export function TransactionsSection({
         onSessionExpired={onSessionExpired}
         onHouseholdAccessChanged={onHouseholdAccessChanged}
       />
+      <ReportingSettingsSection
+        household={household}
+        csrf={csrf}
+        onCsrfRefreshed={onCsrfRefreshed}
+        onSessionExpired={onSessionExpired}
+        onHouseholdAccessChanged={onHouseholdAccessChanged}
+        onZoneLoaded={handleZoneLoaded}
+        authorityConfirmed={authorityConfirmed}
+      />
+      <SpendingDashboardSection
+        household={household}
+        reportingZone={reportingZone}
+        refreshSignal={reportingRefresh}
+        onSessionExpired={onSessionExpired}
+        onHouseholdAccessChanged={onHouseholdAccessChanged}
+      />
     </section>
   );
 
@@ -3609,6 +3697,8 @@ interface EditFormProps {
   categories: TransactionCategory[] | null;
   busy: boolean;
   authorityConfirmed: boolean;
+  /** Household reporting zone for the future-date warning. */
+  reportingZone: string;
   minDate: string;
   linkedRefundCount: number;
   onAmountChange: (value: string) => void;
@@ -3633,6 +3723,7 @@ function EditForm({
   categories,
   busy,
   authorityConfirmed,
+  reportingZone,
   minDate,
   linkedRefundCount,
   onAmountChange,
@@ -3747,7 +3838,7 @@ function EditForm({
               {editFieldErrors.date}
             </p>
           )}
-          {isFutureDate(editDate) && (
+          {isFutureDateInZone(editDate, reportingZone) && (
             <p role="status" className="household-hint">
               This date is in the future. It stays a recorded fact and appears
               in reports only when a period covers its date.

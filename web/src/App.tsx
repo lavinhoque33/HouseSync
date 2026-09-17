@@ -89,12 +89,12 @@ export function App() {
         <section className="foundation" aria-labelledby="foundation-title">
           <div className="foundation-copy">
             <p className="eyebrow">Where we are</p>
-            <h2 id="foundation-title">First, a solid foundation.</h2>
+            <h2 id="foundation-title">Manual finance, end to end.</h2>
             <p>
               Accounts, sign-in, and household collaboration are available.
-              Private manual accounts and transactions now cover the first
-              finance steps; sharing, categories, balances, and summaries are
-              still ahead.
+              Private manual accounts and transactions now include categories,
+              selected household sharing, exact splits, member balances, and
+              per-currency spending summaries.
             </p>
           </div>
           <HealthStatus />

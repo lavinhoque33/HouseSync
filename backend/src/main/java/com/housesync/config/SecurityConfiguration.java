@@ -33,7 +33,9 @@ import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler
  * the fixed {@code GET /api/households/{householdId}/transaction-categories} list. Allocation adds the
  * singular allocation routes {@code POST}/{@code GET}/{@code PATCH
  * /api/households/{householdId}/transactions/{transactionId}/allocation} and the bounded {@code GET
- * /api/households/{householdId}/member-balances}. Every other route stays denied (401 anonymous /
+ * /api/households/{householdId}/member-balances}. Reporting adds {@code GET} and {@code PATCH
+ * /api/households/{householdId}/finance-settings} and the bounded {@code GET
+ * /api/households/{householdId}/spending-summary}. Every other route stays denied (401 anonymous /
  * 403 authenticated). No CORS allowances, no form/basic login, no remember-me: browsers use the
  * same-origin session cookie plus CSRF header.
  */
@@ -105,9 +107,14 @@ public class SecurityConfiguration {
                         HttpMethod.GET,
                         "/api/households/*/transactions",
                         "/api/households/*/transactions/*",
-                        "/api/households/*/transaction-categories")
+                        "/api/households/*/transaction-categories",
+                        "/api/households/*/finance-settings",
+                        "/api/households/*/spending-summary")
                     .authenticated()
-                    .requestMatchers(HttpMethod.PATCH, "/api/households/*/transactions/*")
+                    .requestMatchers(
+                        HttpMethod.PATCH,
+                        "/api/households/*/transactions/*",
+                        "/api/households/*/finance-settings")
                     .authenticated()
                     .requestMatchers(HttpMethod.POST, "/api/households/*/transactions/*/allocation")
                     .authenticated()

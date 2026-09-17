@@ -4,6 +4,9 @@ import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAcc
 import com.housesync.finance.account.web.FinancialAccountExceptions.IdempotencyConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionExhaustedException;
+import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsForbiddenException;
+import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionConflictException;
+import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionExhaustedException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AccountArchivedException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AllocationConflictException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AllocationIdempotencyConflictException;
@@ -122,6 +125,39 @@ public class FinancialAccountExceptionHandler {
         HttpStatus.FORBIDDEN,
         ErrorCodes.FORBIDDEN,
         "Only the entry's owner can change it.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(FinanceSettingsForbiddenException.class)
+  public ResponseEntity<ApiError> financeSettingsForbidden(
+      FinanceSettingsForbiddenException failure) {
+    return error(
+        HttpStatus.FORBIDDEN,
+        ErrorCodes.FORBIDDEN,
+        "Only the household owner can change finance settings.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(FinanceSettingsVersionConflictException.class)
+  public ResponseEntity<ApiError> financeSettingsVersionConflict(
+      FinanceSettingsVersionConflictException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RESOURCE_VERSION_CONFLICT,
+        "The finance settings changed. Refresh them before trying again.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(FinanceSettingsVersionExhaustedException.class)
+  public ResponseEntity<ApiError> financeSettingsVersionExhausted(
+      FinanceSettingsVersionExhaustedException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RESOURCE_VERSION_EXHAUSTED,
+        "The finance settings can no longer be changed.",
         null,
         failure);
   }

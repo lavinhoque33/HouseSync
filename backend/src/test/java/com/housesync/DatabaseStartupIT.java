@@ -93,7 +93,7 @@ class DatabaseStartupIT {
             "financial_transaction_allocations",
             "financial_transaction_allocation_participants",
             "financial_allocation_idempotency_keys");
-    assertThat(flyway.info().applied()).hasSize(9);
+    assertThat(flyway.info().applied()).hasSize(10);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
     assertThat(

@@ -91,6 +91,9 @@ interface RouteHandlers {
   allocationsPatch?: (transactionId: string) => Response | Promise<Response>;
   balancesGet?: () => Response | Promise<Response>;
   membersGet?: () => Response | Promise<Response>;
+  settingsGet?: () => Response | Promise<Response>;
+  settingsPatch?: () => Response | Promise<Response>;
+  summaryGet?: (from: string, to: string) => Response | Promise<Response>;
 }
 
 type Call = { url: string; init?: RequestInit | undefined };
@@ -145,6 +148,34 @@ function stubFetch(routes: RouteHandlers) {
       }
       if (url === membersUrl) {
         return routes.membersGet?.() ?? jsonResponse({ members: [] });
+      }
+      const settingsUrl = `/api/households/${HOUSEHOLD.id}/finance-settings`;
+      const summaryBase = `/api/households/${HOUSEHOLD.id}/spending-summary`;
+      if (url === settingsUrl) {
+        if (init?.method === 'PATCH') {
+          if (!routes.settingsPatch) {
+            throw new Error('unexpected PATCH finance-settings');
+          }
+          return routes.settingsPatch();
+        }
+        return (
+          routes.settingsGet?.() ??
+          jsonResponse({ reportingTimeZone: 'Etc/UTC', version: 0 })
+        );
+      }
+      if (url.startsWith(`${summaryBase}?`)) {
+        const query = new URLSearchParams(url.slice(summaryBase.length + 1));
+        const from = query.get('from') ?? '';
+        const to = query.get('to') ?? '';
+        return (
+          routes.summaryGet?.(from, to) ??
+          jsonResponse({
+            from,
+            to,
+            reportingTimeZone: 'Etc/UTC',
+            currencies: [],
+          })
+        );
       }
       if (url === `${accountBase}?limit=100&offset=0&status=ALL`) {
         return (
@@ -234,7 +265,11 @@ const patchCalls = (calls: Call[]) =>
 
 function renderSection(
   routes: RouteHandlers = {},
-  options: { authorityConfirmed?: boolean } = {},
+  options: {
+    authorityConfirmed?: boolean;
+    household?: Household;
+    nowProvider?: () => Date;
+  } = {},
 ) {
   const calls = stubFetch(routes);
   const onCsrfRefreshed = vi.fn();
@@ -242,13 +277,14 @@ function renderSection(
   const onHouseholdAccessChanged = vi.fn();
   const rendered = render(
     <TransactionsSection
-      household={HOUSEHOLD}
+      household={options.household ?? HOUSEHOLD}
       currentUserId={ACTOR_ID}
       csrf={CSRF}
       onCsrfRefreshed={onCsrfRefreshed}
       onSessionExpired={onSessionExpired}
       onHouseholdAccessChanged={onHouseholdAccessChanged}
       authorityConfirmed={options.authorityConfirmed ?? true}
+      nowProvider={options.nowProvider}
     />,
   );
   return {
@@ -391,7 +427,12 @@ describe('transaction list', () => {
       transactionsGet: () => transactionPage([]),
     });
     expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
-    expect(screen.queryByText(/total/i)).toBeNull();
+    // The spending dashboard names its per-currency rows honestly
+    // ("Expense total") and shows its own empty state; the feed itself
+    // fabricates no totals line.
+    expect(
+      screen.getByText(/No household spending in this period/),
+    ).toBeInTheDocument();
     // The member-balances subsection exists for the household but its
     // empty state invents no values: balances come only from real
     // allocations, and no balance number is fabricated anywhere.
@@ -2417,7 +2458,12 @@ describe('feeds', () => {
       await screen.findByText('No shared transactions yet.'),
     ).toBeInTheDocument();
     expect(screen.queryByText('No transactions yet.')).toBeNull();
-    expect(screen.queryByText(/total/i)).toBeNull();
+    // The spending dashboard names its per-currency rows honestly
+    // ("Expense total") and shows its own empty state; the household feed
+    // itself fabricates no totals line.
+    expect(
+      screen.getByText(/No household spending in this period/),
+    ).toBeInTheDocument();
   });
 
   it('reconciles session loss from the household feed with cleared scoped data', async () => {
@@ -4088,5 +4134,73 @@ describe('allocations', () => {
     );
     const memberCalls = calls.filter(({ url }) => url.endsWith('/members'));
     expect(memberCalls.length).toBe(2);
+  });
+});
+
+describe('reporting zone entry defaults', () => {
+  // 2026-09-30T23:30Z is still 2026-09-30 in UTC but already 2026-10-01 in
+  // Pacific/Kiritimati (UTC+14). The pristine default must follow the loaded
+  // household zone, never the host zone or a stale initial value.
+  const BOUNDARY_NOW = () => new Date('2026-09-30T23:30:00Z');
+
+  function entryDate(): HTMLInputElement {
+    return screen.getByLabelText('Date') as HTMLInputElement;
+  }
+
+  it('recomputes a pristine entry date once a non-UTC zone loads', async () => {
+    renderSection(
+      {
+        settingsGet: () =>
+          jsonResponse({ reportingTimeZone: 'Pacific/Kiritimati', version: 0 }),
+      },
+      { nowProvider: BOUNDARY_NOW },
+    );
+    await waitFor(() => expect(entryDate().value).toBe('2026-10-01'));
+  });
+
+  it('keeps the UTC date when the loaded zone is UTC', async () => {
+    renderSection(
+      {
+        settingsGet: () =>
+          jsonResponse({ reportingTimeZone: 'Etc/UTC', version: 0 }),
+      },
+      { nowProvider: BOUNDARY_NOW },
+    );
+    await waitFor(() => expect(entryDate().value).toBe('2026-09-30'));
+  });
+
+  it('preserves a user-edited entry date across a reporting zone change', async () => {
+    renderSection(
+      {
+        settingsGet: () =>
+          jsonResponse({ reportingTimeZone: 'Etc/UTC', version: 0 }),
+        settingsPatch: () =>
+          jsonResponse({
+            reportingTimeZone: 'Pacific/Kiritimati',
+            version: 1,
+          }),
+      },
+      {
+        household: { ...HOUSEHOLD, role: 'OWNER' },
+        nowProvider: BOUNDARY_NOW,
+      },
+    );
+    await waitFor(() => expect(entryDate().value).toBe('2026-09-30'));
+    fireEvent.change(entryDate(), { target: { value: '2026-08-15' } });
+    // Change the zone through the owner settings form.
+    const settings = await screen.findByTestId('reporting-settings-section');
+    fireEvent.change(within(settings).getByLabelText('Reporting time zone'), {
+      target: { value: 'Pacific/Kiritimati' },
+    });
+    fireEvent.click(
+      within(settings).getByRole('button', { name: 'Save reporting zone' }),
+    );
+    expect(
+      await within(settings).findByText(
+        /Reporting time zone updated to Pacific\/Kiritimati/,
+      ),
+    ).toBeInTheDocument();
+    // The edited draft survives the zone change instead of being recomputed.
+    expect(entryDate().value).toBe('2026-08-15');
   });
 });

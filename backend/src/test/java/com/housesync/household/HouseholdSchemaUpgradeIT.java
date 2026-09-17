@@ -106,9 +106,9 @@ class HouseholdSchemaUpgradeIT {
             .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
             .locations("classpath:db/migration")
             .load();
-    assertThat(current.migrate().migrationsExecuted).isEqualTo(5);
+    assertThat(current.migrate().migrationsExecuted).isEqualTo(6);
     current.validate();
-    assertThat(current.info().applied()).hasSize(9);
+    assertThat(current.info().applied()).hasSize(10);
 
     try (Connection connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), credentials)) {
       try (PreparedStatement user =

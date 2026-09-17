@@ -18,6 +18,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.housesync.finance.account.application.FinancialAccountService;
+import com.housesync.finance.report.application.FinanceReportService;
 import com.housesync.finance.transaction.application.FinancialAllocationService;
 import com.housesync.finance.transaction.application.FinancialTransactionService;
 import com.housesync.household.application.HouseholdService;
@@ -69,6 +70,7 @@ class SecurityConfigurationTest {
   @MockitoBean private FinancialAccountService financialAccounts;
   @MockitoBean private FinancialTransactionService financialTransactions;
   @MockitoBean private FinancialAllocationService financialAllocations;
+  @MockitoBean private FinanceReportService reporting;
 
   @ParameterizedTest
   @ValueSource(
@@ -117,6 +119,9 @@ class SecurityConfigurationTest {
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001/allocation",
     "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/transactions/123e4567-e89b-12d3-a456-426614174001/allocation",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/member-balances",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
+    "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
     "POST, /actuator/health",
     "PUT, /actuator/health",
     "PATCH, /actuator/health",
@@ -186,6 +191,13 @@ class SecurityConfigurationTest {
     "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/member-balances",
     "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/member-balances",
     "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/member-balances",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
+    "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
     "GET, /api/households/a/b",
   })
   void authenticatedRequestsToUnimplementedRoutesAreForbidden(String method, String path)

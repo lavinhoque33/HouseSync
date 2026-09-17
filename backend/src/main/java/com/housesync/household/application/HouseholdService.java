@@ -192,6 +192,33 @@ public class HouseholdService {
     return new LinkedHashSet<>(memberships.findCurrentUserIdsByHouseholdId(householdId));
   }
 
+  /**
+   * Reporting settings for finance reads. The caller owns the surrounding finance transaction and
+   * already holds the household lifecycle lock, so the returned zone and version are part of one
+   * consistent authorized snapshot with the caller's grouped sums.
+   */
+  @Transactional(readOnly = true, propagation = Propagation.MANDATORY)
+  public FinanceSettingsView financeSettings(UUID householdId) {
+    HouseholdEntity household =
+        households.findById(householdId).orElseThrow(HouseholdNotFoundException::new);
+    return new FinanceSettingsView(household.getReportingTimeZone(), household.getVersion());
+  }
+
+  /**
+   * Applies one validated reporting-zone change. The caller owns the surrounding finance
+   * transaction, already holds the household lifecycle lock, and already enforced current
+   * membership, household ownership, and version agreement; this method only persists the zone move
+   * with its single version bump.
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public FinanceSettingsView updateFinanceSettings(UUID householdId, String reportingTimeZone) {
+    HouseholdEntity household =
+        households.findById(householdId).orElseThrow(HouseholdNotFoundException::new);
+    household.updateReportingTimeZone(reportingTimeZone);
+    households.saveAndFlush(household);
+    return new FinanceSettingsView(household.getReportingTimeZone(), household.getVersion());
+  }
+
   /** Membership-scoped view to the authorized household DTO. Shared with invitations. */
   public static HouseholdResponse toResponse(HouseholdMembershipView view) {
     return new HouseholdResponse(

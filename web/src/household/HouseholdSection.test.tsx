@@ -112,6 +112,8 @@ interface RouteHandlers {
   financialAccountsGet?: (householdId?: string) => Response | Promise<Response>;
   transactionsGet?: (householdId?: string) => Response | Promise<Response>;
   categoriesGet?: () => Response | Promise<Response>;
+  settingsGet?: (householdId?: string) => Response | Promise<Response>;
+  summaryGet?: (householdId?: string) => Response | Promise<Response>;
 }
 
 function stubFetch(routes: RouteHandlers) {
@@ -222,6 +224,32 @@ function stubFetch(routes: RouteHandlers) {
       }
       if (/\/transaction-categories$/.test(url)) {
         return routes.categoriesGet?.() ?? jsonResponse({ items: [] });
+      }
+      const settingsMatch =
+        /^\/api\/households\/([^/]+)\/finance-settings$/.exec(url);
+      if (settingsMatch) {
+        return (
+          routes.settingsGet?.(decodeURIComponent(settingsMatch[1] ?? '')) ??
+          jsonResponse({ reportingTimeZone: 'Etc/UTC', version: 0 })
+        );
+      }
+      const summaryMatch =
+        /^\/api\/households\/([^/]+)\/spending-summary\?from=([^&]*)&to=([^&]*)$/.exec(
+          url,
+        );
+      if (summaryMatch) {
+        const householdId = decodeURIComponent(summaryMatch[1] ?? '');
+        const from = decodeURIComponent(summaryMatch[2] ?? '');
+        const to = decodeURIComponent(summaryMatch[3] ?? '');
+        return (
+          routes.summaryGet?.(householdId) ??
+          jsonResponse({
+            from,
+            to,
+            reportingTimeZone: 'Etc/UTC',
+            currencies: [],
+          })
+        );
       }
       throw new Error(`unexpected fetch ${url} ${init?.method ?? ''}`);
     },

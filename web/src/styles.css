@@ -1571,3 +1571,144 @@ code {
     max-width: 640px;
   }
 }
+
+.reporting-settings,
+.spending-dashboard {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-line);
+}
+
+.reporting-settings > *,
+.spending-dashboard > * {
+  min-width: 0;
+}
+
+.reporting-settings p,
+.spending-dashboard p {
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
+.reporting-zone-line {
+  font-size: 0.9rem;
+  color: var(--color-muted);
+}
+
+.reporting-zone-value {
+  font-weight: 750;
+  color: var(--color-ink);
+  overflow-wrap: anywhere;
+}
+
+.reporting-form,
+.spending-controls {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.reporting-form > *,
+.spending-controls > * {
+  min-width: 0;
+}
+
+.spending-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.spending-actions > * {
+  flex: 1 1 10rem;
+}
+
+.spending-period {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-ink);
+  overflow-wrap: anywhere;
+}
+
+.spending-groups {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+
+.spending-group {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 0.85rem;
+  background: var(--color-soft);
+  min-width: 0;
+}
+
+.spending-group > * {
+  min-width: 0;
+}
+
+.spending-currency {
+  font-weight: 650;
+  color: var(--color-ink);
+  overflow-wrap: anywhere;
+}
+
+.spending-rows {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  min-width: 0;
+}
+
+.spending-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, auto) 1fr;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  background: var(--color-surface);
+}
+
+.spending-row dt {
+  color: var(--color-muted);
+  font-size: 0.82rem;
+  overflow-wrap: break-word;
+}
+
+.spending-row dd {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+@media (max-width: 620px) {
+  .spending-row {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+  }
+
+  .spending-row dd {
+    text-align: left;
+  }
+}
+
+@media (max-width: 420px) {
+  .reporting-settings,
+  .spending-dashboard,
+  .spending-group,
+  .spending-row {
+    padding-inline: 16px;
+  }
+}

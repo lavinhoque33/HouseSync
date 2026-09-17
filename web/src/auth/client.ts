@@ -6,6 +6,7 @@ import {
   minorUnitsOfMagnitude,
   type FinancialAccountCurrency,
 } from '../finance/money';
+import { isRegionShapedZone } from '../finance/reporting';
 
 export type { FinancialAccountCurrency } from '../finance/money';
 
@@ -149,6 +150,9 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
         key === 'view' ||
         key === 'refundOfTransactionId' ||
         key === 'participantUserIds' ||
+        key === 'reportingTimeZone' ||
+        key === 'from' ||
+        key === 'to' ||
         key === 'money.amount' ||
         key === 'money.currency') &&
       typeof message === 'string'
@@ -2305,4 +2309,312 @@ export async function fetchMemberBalances(
   const balances = parseMemberBalances(await readJson<unknown>(response));
   if (!balances) throw unexpectedBalancesResponse(response.status);
   return balances;
+}
+
+/**
+ * Household reporting zone. Every current member may read it; only
+ * the household OWNER may change it. The response carries exactly the stored
+ * IANA zone and the optimistic-concurrency version, initially
+ * `{"reportingTimeZone":"Etc/UTC","version":0}`.
+ */
+export interface FinanceSettings {
+  reportingTimeZone: string;
+  version: number;
+}
+
+export interface UpdateFinanceSettingsInput {
+  reportingTimeZone: string;
+  expectedVersion: number;
+}
+
+function parseFinanceSettings(value: unknown): FinanceSettings | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  // Exactly the documented two-field DTO; any extra or missing key is
+  // contract drift and must fail loudly rather than reach the UI.
+  if (
+    Object.keys(record).length !== 2 ||
+    typeof record.reportingTimeZone !== 'string' ||
+    !isRegionShapedZone(record.reportingTimeZone as string) ||
+    typeof record.version !== 'number' ||
+    !Number.isInteger(record.version) ||
+    (record.version as number) < 0 ||
+    (record.version as number) > 2147483647
+  ) {
+    return undefined;
+  }
+  return {
+    reportingTimeZone: record.reportingTimeZone as string,
+    version: record.version as number,
+  };
+}
+
+function unexpectedFinanceSettingsResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message: 'The server returned an unexpected reporting-settings response.',
+  });
+}
+
+function financeSettingsPath(householdId: string): string {
+  return `/api/households/${encodeURIComponent(householdId)}/finance-settings`;
+}
+
+export async function fetchFinanceSettings(
+  householdId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<FinanceSettings> {
+  const response = await apiFetch(
+    financeSettingsPath(householdId),
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load household reporting settings.',
+    );
+  }
+  const settings = parseFinanceSettings(await readJson<unknown>(response));
+  if (!settings) throw unexpectedFinanceSettingsResponse(response.status);
+  return settings;
+}
+
+/**
+ * Change the household reporting zone. The request carries exactly the new
+ * zone and the version the editor saw; a stale version answers
+ * `409 RESOURCE_VERSION_CONFLICT` and the caller reloads before offering a
+ * correction rather than resending blindly.
+ */
+export async function patchFinanceSettings(
+  householdId: string,
+  input: UpdateFinanceSettingsInput,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<FinanceSettings> {
+  const response = await apiFetch(
+    financeSettingsPath(householdId),
+    {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify(input),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const settings = parseFinanceSettings(await readJson<unknown>(response));
+    if (!settings) throw unexpectedFinanceSettingsResponse(response.status);
+    return settings;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'The reporting zone change could not be completed.',
+  );
+}
+
+export interface SpendingSummaryCurrencyGroup {
+  currency: FinancialAccountCurrency;
+  expenseTotal: string;
+  refundTotal: string;
+  netSpending: string;
+  incomeTotal: string;
+}
+
+/**
+ * Exact per-currency household spending for an explicit half-open
+ * `[from, to)` date interval. Expense, refund, and income totals are
+ * nonnegative magnitudes; `netSpending` is `expenseTotal - refundTotal` and
+ * may be negative in a refund-heavy period. There is no all-currency grand
+ * total and no member balance in this response; an interval with no
+ * contributing entries answers `currencies: []` without inventing a
+ * default-currency zero.
+ */
+export interface SpendingSummary {
+  from: string;
+  to: string;
+  reportingTimeZone: string;
+  currencies: SpendingSummaryCurrencyGroup[];
+}
+
+const REPORT_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Report/filter boundary dates range from `1900-01-01` through `9999-12-31`
+ * so the final supported transaction date stays queryable in a half-open
+ * interval; transaction dates themselves stop at `9999-12-30`.
+ */
+function isReportBoundaryDate(value: string): boolean {
+  if (!REPORT_DATE_PATTERN.test(value)) return false;
+  if (value < '1900-01-01' || value > '9999-12-31') return false;
+  const [year, month, day] = value.split('-').map((part) => Number(part));
+  if (
+    year === undefined ||
+    month === undefined ||
+    day === undefined ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31
+  ) {
+    return false;
+  }
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return (
+    !Number.isNaN(parsed.getTime()) &&
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() === month - 1 &&
+    parsed.getUTCDate() === day
+  );
+}
+
+/** Signed exact minor units for an aggregate amount at the currency scale. */
+function signedMinorUnitsOfAggregate(
+  amount: string,
+  currency: FinancialAccountCurrency,
+): bigint {
+  const negative = amount.startsWith('-');
+  const magnitude = negative ? amount.slice(1) : amount;
+  const units = minorUnitsOfMagnitude(magnitude, currency);
+  return negative ? -units : units;
+}
+
+function unexpectedSpendingSummaryResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message: 'The server returned an unexpected spending-summary response.',
+  });
+}
+
+function parseSpendingSummary(value: unknown): SpendingSummary | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  // Exactly the documented four-field summary DTO; any extra or missing key
+  // is contract drift and must fail loudly rather than reach the UI.
+  if (
+    Object.keys(record).length !== 4 ||
+    typeof record.from !== 'string' ||
+    !isReportBoundaryDate(record.from) ||
+    typeof record.to !== 'string' ||
+    !isReportBoundaryDate(record.to) ||
+    (record.from as string) >= (record.to as string) ||
+    typeof record.reportingTimeZone !== 'string' ||
+    !isRegionShapedZone(record.reportingTimeZone as string) ||
+    !Array.isArray(record.currencies)
+  ) {
+    return undefined;
+  }
+  const groups: SpendingSummaryCurrencyGroup[] = [];
+  let previousCurrency: string | undefined;
+  for (const entry of record.currencies) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      return undefined;
+    }
+    const group = entry as Record<string, unknown>;
+    if (
+      Object.keys(group).length !== 5 ||
+      !isFinancialAccountCurrency(group.currency) ||
+      typeof group.expenseTotal !== 'string' ||
+      typeof group.refundTotal !== 'string' ||
+      typeof group.netSpending !== 'string' ||
+      typeof group.incomeTotal !== 'string'
+    ) {
+      return undefined;
+    }
+    const currency = group.currency as FinancialAccountCurrency;
+    // Currency groups are ordered by code with no duplicates.
+    if (previousCurrency !== undefined && currency <= previousCurrency) {
+      return undefined;
+    }
+    previousCurrency = currency;
+    const expenseTotal = group.expenseTotal as string;
+    const refundTotal = group.refundTotal as string;
+    const netSpending = group.netSpending as string;
+    const incomeTotal = group.incomeTotal as string;
+    if (
+      !isAggregateAmountString(expenseTotal, currency) ||
+      expenseTotal.startsWith('-') ||
+      !isAggregateAmountString(refundTotal, currency) ||
+      refundTotal.startsWith('-') ||
+      !isAggregateAmountString(netSpending, currency) ||
+      !isAggregateAmountString(incomeTotal, currency) ||
+      incomeTotal.startsWith('-')
+    ) {
+      return undefined;
+    }
+    // The contract's net identity holds exactly: a drifted net is a server
+    // bug the UI must not silently display.
+    const expectedNet =
+      signedMinorUnitsOfAggregate(expenseTotal, currency) -
+      signedMinorUnitsOfAggregate(refundTotal, currency);
+    if (expectedNet !== signedMinorUnitsOfAggregate(netSpending, currency)) {
+      return undefined;
+    }
+    groups.push({
+      currency,
+      expenseTotal,
+      refundTotal,
+      netSpending,
+      incomeTotal,
+    });
+  }
+  return {
+    from: record.from as string,
+    to: record.to as string,
+    reportingTimeZone: record.reportingTimeZone as string,
+    currencies: groups,
+  };
+}
+
+/**
+ * Exact spending for one explicit date interval. Both bounds are required
+ * and travel as the only query parameters; the server applies the interval
+ * to stored calendar dates without timestamp conversion.
+ */
+export async function fetchSpendingSummary(
+  householdId: string,
+  from: string,
+  to: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<SpendingSummary> {
+  const response = await apiFetch(
+    `/api/households/${encodeURIComponent(householdId)}/spending-summary?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load the household spending summary.',
+    );
+  }
+  const summary = parseSpendingSummary(await readJson<unknown>(response));
+  if (!summary) throw unexpectedSpendingSummaryResponse(response.status);
+  return summary;
 }
