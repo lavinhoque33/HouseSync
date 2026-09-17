@@ -269,22 +269,27 @@ function renderSection(
     authorityConfirmed?: boolean;
     household?: Household;
     nowProvider?: () => Date;
+    accountsRefreshSignal?: number;
   } = {},
 ) {
   const calls = stubFetch(routes);
   const onCsrfRefreshed = vi.fn();
   const onSessionExpired = vi.fn();
   const onHouseholdAccessChanged = vi.fn();
+  const household = options.household ?? HOUSEHOLD;
+  const authorityConfirmed = options.authorityConfirmed ?? true;
+  const nowProvider = options.nowProvider;
   const rendered = render(
     <TransactionsSection
-      household={options.household ?? HOUSEHOLD}
+      household={household}
       currentUserId={ACTOR_ID}
       csrf={CSRF}
       onCsrfRefreshed={onCsrfRefreshed}
       onSessionExpired={onSessionExpired}
       onHouseholdAccessChanged={onHouseholdAccessChanged}
-      authorityConfirmed={options.authorityConfirmed ?? true}
-      nowProvider={options.nowProvider}
+      authorityConfirmed={authorityConfirmed}
+      nowProvider={nowProvider}
+      accountsRefreshSignal={options.accountsRefreshSignal ?? 0}
     />,
   );
   return {
@@ -293,6 +298,20 @@ function renderSection(
     onCsrfRefreshed,
     onSessionExpired,
     onHouseholdAccessChanged,
+    rerenderWithAccountSignal: (signal: number) =>
+      rendered.rerender(
+        <TransactionsSection
+          household={household}
+          currentUserId={ACTOR_ID}
+          csrf={CSRF}
+          onCsrfRefreshed={onCsrfRefreshed}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdAccessChanged}
+          authorityConfirmed={authorityConfirmed}
+          nowProvider={nowProvider}
+          accountsRefreshSignal={signal}
+        />,
+      ),
   };
 }
 
@@ -322,6 +341,207 @@ async function fillAndSubmit(
   });
   fireEvent.click(screen.getByRole('button', { name: 'Record transaction' }));
 }
+
+describe('sibling account-list refresh', () => {
+  it('shows a newly created account without discarding the entry draft', async () => {
+    let visibleAccounts: FinancialAccount[] = [account()];
+    const { rerenderWithAccountSignal } = renderSection({
+      accountsGet: () => accountPage([...visibleAccounts]),
+      transactionsGet: () => transactionPage([]),
+    });
+    await screen.findByText('No transactions yet.');
+
+    // An in-progress draft against the known account.
+    fireEvent.change(screen.getByLabelText('Account'), {
+      target: { value: CHECKING_ID },
+    });
+    fireEvent.change(screen.getByLabelText('Amount'), {
+      target: { value: '12.34' },
+    });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Draft groceries' },
+    });
+
+    // The sibling commits a new manual account; the next metadata fetch
+    // serves it once the parent bumps the signal.
+    visibleAccounts = [account(), { ...CASH_ACCOUNT, status: 'ACTIVE' }];
+    act(() => {
+      rerenderWithAccountSignal(1);
+    });
+
+    expect(
+      await screen.findByRole('option', { name: 'Pocket cash · JPY' }),
+    ).toBeInTheDocument();
+    // No remount and no draft reset: every entered value survives.
+    expect(screen.getByLabelText('Account')).toHaveValue(CHECKING_ID);
+    expect(screen.getByLabelText('Amount')).toHaveValue('12.34');
+    expect(screen.getByLabelText('Description')).toHaveValue('Draft groceries');
+  });
+
+  it('keeps the last-known selector and draft when the background refetch fails', async () => {
+    let failMetadata = false;
+    const { calls, rerenderWithAccountSignal } = renderSection({
+      accountsGet: () =>
+        failMetadata
+          ? jsonResponse(
+              { code: 'NETWORK_ERROR', message: 'Could not reach the server.' },
+              500,
+            )
+          : accountPage([account()]),
+      transactionsGet: () => transactionPage([]),
+    });
+    await screen.findByText('No transactions yet.');
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Draft groceries' },
+    });
+
+    // The background metadata fetch fails: the failure stays silent so the
+    // draft keeps focus and the last-known selector survives.
+    failMetadata = true;
+    act(() => {
+      rerenderWithAccountSignal(1);
+    });
+
+    const accountsUrl = `/api/households/${HOUSEHOLD.id}/financial-accounts?limit=100&offset=0&status=ALL`;
+    await waitFor(() =>
+      expect(calls.filter(({ url }) => url === accountsUrl)).toHaveLength(2),
+    );
+    expect(screen.getByLabelText('Description')).toHaveValue('Draft groceries');
+    expect(
+      screen.getByRole('option', { name: 'Daily spending · BRL' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('serves a signal that arrives before the initial metadata settles', async () => {
+    const accountsUrl = `/api/households/${HOUSEHOLD.id}/financial-accounts?limit=100&offset=0&status=ALL`;
+    let accountReads = 0;
+    let resolveFirst: ((value: Response) => void) | null = null;
+    const { calls, rerenderWithAccountSignal } = renderSection({
+      accountsGet: () => {
+        accountReads += 1;
+        if (accountReads === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return accountPage([account(), { ...CASH_ACCOUNT, status: 'ACTIVE' }]);
+      },
+      transactionsGet: () => transactionPage([]),
+    });
+
+    // The sibling commits while the initial load is still in flight: the
+    // signal must stay pending, never marked served and dropped.
+    act(() => {
+      rerenderWithAccountSignal(1);
+    });
+
+    // The initial read raced the commit and missed it...
+    await act(async () => {
+      resolveFirst?.(accountPage([account()]));
+    });
+    expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
+
+    // ...but the parked signal drives a post-load fetch that converges.
+    expect(
+      await screen.findByRole('option', { name: 'Pocket cash · JPY' }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(calls.filter(({ url }) => url === accountsUrl)).toHaveLength(2),
+    );
+  });
+
+  it('publishes only the newest metadata response when refreshes race', async () => {
+    const resolvers: Array<(value: Response) => void> = [];
+    let accountReads = 0;
+    const { rerenderWithAccountSignal } = renderSection({
+      accountsGet: () => {
+        accountReads += 1;
+        if (accountReads === 1) return accountPage([account()]);
+        return new Promise<Response>((resolve) => {
+          resolvers.push(resolve);
+        });
+      },
+      transactionsGet: () => transactionPage([]),
+    });
+    await screen.findByText('No transactions yet.');
+
+    const stale = account({
+      id: '10000000-0000-4000-8000-000000000003',
+      name: 'Stale fund',
+      kind: 'SAVINGS',
+      currency: 'USD',
+    });
+    const newest: FinancialAccount = { ...CASH_ACCOUNT, status: 'ACTIVE' };
+
+    act(() => {
+      rerenderWithAccountSignal(1);
+    });
+    act(() => {
+      rerenderWithAccountSignal(2);
+    });
+    expect(resolvers).toHaveLength(2);
+
+    // The newest response resolves first and publishes...
+    await act(async () => {
+      resolvers[1]?.(accountPage([account(), newest]));
+    });
+    expect(
+      await screen.findByRole('option', { name: 'Pocket cash · JPY' }),
+    ).toBeInTheDocument();
+
+    // ...then the superseded older response arrives late and must not
+    // overwrite it.
+    await act(async () => {
+      resolvers[0]?.(accountPage([account(), stale]));
+    });
+    expect(
+      screen.queryByRole('option', { name: 'Stale fund · USD' }),
+    ).toBeNull();
+    expect(
+      screen.getByRole('option', { name: 'Pocket cash · JPY' }),
+    ).toBeInTheDocument();
+  });
+
+  it('converges account metadata despite an interleaved transaction reload', async () => {
+    let accountReads = 0;
+    let resolveMetadata: ((value: Response) => void) | null = null;
+    const { rerenderWithAccountSignal } = renderSection({
+      accountsGet: () => {
+        accountReads += 1;
+        if (accountReads === 1) return accountPage([account()]);
+        return new Promise<Response>((resolve) => {
+          resolveMetadata = resolve;
+        });
+      },
+      transactionsGet: () => transactionPage([]),
+    });
+    await screen.findByText('No transactions yet.');
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Draft groceries' },
+    });
+
+    // The sibling commit starts a metadata refresh that stays in flight...
+    act(() => {
+      rerenderWithAccountSignal(1);
+    });
+
+    // ...while a feed reload bumps the shared transaction generation. The
+    // metadata fetch is decoupled from that generation, so its response
+    // still publishes.
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+
+    await act(async () => {
+      resolveMetadata?.(
+        accountPage([account(), { ...CASH_ACCOUNT, status: 'ACTIVE' }]),
+      );
+    });
+    expect(
+      await screen.findByRole('option', { name: 'Pocket cash · JPY' }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Description')).toHaveValue('Draft groceries');
+  });
+});
 
 describe('transaction list', () => {
   it('renders entries with exact amounts, kinds, dates, and privacy text', async () => {

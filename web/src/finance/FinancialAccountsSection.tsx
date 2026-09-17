@@ -43,6 +43,13 @@ interface FinancialAccountsSectionProps {
   onSessionExpired: () => void;
   onHouseholdAccessChanged: () => void;
   authorityConfirmed: boolean;
+  /**
+   * Called once per definitively committed account-list mutation (a
+   * successful create, rename, archive, or reactivation) so a sibling
+   * section can refresh its account metadata. Unknown-outcome timeouts
+   * never call this: only a confirmed list change does.
+   */
+  onAccountListCommitted?: (() => void) | undefined;
 }
 
 const KIND_OPTIONS: Array<{ value: FinancialAccountKind; label: string }> = [
@@ -112,6 +119,7 @@ export function FinancialAccountsSection({
   onSessionExpired,
   onHouseholdAccessChanged,
   authorityConfirmed,
+  onAccountListCommitted,
 }: FinancialAccountsSectionProps) {
   const [accounts, setAccounts] = useState<FinancialAccount[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -308,6 +316,10 @@ export function FinancialAccountsSection({
         kind: 'info',
         text: `Private account “${created.name}” is ready.`,
       });
+      // The list change committed: let the sibling transaction selector
+      // refetch account metadata. Unknown-outcome branches above return
+      // earlier and never reach this signal.
+      onAccountListCommitted?.();
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
       const apiError =
@@ -444,6 +456,10 @@ export function FinancialAccountsSection({
               ? `“${updated.name}” archived. Its history is preserved.`
               : `“${updated.name}” is active again.`,
       });
+      // The committed rename or status change moves selector membership or
+      // labels: refresh the sibling's metadata. Stale and unknown-outcome
+      // branches above return earlier and never signal.
+      onAccountListCommitted?.();
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
       const apiError =

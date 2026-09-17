@@ -107,6 +107,12 @@ interface TransactionsSectionProps {
   currentUserId: string;
   /** Injected clock for zone-derived entry-date defaults; test seams only. */
   nowProvider?: (() => Date) | undefined;
+  /**
+   * Bumped by the parent after a sibling account-list mutation commits, so
+   * the account selector refetches metadata without remounting this section
+   * or discarding the in-progress entry draft.
+   */
+  accountsRefreshSignal?: number | undefined;
 }
 
 const KIND_OPTIONS: Array<{
@@ -254,6 +260,7 @@ export function TransactionsSection({
   authorityConfirmed,
   currentUserId,
   nowProvider,
+  accountsRefreshSignal = 0,
 }: TransactionsSectionProps) {
   function clockNow(): Date {
     return nowProvider ? nowProvider() : new Date();
@@ -380,6 +387,19 @@ export function TransactionsSection({
   // Latest reporting zone for async mutation continuations, which otherwise
   // close over a stale render's value when resetting the entry-date draft.
   const reportingZoneRef = useRef(reportingZone);
+  // Sibling account-list refresh sequencing, deliberately decoupled from
+  // the shared transaction-feed generation so a feed reload or mutation can
+  // never invalidate an in-flight metadata fetch. `servedAccountSignalRef`
+  // holds the last signal whose metadata converged (starting at the initial
+  // prop so mounting never refetches what the initial load already
+  // includes); `pendingAccountSignalRef` keeps a pre-load signal alive until
+  // the initial metadata settles; `accountRefreshSeqRef` orders concurrent
+  // metadata fetches so only the newest response publishes; and
+  // `activeAccountRefreshRef` aborts the superseded request.
+  const servedAccountSignalRef = useRef(accountsRefreshSignal);
+  const pendingAccountSignalRef = useRef(false);
+  const accountRefreshSeqRef = useRef(0);
+  const activeAccountRefreshRef = useRef<AbortController | null>(null);
   useEffect(() => {
     reportingZoneRef.current = reportingZone;
   }, [reportingZone]);
@@ -638,6 +658,85 @@ export function TransactionsSection({
     // Household identity is fixed for this keyed component instance.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Refetches sibling-committed account metadata without touching feeds,
+   * categories, panels, or the entry draft, and without consulting the
+   * shared feed generation: feed reloads and mutations proceed
+   * independently. Only the newest started fetch may publish — an older
+   * response that arrives late is dropped — and unmount always wins.
+   * Failures stay silent: the selector keeps its last-known list and the
+   * existing manual refresh recovers, so a background error can never steal
+   * focus from or discard an in-progress draft.
+   */
+  function refreshAccountMetadata(signal: number) {
+    // Abort the superseded request first so its late response can never
+    // publish after the newer one; the sequence guard below covers a
+    // response that already slipped past the abort.
+    activeAccountRefreshRef.current?.abort();
+    const controller = new AbortController();
+    activeAccountRefreshRef.current = controller;
+    track(controller);
+    const sequence = ++accountRefreshSeqRef.current;
+    void (async () => {
+      try {
+        const page = await fetchFinancialAccounts(
+          household.id,
+          controller.signal,
+        );
+        if (
+          unmountedRef.current ||
+          controller.signal.aborted ||
+          accountRefreshSeqRef.current !== sequence
+        ) {
+          return;
+        }
+        setAccounts(page.items);
+        servedAccountSignalRef.current = signal;
+      } catch {
+        // Silent by design; see the doc comment above.
+      } finally {
+        untrack(controller);
+        if (activeAccountRefreshRef.current === controller) {
+          activeAccountRefreshRef.current = null;
+        }
+      }
+    })();
+  }
+
+  // A sibling account-list mutation (create, rename, archive, reactivate)
+  // bumps accountsRefreshSignal after its list change commits. A signal
+  // that arrives before the initial metadata settles stays pending — it is
+  // never marked served — and the accounts effect below serves it with a
+  // post-load fetch that guarantees the committed result converges.
+  useEffect(() => {
+    if (servedAccountSignalRef.current === accountsRefreshSignal) return;
+    if (accounts === null) {
+      pendingAccountSignalRef.current = true;
+      return;
+    }
+    pendingAccountSignalRef.current = false;
+    refreshAccountMetadata(accountsRefreshSignal);
+    // The signal alone drives this effect; `accounts` is read only to park
+    // the pre-load signal for the accounts effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountsRefreshSignal]);
+
+  // Serves a signal parked while metadata was still loading: once the
+  // initial load settles, refetch so the committed account converges even
+  // when the initial read raced the commit and missed it.
+  useEffect(() => {
+    if (accounts === null || !pendingAccountSignalRef.current) return;
+    if (servedAccountSignalRef.current === accountsRefreshSignal) {
+      pendingAccountSignalRef.current = false;
+      return;
+    }
+    pendingAccountSignalRef.current = false;
+    refreshAccountMetadata(accountsRefreshSignal);
+    // `accounts` becoming non-null is the trigger; the parked flag and the
+    // signal decide whether a fetch is owed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts]);
 
   useEffect(() => {
     if (notice) noticeRef.current?.focus();

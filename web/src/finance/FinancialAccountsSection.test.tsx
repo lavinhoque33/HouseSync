@@ -101,12 +101,16 @@ const patchCalls = (calls: Call[]) =>
 
 function renderSection(
   routes: RouteHandlers = {},
-  options: { authorityConfirmed?: boolean } = {},
+  options: {
+    authorityConfirmed?: boolean;
+    onAccountListCommitted?: () => void;
+  } = {},
 ) {
   const calls = stubFetch(routes);
   const onCsrfRefreshed = vi.fn();
   const onSessionExpired = vi.fn();
   const onHouseholdAccessChanged = vi.fn();
+  const onAccountListCommitted = options.onAccountListCommitted ?? vi.fn();
   const rendered = render(
     <FinancialAccountsSection
       household={HOUSEHOLD}
@@ -115,6 +119,7 @@ function renderSection(
       onSessionExpired={onSessionExpired}
       onHouseholdAccessChanged={onHouseholdAccessChanged}
       authorityConfirmed={options.authorityConfirmed ?? true}
+      onAccountListCommitted={onAccountListCommitted}
     />,
   );
   return {
@@ -123,6 +128,7 @@ function renderSection(
     onCsrfRefreshed,
     onSessionExpired,
     onHouseholdAccessChanged,
+    onAccountListCommitted,
   };
 }
 
@@ -246,6 +252,72 @@ describe('private account creation', () => {
     });
     expect(screen.getByLabelText('Account name')).toHaveValue('');
     expect(screen.getByText('Daily spending')).toBeInTheDocument();
+  });
+
+  it('reports a committed creation to the sibling selector signal', async () => {
+    const onAccountListCommitted = vi.fn();
+    renderSection(
+      {
+        accountsGet: () => listPage([]),
+        accountsPost: () =>
+          jsonResponse(account({ kind: 'CASH', currency: 'USD' }), 201),
+      },
+      { onAccountListCommitted },
+    );
+    await screen.findByText('No manual accounts yet.');
+
+    fireEvent.change(screen.getByLabelText('Account name'), {
+      target: { value: 'Daily spending' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Add private account' }),
+    );
+
+    expect(
+      await screen.findByText('Private account “Daily spending” is ready.'),
+    ).toBeInTheDocument();
+    expect(onAccountListCommitted).toHaveBeenCalledTimes(1);
+  });
+
+  it('never signals on an unknown outcome, then signals on the committed retry', async () => {
+    let attempts = 0;
+    const onAccountListCommitted = vi.fn();
+    renderSection(
+      {
+        accountsGet: () => listPage([]),
+        accountsPost: () => {
+          attempts += 1;
+          if (attempts === 1) {
+            return jsonResponse(
+              {
+                code: 'FINANCE_BUSY',
+                message: 'The household is busy; outcome may be unknown.',
+                correlationId: 'corr-busy',
+              },
+              503,
+            );
+          }
+          return jsonResponse(account({ kind: 'CASH', currency: 'USD' }), 201);
+        },
+      },
+      { onAccountListCommitted },
+    );
+    await screen.findByText('No manual accounts yet.');
+    fireEvent.change(screen.getByLabelText('Account name'), {
+      target: { value: 'Daily spending' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Add private account' }),
+    );
+
+    expect(await screen.findByText(/unknown outcome/i)).toBeInTheDocument();
+    expect(onAccountListCommitted).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same request' }));
+    expect(
+      await screen.findByText('Private account “Daily spending” is ready.'),
+    ).toBeInTheDocument();
+    expect(onAccountListCommitted).toHaveBeenCalledTimes(1);
   });
 
   it('rejects an empty name without any request', async () => {
@@ -843,6 +915,36 @@ describe('rename and lifecycle', () => {
       expectedVersion: 0,
       status: 'ARCHIVED',
     });
+  });
+
+  it('reports a committed archive to the sibling selector signal', async () => {
+    const onAccountListCommitted = vi.fn();
+    renderSection(
+      {
+        accountsGet: () => listPage([account()]),
+        accountsPatch: () =>
+          jsonResponse(account({ status: 'ARCHIVED', version: 1 })),
+      },
+      { onAccountListCommitted },
+    );
+    await screen.findByText('Daily spending');
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Archive Daily spending' }),
+    );
+    const panel = screen.getByRole('group', {
+      name: 'Confirm status change for Daily spending',
+    });
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Archive account' }),
+    );
+
+    expect(
+      await screen.findByText(
+        '“Daily spending” archived. Its history is preserved.',
+      ),
+    ).toBeInTheDocument();
+    expect(onAccountListCommitted).toHaveBeenCalledTimes(1);
   });
 
   it('unarchives after the preserved-history explanation', async () => {

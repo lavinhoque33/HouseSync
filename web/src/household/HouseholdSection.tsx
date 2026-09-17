@@ -94,6 +94,13 @@ export function HouseholdSection({
     null,
   );
   const [creating, setCreating] = useState(false);
+  // Per-household sibling account-list signals: a committed manual-account
+  // mutation in FinancialAccountsSection bumps its household's entry so the
+  // keyed TransactionsSection refetches account metadata without remounting
+  // or discarding its entry draft.
+  const [accountSignals, setAccountSignals] = useState<Record<string, number>>(
+    {},
+  );
 
   const csrfRef = useRef<CsrfToken | null>(csrf);
   const genRef = useRef(0);
@@ -263,6 +270,13 @@ export function HouseholdSection({
   function handleRefresh() {
     if (loading || creating) return;
     startLoad(null);
+  }
+
+  function handleAccountListCommitted(householdId: string) {
+    setAccountSignals((current) => ({
+      ...current,
+      [householdId]: (current[householdId] ?? 0) + 1,
+    }));
   }
 
   async function ensureCsrf(
@@ -490,6 +504,9 @@ export function HouseholdSection({
                 onSessionExpired={onSessionExpired}
                 onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
                 authorityConfirmed={!stale && !loading && listError === null}
+                onAccountListCommitted={() =>
+                  handleAccountListCommitted(household.id)
+                }
               />
               <TransactionsSection
                 key={`${household.id}-transactions`}
@@ -500,6 +517,7 @@ export function HouseholdSection({
                 onSessionExpired={onSessionExpired}
                 onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
                 authorityConfirmed={!stale && !loading && listError === null}
+                accountsRefreshSignal={accountSignals[household.id] ?? 0}
               />
               <MembersSection
                 household={household}

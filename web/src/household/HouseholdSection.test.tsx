@@ -110,6 +110,9 @@ interface RouteHandlers {
     invitationId?: string,
   ) => Response | Promise<Response>;
   financialAccountsGet?: (householdId?: string) => Response | Promise<Response>;
+  financialAccountsPost?: (
+    householdId?: string,
+  ) => Response | Promise<Response>;
   transactionsGet?: (householdId?: string) => Response | Promise<Response>;
   categoriesGet?: () => Response | Promise<Response>;
   settingsGet?: (householdId?: string) => Response | Promise<Response>;
@@ -203,14 +206,26 @@ function stubFetch(routes: RouteHandlers) {
         return routes.leavePost(decodeURIComponent(leaveMatch[1] ?? ''));
       }
       const financeMatch =
-        /^\/api\/households\/([^/]+)\/financial-accounts/.exec(url);
-      if (financeMatch) {
-        return (
-          routes.financialAccountsGet?.(
-            decodeURIComponent(financeMatch[1] ?? ''),
-          ) ??
-          jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
+        /^\/api\/households\/([^/]+)\/financial-accounts(?:\/([^/?]+))?(?:\?.*)?$/.exec(
+          url,
         );
+      if (financeMatch) {
+        const householdId = decodeURIComponent(financeMatch[1] ?? '');
+        if (init?.method === 'POST' && financeMatch[2] === undefined) {
+          if (!routes.financialAccountsPost) {
+            throw new Error('unexpected POST financial-accounts');
+          }
+          return routes.financialAccountsPost(householdId);
+        }
+        if (
+          (init?.method ?? 'GET') === 'GET' &&
+          financeMatch[2] === undefined
+        ) {
+          return (
+            routes.financialAccountsGet?.(householdId) ??
+            jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
+          );
+        }
       }
       const transactionsMatch =
         /^\/api\/households\/([^/]+)\/transactions/.exec(url);
@@ -311,6 +326,92 @@ describe('transaction section integration', () => {
     expect(
       screen.getByRole('button', { name: 'Record transaction' }),
     ).toBeEnabled();
+  });
+});
+
+describe('manual account to transaction selector propagation', () => {
+  function financeSection(signal: number) {
+    return (
+      <HouseholdSection
+        csrf={CSRF}
+        onCsrfRefreshed={() => {}}
+        onSessionExpired={() => {}}
+        refreshSignal={signal}
+        currentUserId={USER.id}
+      />
+    );
+  }
+
+  it('shows a committed manual account in the selector without losing the draft', async () => {
+    const checking = {
+      id: '10000000-0000-4000-8000-000000000001',
+      householdId: HOUSEHOLD_1.id,
+      ownerUserId: USER.id,
+      name: 'Daily spending',
+      kind: 'CHECKING',
+      currency: 'BRL',
+      source: 'MANUAL',
+      visibility: 'PRIVATE',
+      status: 'ACTIVE',
+      version: 0,
+      createdAt: '2026-09-16T12:00:00Z',
+      updatedAt: '2026-09-16T12:00:00Z',
+    };
+    const created = {
+      ...checking,
+      id: '10000000-0000-4000-8000-000000000002',
+      name: 'Holiday fund',
+    };
+    let committed = false;
+    stubFetch({
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+      financialAccountsGet: () =>
+        jsonResponse({
+          items: committed ? [checking, created] : [checking],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      financialAccountsPost: () => {
+        committed = true;
+        return jsonResponse(created, 201);
+      },
+      transactionsGet: () =>
+        jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+      categoriesGet: () => jsonResponse({ items: CATEGORY_ITEMS }),
+    });
+    render(financeSection(0));
+
+    expect(await screen.findByText('Daily spending')).toBeInTheDocument();
+    expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
+
+    // Start an in-progress transaction draft against the known account.
+    fireEvent.change(screen.getByLabelText('Account'), {
+      target: { value: checking.id },
+    });
+    fireEvent.change(screen.getByLabelText('Amount'), {
+      target: { value: '12.34' },
+    });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Draft groceries' },
+    });
+
+    // Commit a manual account in the sibling section.
+    fireEvent.change(screen.getByLabelText('Account name'), {
+      target: { value: 'Holiday fund' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Add private account' }),
+    );
+
+    // The selector lists the new account with no manual refresh...
+    expect(
+      await screen.findByRole('option', { name: 'Holiday fund · BRL' }),
+    ).toBeInTheDocument();
+    // ...and the in-progress draft survives the background refresh.
+    expect(screen.getByLabelText('Account')).toHaveValue(checking.id);
+    expect(screen.getByLabelText('Amount')).toHaveValue('12.34');
+    expect(screen.getByLabelText('Description')).toHaveValue('Draft groceries');
   });
 });
 
