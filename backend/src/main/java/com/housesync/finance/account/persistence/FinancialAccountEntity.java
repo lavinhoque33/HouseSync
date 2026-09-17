@@ -64,18 +64,46 @@ public class FinancialAccountEntity {
       FinancialAccountKind kind,
       SupportedCurrency currency,
       Instant createdAt) {
+    this(id, householdId, ownerUserId, name, kind, currency, "MANUAL", createdAt);
+  }
+
+  private FinancialAccountEntity(
+      UUID id,
+      UUID householdId,
+      UUID ownerUserId,
+      String name,
+      FinancialAccountKind kind,
+      SupportedCurrency currency,
+      String source,
+      Instant createdAt) {
     this.id = id;
     this.householdId = householdId;
     this.ownerUserId = ownerUserId;
     this.name = name;
     this.kind = kind;
     this.currency = currency;
-    this.source = "MANUAL";
+    this.source = source;
     this.visibility = "PRIVATE";
     this.status = FinancialAccountStatus.ACTIVE;
     this.version = 0;
     this.createdAt = createdAt;
     this.updatedAt = createdAt;
+  }
+
+  /**
+   * Creates a private account row admitted through explicit connected-account selection. The caller owns the surrounding selection transaction and has already validated
+   * kind/currency eligibility and label policy.
+   */
+  public static FinancialAccountEntity connected(
+      UUID id,
+      UUID householdId,
+      UUID ownerUserId,
+      String name,
+      FinancialAccountKind kind,
+      SupportedCurrency currency,
+      Instant createdAt) {
+    return new FinancialAccountEntity(
+        id, householdId, ownerUserId, name, kind, currency, "CONNECTED", createdAt);
   }
 
   public UUID getId() {

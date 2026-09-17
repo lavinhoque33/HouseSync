@@ -92,8 +92,14 @@ class DatabaseStartupIT {
             "financial_transaction_idempotency_keys",
             "financial_transaction_allocations",
             "financial_transaction_allocation_participants",
-            "financial_allocation_idempotency_keys");
-    assertThat(flyway.info().applied()).hasSize(10);
+            "financial_allocation_idempotency_keys",
+            "financial_connections",
+            "financial_connection_account_mappings",
+            "connection_link_attempts",
+            "connection_operations",
+            "connection_operation_idempotency_keys",
+            "connection_revocation_work");
+    assertThat(flyway.info().applied()).hasSize(12);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
     assertThat(

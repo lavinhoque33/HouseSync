@@ -18,6 +18,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.housesync.finance.account.application.FinancialAccountService;
+import com.housesync.finance.connection.application.ConnectionLifecycleService;
+import com.housesync.finance.connection.application.ConnectionLinkService;
+import com.housesync.finance.connection.application.ConnectionQueryService;
+import com.housesync.finance.connection.application.ConnectionSelectionService;
 import com.housesync.finance.report.application.FinanceReportService;
 import com.housesync.finance.transaction.application.FinancialAllocationService;
 import com.housesync.finance.transaction.application.FinancialTransactionService;
@@ -71,6 +75,10 @@ class SecurityConfigurationTest {
   @MockitoBean private FinancialTransactionService financialTransactions;
   @MockitoBean private FinancialAllocationService financialAllocations;
   @MockitoBean private FinanceReportService reporting;
+  @MockitoBean private ConnectionLinkService connectionLinks;
+  @MockitoBean private ConnectionQueryService connectionQueries;
+  @MockitoBean private ConnectionSelectionService connectionSelection;
+  @MockitoBean private ConnectionLifecycleService connectionLifecycle;
 
   @ParameterizedTest
   @ValueSource(
@@ -122,6 +130,21 @@ class SecurityConfigurationTest {
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
     "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts",
+    "POST,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts/123e4567-e89b-12d3-a456-426614174001/complete",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/connection-operations/123e4567-e89b-12d3-a456-426614174001",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/accounts",
+    "POST,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/account-selection",
+    "POST,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/reconnect",
+    "POST,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/disconnect",
     "POST, /actuator/health",
     "PUT, /actuator/health",
     "PATCH, /actuator/health",
@@ -198,6 +221,26 @@ class SecurityConfigurationTest {
     "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
     "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
     "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts",
+    "POST,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts/123e4567-e89b-12d3-a456-426614174001",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts/123e4567-e89b-12d3-a456-426614174001/complete",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/connection-operations/123e4567-e89b-12d3-a456-426614174001",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/account-selection",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/reconnect",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/disconnect",
+    "POST, /api/provider-webhooks/plaid",
     "GET, /api/households/a/b",
   })
   void authenticatedRequestsToUnimplementedRoutesAreForbidden(String method, String path)

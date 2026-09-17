@@ -1277,7 +1277,7 @@ class FinancialTransactionHttpIT {
             actor.get(path + "?offset=10001"),
             actor.get(path + "?view=private"),
             actor.get(path + "?status=LIVE"),
-            actor.get(path + "?currency=CAD"),
+            actor.get(path + "?currency=CHF"),
             actor.get(path + "?from=2026-09-01"),
             actor.get(path + "?from=2026-09-02&to=2026-09-01"),
             actor.get(path + "?from=not-a-date&to=2026-09-02"),
@@ -1289,6 +1289,11 @@ class FinancialTransactionHttpIT {
       assertThat(response.cacheControl()).contains("no-store");
       assertThat(response.body).doesNotContain("SQL", "at com.housesync");
     }
+
+    // Connected finance admits CAD as a supported currency across the transaction boundary.
+    Resp cadFilter = actor.get(path + "?currency=CAD");
+    assertThat(cadFilter.status).isEqualTo(200);
+    assertThat(cadFilter.cacheControl()).contains("no-store");
 
     Resp duplicateKey =
         actor.createTransaction(

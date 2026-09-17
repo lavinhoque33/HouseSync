@@ -50,6 +50,14 @@ interface FinancialAccountsSectionProps {
    * never call this: only a confirmed list change does.
    */
   onAccountListCommitted?: (() => void) | undefined;
+  /**
+   * Bumped by the parent after a sibling account-list commit (a manual
+   * mutation here, or an admitted bank-account selection in the connections
+   * section) so this section refetches its rows without remounting and
+   * without discarding the create draft or an open rename/status
+   * interaction.
+   */
+  accountsRefreshSignal?: number | undefined;
 }
 
 const KIND_OPTIONS: Array<{ value: FinancialAccountKind; label: string }> = [
@@ -66,6 +74,7 @@ const CURRENCY_OPTIONS: FinancialAccountCurrency[] = [
   'GBP',
   'JPY',
   'KWD',
+  'CAD',
 ];
 
 function validateName(value: string): string | undefined {
@@ -120,6 +129,7 @@ export function FinancialAccountsSection({
   onHouseholdAccessChanged,
   authorityConfirmed,
   onAccountListCommitted,
+  accountsRefreshSignal = 0,
 }: FinancialAccountsSectionProps) {
   const [accounts, setAccounts] = useState<FinancialAccount[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -149,6 +159,19 @@ export function FinancialAccountsSection({
   // async, so guards that run right after a flag change read these refs.
   const creatingRef = useRef(false);
   const updatingRef = useRef<string | null>(null);
+  // Sibling account-list refresh sequencing, decoupled from the shared
+  // load generation so a list reload or mutation can never invalidate an
+  // in-flight background fetch. `servedAccountSignalRef` holds the last
+  // signal whose rows converged (starting at the initial prop so mounting
+  // never refetches what the initial load already includes);
+  // `pendingAccountSignalRef` parks a signal that arrives while this
+  // section owns in-flight work; `accountRefreshSeqRef` orders concurrent
+  // background fetches so only the newest response publishes; and
+  // `activeAccountRefreshRef` aborts the superseded request.
+  const servedAccountSignalRef = useRef(accountsRefreshSignal);
+  const pendingAccountSignalRef = useRef(false);
+  const accountRefreshSeqRef = useRef(0);
+  const activeAccountRefreshRef = useRef<AbortController | null>(null);
   const noticeRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const editNameRef = useRef<HTMLInputElement>(null);
@@ -158,6 +181,13 @@ export function FinancialAccountsSection({
   useEffect(() => {
     csrfRef.current = csrf;
   }, [csrf]);
+
+  // Latest sibling signal for async continuations, which otherwise close
+  // over the prop value from the render that started their request.
+  const accountSignalRef = useRef(accountsRefreshSignal);
+  useEffect(() => {
+    accountSignalRef.current = accountsRefreshSignal;
+  });
 
   function current(generation: number): boolean {
     return !unmountedRef.current && generationRef.current === generation;
@@ -182,6 +212,8 @@ export function FinancialAccountsSection({
       if (!current(generation) || controller.signal.aborted) return;
       setAccounts(sortAccounts(page.items));
       setHasMore(page.hasMore);
+      servedAccountSignalRef.current = accountSignalRef.current;
+      pendingAccountSignalRef.current = false;
       setLoading(false);
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
@@ -223,6 +255,63 @@ export function FinancialAccountsSection({
     void load(generation, controller).finally(() => untrack(controller));
   }
 
+  /**
+   * Refetches sibling-committed account rows without touching the
+   * create-form draft, rename/status interaction, feeds, or notices, and
+   * without consulting the shared load generation: list reloads and
+   * mutations proceed independently. While this section owns in-flight
+   * work the signal stays parked and is served when that work settles, so
+   * a background read can never clobber a pending mutation's local rows.
+   * Only the newest started fetch may publish — an older response that
+   * arrives late is dropped — and unmount always wins. Failures stay
+   * silent: the list keeps its last-known rows and the existing manual
+   * refresh recovers, so a background error can never steal focus from or
+   * discard an in-progress draft.
+   */
+  function refreshAccountList(signal: number) {
+    if (loading || creatingRef.current || updatingRef.current !== null) {
+      pendingAccountSignalRef.current = true;
+      return;
+    }
+    // Abort the superseded request first so its late response can never
+    // publish after the newer one; the sequence guard below covers a
+    // response that already slipped past the abort.
+    activeAccountRefreshRef.current?.abort();
+    const controller = new AbortController();
+    activeAccountRefreshRef.current = controller;
+    track(controller);
+    const sequence = ++accountRefreshSeqRef.current;
+    void (async () => {
+      try {
+        const page = await fetchFinancialAccounts(
+          household.id,
+          controller.signal,
+        );
+        if (
+          unmountedRef.current ||
+          controller.signal.aborted ||
+          accountRefreshSeqRef.current !== sequence
+        ) {
+          return;
+        }
+        // The shared load generation is intentionally not consulted: a list
+        // reload started after this fetch must not invalidate the committed
+        // sibling rows this response carries.
+        setAccounts(sortAccounts(page.items));
+        setHasMore(page.hasMore);
+        servedAccountSignalRef.current = signal;
+        pendingAccountSignalRef.current = false;
+      } catch {
+        // Silent by design; see the doc comment above.
+      } finally {
+        untrack(controller);
+        if (activeAccountRefreshRef.current === controller) {
+          activeAccountRefreshRef.current = null;
+        }
+      }
+    })();
+  }
+
   useEffect(() => {
     unmountedRef.current = false;
     const generation = ++generationRef.current;
@@ -246,6 +335,49 @@ export function FinancialAccountsSection({
   useEffect(() => {
     if (pendingStatus) statusConfirmRef.current?.focus();
   }, [pendingStatus]);
+
+  // A sibling account-list commit (manual mutation here or an admitted
+  // bank-account selection) bumps accountsRefreshSignal after its change
+  // commits. A signal that arrives before the initial rows settle stays
+  // pending — it is never marked served — and the rows effect below serves
+  // it with a post-load fetch that guarantees the committed result
+  // converges.
+  useEffect(() => {
+    if (servedAccountSignalRef.current === accountsRefreshSignal) return;
+    if (
+      accounts === null ||
+      loading ||
+      creatingRef.current ||
+      updatingRef.current !== null
+    ) {
+      pendingAccountSignalRef.current = true;
+      return;
+    }
+    pendingAccountSignalRef.current = false;
+    refreshAccountList(accountsRefreshSignal);
+    // The signal alone drives this effect; `accounts` and the busy flags
+    // are read only to park a pre-settle signal for the rows effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountsRefreshSignal]);
+
+  // Serves a signal parked while rows were still loading or owned work was
+  // in flight: once the section idles with rows present, refetch so the
+  // committed sibling result converges even when an earlier read raced the
+  // commit and missed it.
+  useEffect(() => {
+    if (!pendingAccountSignalRef.current) return;
+    if (servedAccountSignalRef.current === accountsRefreshSignal) {
+      pendingAccountSignalRef.current = false;
+      return;
+    }
+    if (accounts === null || loading || creating || updatingId !== null) {
+      return;
+    }
+    pendingAccountSignalRef.current = false;
+    refreshAccountList(accountsRefreshSignal);
+    // `creating`, `updatingId`, and `loading` becoming idle is the trigger;
+    // the parked flag and the signal decide whether a fetch is owed.
+  });
 
   async function ensureCsrf(
     generation: number,
@@ -684,7 +816,7 @@ export function FinancialAccountsSection({
       )}
 
       {accounts !== null && accounts.length === 0 && !loading && (
-        <p className="finance-empty">No manual accounts yet.</p>
+        <p className="finance-empty">No accounts yet.</p>
       )}
 
       {accounts !== null && accounts.length > 0 && (
@@ -703,6 +835,7 @@ export function FinancialAccountsSection({
                   <p className="finance-account-name">{account.name}</p>
                   <p className="household-meta">
                     {kindLabel(account.kind)} · {account.currency} ·{' '}
+                    {account.source === 'CONNECTED' ? 'Connected' : 'Manual'} ·{' '}
                     {account.status === 'ACTIVE' ? 'Active' : 'Archived'}
                   </p>
                 </div>

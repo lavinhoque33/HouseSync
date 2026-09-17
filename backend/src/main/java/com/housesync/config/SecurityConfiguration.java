@@ -35,9 +35,13 @@ import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler
  * /api/households/{householdId}/transactions/{transactionId}/allocation} and the bounded {@code GET
  * /api/households/{householdId}/member-balances}. Reporting adds {@code GET} and {@code PATCH
  * /api/households/{householdId}/finance-settings} and the bounded {@code GET
- * /api/households/{householdId}/spending-summary}. Every other route stays denied (401 anonymous /
- * 403 authenticated). No CORS allowances, no form/basic login, no remember-me: browsers use the
- * same-origin session cookie plus CSRF header.
+ * /api/households/{householdId}/spending-summary}. Connected finance adds exactly the link, operation,
+ * and connection routes under {@code /api/households/{householdId}}: {@code POST
+ * connection-link-attempts} and its {@code complete} subpath, {@code GET connection-operations
+ * ...}, {@code GET financial-connections} with detail and {@code accounts} reads, plus {@code POST}
+ * {@code account-selection}, {@code reconnect}, and {@code disconnect} actions for authenticated
+ * users. Every other route stays denied (401 anonymous / 403 authenticated). No CORS allowances, no
+ * form/basic login, no remember-me: browsers use the same-origin session cookie plus CSRF header.
  */
 @Configuration(proxyBeanMethods = false)
 public class SecurityConfiguration {
@@ -125,6 +129,21 @@ public class SecurityConfiguration {
                     .authenticated()
                     .requestMatchers(
                         HttpMethod.PATCH, "/api/households/*/transactions/*/allocation")
+                    .authenticated()
+                    .requestMatchers(
+                        HttpMethod.POST,
+                        "/api/households/*/connection-link-attempts",
+                        "/api/households/*/connection-link-attempts/*/complete",
+                        "/api/households/*/financial-connections/*/account-selection",
+                        "/api/households/*/financial-connections/*/reconnect",
+                        "/api/households/*/financial-connections/*/disconnect")
+                    .authenticated()
+                    .requestMatchers(
+                        HttpMethod.GET,
+                        "/api/households/*/connection-operations/*",
+                        "/api/households/*/financial-connections",
+                        "/api/households/*/financial-connections/*",
+                        "/api/households/*/financial-connections/*/accounts")
                     .authenticated()
                     .anyRequest()
                     .denyAll())

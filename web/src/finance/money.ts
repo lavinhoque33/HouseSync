@@ -1,6 +1,8 @@
 /**
  * Exact string-money rules from the accepted manual-finance contract
- * (docs/architecture/manual-finance-api.md, "Money boundary"). This module
+ * (docs/architecture/manual-finance-api.md, "Money boundary"), extended with
+ * CAD scale 2 by the connected-finance contract
+ * (docs/architecture/connected-finance-contract.md, section 2). This module
  * is a leaf: the typed API client imports the currency table from here.
  *
  * - Amounts are decimal strings, never numbers. Signs are encoded by kind
@@ -8,14 +10,14 @@
  * - Input grammar `-?(0|[1-9][0-9]{0,11})(\.[0-9]+)?` is bounded to 17
  *   characters before parsing; the UI accepts the unsigned magnitude form
  *   and appends the economic sign itself.
- * - Currencies have fixed scales: BRL/USD/EUR/GBP 2, JPY 0, KWD 3. Fewer
+ * - Currencies have fixed scales: BRL/USD/EUR/GBP/CAD 2, JPY 0, KWD 3. Fewer
  *   fractional digits are accepted and padded; excess precision, decimal
  *   points on scale-0 currencies, negative zero, and zero values fail.
  * - No number, parseFloat, or binary floating-point arithmetic is used.
  */
 
 export type FinancialAccountCurrency =
-  'BRL' | 'USD' | 'EUR' | 'GBP' | 'JPY' | 'KWD';
+  'BRL' | 'USD' | 'EUR' | 'GBP' | 'JPY' | 'KWD' | 'CAD';
 
 export const CURRENCY_SCALES: Record<FinancialAccountCurrency, number> = {
   BRL: 2,
@@ -24,6 +26,7 @@ export const CURRENCY_SCALES: Record<FinancialAccountCurrency, number> = {
   GBP: 2,
   JPY: 0,
   KWD: 3,
+  CAD: 2,
 };
 
 export function isFinancialAccountCurrency(
@@ -35,7 +38,8 @@ export function isFinancialAccountCurrency(
     value === 'EUR' ||
     value === 'GBP' ||
     value === 'JPY' ||
-    value === 'KWD'
+    value === 'KWD' ||
+    value === 'CAD'
   );
 }
 

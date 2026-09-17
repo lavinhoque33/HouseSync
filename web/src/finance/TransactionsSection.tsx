@@ -2502,7 +2502,10 @@ export function TransactionsSection({
   }
 
   const activeAccounts = (accounts ?? []).filter(
-    (account) => account.status === 'ACTIVE',
+    // Manual entry stays MANUAL-only: CONNECTED accounts are
+    // admitted through account selection and can only receive entries
+    // through bank confirmation later.
+    (account) => account.status === 'ACTIVE' && account.source === 'MANUAL',
   );
   const accountNameById = new Map<string, string>();
   for (const account of accounts ?? []) {

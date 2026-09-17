@@ -25,6 +25,22 @@ describe('currency scales', () => {
       GBP: 2,
       JPY: 0,
       KWD: 3,
+      CAD: 2,
+    });
+  });
+
+  it('encodes Canadian dollars at strict scale 2', () => {
+    expect(ok('10', 'CAD')).toEqual({ ok: true, amount: '10.00' });
+    expect(ok('10.5', 'CAD')).toEqual({ ok: true, amount: '10.50' });
+    expect(ok('10.00', 'CAD')).toEqual({ ok: true, amount: '10.00' });
+    expect(ok('10.001', 'CAD')).toMatchObject({ ok: false });
+    expect(ok('10.00', 'CAD', 'negative')).toEqual({
+      ok: true,
+      amount: '-10.00',
+    });
+    expect(ok('0.00', 'CAD')).toEqual({
+      ok: false,
+      error: 'Enter a nonzero amount.',
     });
   });
 });

@@ -45,7 +45,8 @@ public class FinancialTransactionController {
   private static final Set<String> LIST_PARAMETERS =
       Set.of("limit", "offset", "view", "accountId", "currency", "from", "to", "status");
   private static final Set<String> VIEWS = Set.of("OWN", "HOUSEHOLD");
-  private static final Set<String> CURRENCIES = Set.of("BRL", "USD", "EUR", "GBP", "JPY", "KWD");
+  private static final Set<String> CURRENCIES =
+      Set.of("BRL", "USD", "EUR", "GBP", "JPY", "KWD", "CAD");
   private static final LocalDate MIN_FILTER_DATE = LocalDate.of(1900, 1, 1);
   private static final LocalDate MAX_FILTER_DATE = LocalDate.of(9999, 12, 31);
 

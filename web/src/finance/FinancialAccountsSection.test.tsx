@@ -5,7 +5,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
-import { StrictMode } from 'react';
+import { StrictMode, act } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { FinancialAccount, Household } from '../auth/client';
 import { FinancialAccountsSection } from './FinancialAccountsSection';
@@ -104,6 +104,7 @@ function renderSection(
   options: {
     authorityConfirmed?: boolean;
     onAccountListCommitted?: () => void;
+    accountsRefreshSignal?: number;
   } = {},
 ) {
   const calls = stubFetch(routes);
@@ -120,8 +121,23 @@ function renderSection(
       onHouseholdAccessChanged={onHouseholdAccessChanged}
       authorityConfirmed={options.authorityConfirmed ?? true}
       onAccountListCommitted={onAccountListCommitted}
+      accountsRefreshSignal={options.accountsRefreshSignal ?? 0}
     />,
   );
+  function rerenderWithAccountSignal(accountsRefreshSignal: number) {
+    rendered.rerender(
+      <FinancialAccountsSection
+        household={HOUSEHOLD}
+        csrf={CSRF}
+        onCsrfRefreshed={onCsrfRefreshed}
+        onSessionExpired={onSessionExpired}
+        onHouseholdAccessChanged={onHouseholdAccessChanged}
+        authorityConfirmed={options.authorityConfirmed ?? true}
+        onAccountListCommitted={onAccountListCommitted}
+        accountsRefreshSignal={accountsRefreshSignal}
+      />,
+    );
+  }
   return {
     ...rendered,
     calls,
@@ -129,6 +145,7 @@ function renderSection(
     onSessionExpired,
     onHouseholdAccessChanged,
     onAccountListCommitted,
+    rerenderWithAccountSignal,
   };
 }
 
@@ -142,8 +159,12 @@ describe('private account list', () => {
 
     await screen.findByText('Daily spending');
     expect(screen.getByText('Pocket cash')).toBeInTheDocument();
-    expect(screen.getByText(/Checking · BRL · Active/)).toBeInTheDocument();
-    expect(screen.getByText(/Cash · USD · Archived/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Checking · BRL · Manual · Active/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Cash · USD · Manual · Archived/),
+    ).toBeInTheDocument();
     // Privacy and no-balance messaging is textual, never color-only.
     expect(screen.getByText('Account details private')).toBeInTheDocument();
     expect(screen.getByText('Private to you')).toBeInTheDocument();
@@ -166,6 +187,151 @@ describe('private account list', () => {
     ).toBe(true);
   });
 
+  it('labels admitted connected accounts without changing manual behavior', async () => {
+    renderSection({
+      accountsGet: () =>
+        listPage([
+          account(),
+          account({
+            id: '10000000-0000-4000-8000-000000000009',
+            name: 'Everyday Chequing',
+            kind: 'CHECKING',
+            currency: 'CAD',
+            source: 'CONNECTED',
+          }),
+        ]),
+    });
+
+    await screen.findByText('Daily spending');
+    expect(screen.getByText('Everyday Chequing')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Checking · CAD · Connected · Active/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Checking · BRL · Manual · Active/),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('sibling account-list refresh', () => {
+  const CONNECTED_ID = '10000000-0000-4000-8000-000000000009';
+  const connectedAccount = () =>
+    account({
+      id: CONNECTED_ID,
+      name: 'Everyday Chequing',
+      kind: 'CHECKING',
+      currency: 'CAD',
+      source: 'CONNECTED',
+    });
+
+  const accountsUrl = `/api/households/${HOUSEHOLD.id}/financial-accounts?limit=100&offset=0&status=ALL`;
+  const getCalls = (calls: Call[]) =>
+    calls.filter(({ url }) => url === accountsUrl);
+
+  it('shows a sibling-committed connected account without discarding the create draft', async () => {
+    let visibleAccounts: FinancialAccount[] = [account()];
+    const { calls, rerenderWithAccountSignal } = renderSection({
+      accountsGet: () => listPage([...visibleAccounts]),
+    });
+    await screen.findByText('Daily spending');
+
+    // An in-progress manual create draft.
+    fireEvent.change(screen.getByLabelText('Account name'), {
+      target: { value: 'Draft fund' },
+    });
+
+    // The connections section admits a bank account; the parent bumps the
+    // signal once that selection commits.
+    visibleAccounts = [account(), connectedAccount()];
+    act(() => {
+      rerenderWithAccountSignal(1);
+    });
+
+    expect(await screen.findByText('Everyday Chequing')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Checking · CAD · Connected · Active/),
+    ).toBeInTheDocument();
+    // No remount and no draft reset: the entered name survives the refresh.
+    expect(screen.getByLabelText('Account name')).toHaveValue('Draft fund');
+    expect(getCalls(calls)).toHaveLength(2);
+  });
+
+  it('keeps an open rename across a sibling refresh', async () => {
+    let visibleAccounts: FinancialAccount[] = [account()];
+    const { rerenderWithAccountSignal } = renderSection({
+      accountsGet: () => listPage([...visibleAccounts]),
+    });
+    await screen.findByText('Daily spending');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Rename Daily spending' }),
+    );
+    const renameInput = screen.getByLabelText('Account name', {
+      selector: `#finance-name-${CHECKING_ID}`,
+    });
+    fireEvent.change(renameInput, { target: { value: 'Groceries card' } });
+
+    visibleAccounts = [account(), connectedAccount()];
+    act(() => {
+      rerenderWithAccountSignal(1);
+    });
+
+    await screen.findByText('Everyday Chequing');
+    // The rename interaction stays open with its edit intact.
+    expect(
+      screen.getByRole('button', { name: 'Save name' }),
+    ).toBeInTheDocument();
+    expect(renameInput).toHaveValue('Groceries card');
+  });
+
+  it('defers a sibling refresh while creating and converges after', async () => {
+    let visibleAccounts: FinancialAccount[] = [account()];
+    let resolvePost!: (response: Response) => void;
+    const postGate = new Promise<Response>((resolve) => {
+      resolvePost = resolve;
+    });
+    const { calls, rerenderWithAccountSignal } = renderSection({
+      accountsGet: () => listPage([...visibleAccounts]),
+      accountsPost: () => postGate,
+    });
+    await screen.findByText('Daily spending');
+    fireEvent.change(screen.getByLabelText('Account name'), {
+      target: { value: 'Pocket cash' },
+    });
+    fireEvent.change(screen.getByLabelText('Account type'), {
+      target: { value: 'CASH' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Add private account' }),
+    );
+
+    // A sibling commits while the manual create is in flight: the signal
+    // parks instead of racing the mutation's local rows.
+    visibleAccounts = [account(), connectedAccount()];
+    act(() => {
+      rerenderWithAccountSignal(1);
+    });
+    expect(getCalls(calls)).toHaveLength(1);
+
+    const created = account({
+      id: CASH_ID,
+      name: 'Pocket cash',
+      kind: 'CASH',
+      currency: 'USD',
+    });
+    visibleAccounts = [account(), created, connectedAccount()];
+    await act(async () => {
+      resolvePost(jsonResponse(created, 201));
+    });
+    expect(
+      await screen.findByText('Private account “Pocket cash” is ready.'),
+    ).toBeInTheDocument();
+    // The parked signal serves after the mutation settles: both the created
+    // manual account and the admitted connected account converge.
+    await screen.findByText('Everyday Chequing');
+    expect(screen.getByText('Pocket cash')).toBeInTheDocument();
+    await waitFor(() => expect(getCalls(calls)).toHaveLength(2));
+  });
+
   it('orders equal-instant accounts by identifier, not by locale', async () => {
     // Same createdAt, served in reverse identifier order: the display order
     // must be deterministic (bytewise UUID), never locale-sensitive.
@@ -182,9 +348,7 @@ describe('private account list', () => {
   it('keeps the empty state free of synthetic balances', async () => {
     renderSection({ accountsGet: () => listPage([]) });
 
-    expect(
-      await screen.findByText('No manual accounts yet.'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText('No accounts yet.')).toBeInTheDocument();
     // No amount, no balance label, and no inferred number may appear.
     expect(document.body.textContent).not.toMatch(/\d+\.\d{2}/);
     expect(screen.queryByText(/balance:/i)).toBeNull();
@@ -221,7 +385,7 @@ describe('private account creation', () => {
       accountsPost: () =>
         jsonResponse(account({ kind: 'CASH', currency: 'USD' }), 201),
     });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
 
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
@@ -264,7 +428,7 @@ describe('private account creation', () => {
       },
       { onAccountListCommitted },
     );
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
 
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
@@ -302,7 +466,7 @@ describe('private account creation', () => {
       },
       { onAccountListCommitted },
     );
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
     });
@@ -322,7 +486,7 @@ describe('private account creation', () => {
 
   it('rejects an empty name without any request', async () => {
     const { calls } = renderSection({ accountsGet: () => listPage([]) });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
 
     fireEvent.click(
       screen.getByRole('button', { name: 'Add private account' }),
@@ -348,7 +512,7 @@ describe('private account creation', () => {
           400,
         ),
     });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
     });
@@ -385,7 +549,7 @@ describe('private account creation', () => {
         return jsonResponse(account({ kind: 'CASH', currency: 'USD' }), 201);
       },
     });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
     });
@@ -428,7 +592,7 @@ describe('private account creation', () => {
       accountsGet: () => listPage([]),
       accountsPost: () => Promise.reject(new TypeError('Failed to fetch')),
     });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
     });
@@ -455,7 +619,7 @@ describe('private account creation', () => {
         return jsonResponse(account(), 201);
       },
     });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
     });
@@ -533,7 +697,7 @@ describe('private account creation', () => {
           401,
         ),
     });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
     });
@@ -547,7 +711,7 @@ describe('private account creation', () => {
     expect(
       screen.queryByRole('button', { name: 'Retry same request' }),
     ).toBeNull();
-    expect(screen.queryByText('No manual accounts yet.')).toBeNull();
+    expect(screen.queryByText('No accounts yet.')).toBeNull();
   });
 
   it('clears the retained request and reconciles on access loss from a create', async () => {
@@ -559,7 +723,7 @@ describe('private account creation', () => {
           404,
         ),
     });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
     });
@@ -588,7 +752,7 @@ describe('private account creation', () => {
       accountsGet: () => listPage([]),
       accountsPost: () => gate,
     });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
     });
@@ -621,7 +785,7 @@ describe('private account creation', () => {
           : jsonResponse(account({ kind: 'CASH', currency: 'USD' }), 201);
       },
     });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
     });
@@ -637,11 +801,10 @@ describe('private account creation', () => {
     // retained request: the durable block survives the transient notice.
     fireEvent.click(screen.getByRole('button', { name: 'Refresh accounts' }));
     expect(await screen.findByText(/unknown result/i)).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: 'Retry same request' }),
-    ).toBeEnabled();
+    const retry = screen.getByRole('button', { name: 'Retry same request' });
+    await waitFor(() => expect(retry).toBeEnabled());
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry same request' }));
+    fireEvent.click(retry);
     expect(
       await screen.findByText('Private account “Daily spending” is ready.'),
     ).toBeInTheDocument();
@@ -721,7 +884,7 @@ describe('private account creation', () => {
           : jsonResponse(account(), 201);
       },
     });
-    await screen.findByText('No manual accounts yet.');
+    await screen.findByText('No accounts yet.');
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Daily spending' },
     });
@@ -978,7 +1141,9 @@ describe('rename and lifecycle', () => {
     expect(
       await screen.findByText('“Pocket cash” is active again.'),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Cash · USD · Active/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Cash · USD · Manual · Active/),
+    ).toBeInTheDocument();
   });
 
   it('cancels the confirmation with Escape and restores the trigger', async () => {

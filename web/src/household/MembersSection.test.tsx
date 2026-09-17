@@ -422,11 +422,12 @@ describe('timeout and unknown outcome', () => {
         onHouseholdAccessChanged={() => {}}
       />,
     );
-    await screen.findByRole('button', { name: 'Leave Elm Street home' });
+    const leaveButton = await screen.findByRole('button', {
+      name: 'Leave Elm Street home',
+    });
+    await waitFor(() => expect(leaveButton).toBeEnabled());
     vi.useFakeTimers();
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Leave Elm Street home' }),
-    );
+    fireEvent.click(leaveButton);
     fireEvent.click(screen.getByRole('button', { name: 'Leave household' }));
     await act(() => vi.advanceTimersByTimeAsync(10_000));
     expect(
@@ -446,9 +447,11 @@ describe('timeout and unknown outcome', () => {
     await waitFor(() =>
       expect(screen.queryByText(/outcome is unknown/i)).not.toBeInTheDocument(),
     );
-    expect(
-      screen.getByRole('button', { name: 'Leave Elm Street home' }),
-    ).not.toBeDisabled();
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Leave Elm Street home' }),
+      ).not.toBeDisabled(),
+    );
   });
 
   it('reports an unknown role-change outcome without replaying', async () => {

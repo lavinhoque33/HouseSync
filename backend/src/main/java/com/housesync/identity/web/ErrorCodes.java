@@ -15,6 +15,11 @@ public final class ErrorCodes {
   public static final String LAST_OWNER_REQUIRED = "LAST_OWNER_REQUIRED";
   public static final String INVITATION_NOT_FOUND = "INVITATION_NOT_FOUND";
   public static final String FINANCIAL_ACCOUNT_NOT_FOUND = "FINANCIAL_ACCOUNT_NOT_FOUND";
+  public static final String FINANCIAL_CONNECTION_NOT_FOUND = "FINANCIAL_CONNECTION_NOT_FOUND";
+  public static final String LINK_ATTEMPT_EXPIRED = "LINK_ATTEMPT_EXPIRED";
+  public static final String CONNECTION_NOT_READY = "CONNECTION_NOT_READY";
+  public static final String CONNECTION_DISCONNECTED = "CONNECTION_DISCONNECTED";
+  public static final String CONNECTED_FINANCE_DISABLED = "CONNECTED_FINANCE_DISABLED";
   public static final String TRANSACTION_NOT_FOUND = "TRANSACTION_NOT_FOUND";
   public static final String ACCOUNT_ARCHIVED = "ACCOUNT_ARCHIVED";
   public static final String REFUND_CONFLICT = "REFUND_CONFLICT";

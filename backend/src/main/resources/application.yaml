@@ -41,6 +41,19 @@ app:
     ip-window-seconds: 60
     login-email-max-attempts: 10
     login-email-window-seconds: 600
+  connected-finance:
+    enabled: ${CONNECTED_FINANCE_ENABLED:false}
+    provider: ${CONNECTED_FINANCE_PROVIDER:plaid}
+    fake-allowed: ${CONNECTED_FINANCE_FAKE_ALLOWED:false}
+    environment: ${PLAID_ENV:sandbox}
+    client-id: ${PLAID_CLIENT_ID:}
+    secret: ${PLAID_SECRET:}
+    base-url: ${PLAID_BASE_URL:}
+    redirect-url: ${PLAID_REDIRECT_URL:}
+    webhook-url: ${PLAID_WEBHOOK_URL:}
+    encryption-keys: ${CONNECTED_FINANCE_KEYS:}
+    attempt-ttl-minutes: 30
+    revocation-poll-ms: 60000
 
 management:
   endpoints:

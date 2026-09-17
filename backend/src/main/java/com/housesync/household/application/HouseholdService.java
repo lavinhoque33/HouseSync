@@ -1,5 +1,6 @@
 package com.housesync.household.application;
 
+import com.housesync.finance.connection.application.ConnectionMembershipHook;
 import com.housesync.household.domain.HouseholdNamePolicy;
 import com.housesync.household.domain.MemberRole;
 import com.housesync.household.domain.MemberRolePolicy;
@@ -25,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -50,16 +52,19 @@ public class HouseholdService {
   private final HouseholdMemberRepository memberships;
   private final Clock clock;
   private final EntityManager entityManager;
+  private final ObjectProvider<ConnectionMembershipHook> connectionHooks;
 
   public HouseholdService(
       HouseholdRepository households,
       HouseholdMemberRepository memberships,
       Clock clock,
-      EntityManager entityManager) {
+      EntityManager entityManager,
+      ObjectProvider<ConnectionMembershipHook> connectionHooks) {
     this.households = households;
     this.memberships = memberships;
     this.clock = clock;
     this.entityManager = entityManager;
+    this.connectionHooks = connectionHooks;
   }
 
   /** Creates a household and its creator {@code OWNER} membership atomically. */
@@ -151,9 +156,12 @@ public class HouseholdService {
       throw new LastOwnerRequiredException();
     }
     memberships.delete(target);
+    // Same lifecycle transaction: suspend the departed member's provider connections with
+    // generation fencing and queue durable remote revocation that survives the membership loss.
+    suspendConnections(householdId, targetUserId);
   }
 
-  /** Removes the actor's own membership unless it is the household's final owner. */
+  /** Removes the actor's own membership unless they are the final owner. */
   @Transactional
   public void leave(UUID householdId, UUID actorId) {
     HouseholdMemberEntity actor = lockAndRequireMembership(householdId, actorId);
@@ -162,6 +170,14 @@ public class HouseholdService {
       throw new LastOwnerRequiredException();
     }
     memberships.delete(actor);
+    suspendConnections(householdId, actorId);
+  }
+
+  private void suspendConnections(UUID householdId, UUID ownerUserId) {
+    ConnectionMembershipHook hook = connectionHooks.getIfAvailable();
+    if (hook != null) {
+      hook.suspendOwnerConnections(householdId, ownerUserId);
+    }
   }
 
   /**

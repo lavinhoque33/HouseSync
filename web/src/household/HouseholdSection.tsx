@@ -10,6 +10,7 @@ import {
 import { validateHouseholdName } from '../auth/validation';
 import { InvitationSection } from '../invitation/InvitationSection';
 import { FinancialAccountsSection } from '../finance/FinancialAccountsSection';
+import { FinancialConnectionsSection } from '../finance/FinancialConnectionsSection';
 import { TransactionsSection } from '../finance/TransactionsSection';
 import { MembersSection } from './MembersSection';
 
@@ -94,9 +95,12 @@ export function HouseholdSection({
     null,
   );
   const [creating, setCreating] = useState(false);
-  // Per-household sibling account-list signals: a committed manual-account
-  // mutation in FinancialAccountsSection bumps its household's entry so the
-  // keyed TransactionsSection refetches account metadata without remounting
+  // Per-household sibling account-list signals: a committed account-list
+  // mutation in FinancialAccountsSection (create, rename, archive,
+  // reactivate) or an admitted account selection in
+  // FinancialConnectionsSection bumps its household's entry so the keyed
+  // FinancialAccountsSection refetches its rows and the keyed
+  // TransactionsSection refetches account metadata, each without remounting
   // or discarding its entry draft.
   const [accountSignals, setAccountSignals] = useState<Record<string, number>>(
     {},
@@ -507,6 +511,7 @@ export function HouseholdSection({
                 onAccountListCommitted={() =>
                   handleAccountListCommitted(household.id)
                 }
+                accountsRefreshSignal={accountSignals[household.id] ?? 0}
               />
               <TransactionsSection
                 key={`${household.id}-transactions`}
@@ -518,6 +523,18 @@ export function HouseholdSection({
                 onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
                 authorityConfirmed={!stale && !loading && listError === null}
                 accountsRefreshSignal={accountSignals[household.id] ?? 0}
+              />
+              <FinancialConnectionsSection
+                key={`${household.id}-connections`}
+                household={household}
+                csrf={csrf}
+                onCsrfRefreshed={onCsrfRefreshed}
+                onSessionExpired={onSessionExpired}
+                onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+                authorityConfirmed={!stale && !loading && listError === null}
+                onAccountListCommitted={() =>
+                  handleAccountListCommitted(household.id)
+                }
               />
               <MembersSection
                 household={household}

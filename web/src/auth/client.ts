@@ -6,6 +6,20 @@ import {
   minorUnitsOfMagnitude,
   type FinancialAccountCurrency,
 } from '../finance/money';
+import {
+  parseAccountSelectionResult,
+  parseConnectionAccountMappingPage,
+  parseConnectionOperation,
+  parseFinancialConnection,
+  parseFinancialConnectionPage,
+  parseLinkAttempt,
+  type AccountSelectionResult,
+  type ConnectionAccountMappingPage,
+  type ConnectionOperation,
+  type FinancialConnection,
+  type FinancialConnectionPage,
+  type LinkAttempt,
+} from '../finance/connections';
 import { isRegionShapedZone } from '../finance/reporting';
 
 export type { FinancialAccountCurrency } from '../finance/money';
@@ -37,6 +51,11 @@ export type ApiErrorCode =
   | 'MEMBERSHIP_NOT_FOUND'
   | 'LAST_OWNER_REQUIRED'
   | 'FINANCIAL_ACCOUNT_NOT_FOUND'
+  | 'FINANCIAL_CONNECTION_NOT_FOUND'
+  | 'LINK_ATTEMPT_EXPIRED'
+  | 'CONNECTION_NOT_READY'
+  | 'CONNECTION_DISCONNECTED'
+  | 'CONNECTED_FINANCE_DISABLED'
   | 'TRANSACTION_NOT_FOUND'
   | 'ACCOUNT_ARCHIVED'
   | 'IDEMPOTENCY_CONFLICT'
@@ -101,6 +120,11 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'MEMBERSHIP_NOT_FOUND',
     'LAST_OWNER_REQUIRED',
     'FINANCIAL_ACCOUNT_NOT_FOUND',
+    'FINANCIAL_CONNECTION_NOT_FOUND',
+    'LINK_ATTEMPT_EXPIRED',
+    'CONNECTION_NOT_READY',
+    'CONNECTION_DISCONNECTED',
+    'CONNECTED_FINANCE_DISABLED',
     'TRANSACTION_NOT_FOUND',
     'ACCOUNT_ARCHIVED',
     'IDEMPOTENCY_CONFLICT',
@@ -1227,6 +1251,19 @@ export async function postInvitationAccept(
 export type FinancialAccountKind =
   'CASH' | 'CHECKING' | 'SAVINGS' | 'CREDIT_CARD';
 export type FinancialAccountStatus = 'ACTIVE' | 'ARCHIVED';
+/**
+ * Connected finance widens the persisted source from MANUAL-only to
+ * MANUAL/CONNECTED. Manual transaction entry stays MANUAL-only (enforced
+ * server-side and in the transaction form's account selector); CONNECTED
+ * rows are admitted only through explicit account selection.
+ */
+export type FinancialAccountSource = 'MANUAL' | 'CONNECTED';
+
+function isFinancialAccountSource(
+  value: unknown,
+): value is FinancialAccountSource {
+  return value === 'MANUAL' || value === 'CONNECTED';
+}
 
 export interface FinancialAccount {
   id: string;
@@ -1235,7 +1272,7 @@ export interface FinancialAccount {
   name: string;
   kind: FinancialAccountKind;
   currency: FinancialAccountCurrency;
-  source: 'MANUAL';
+  source: FinancialAccountSource;
   visibility: 'PRIVATE';
   status: FinancialAccountStatus;
   version: number;
@@ -1284,7 +1321,7 @@ function parseFinancialAccount(value: unknown): FinancialAccount | undefined {
     typeof record.name !== 'string' ||
     !isFinancialAccountKind(record.kind) ||
     !isFinancialAccountCurrency(record.currency) ||
-    record.source !== 'MANUAL' ||
+    !isFinancialAccountSource(record.source) ||
     record.visibility !== 'PRIVATE' ||
     (record.status !== 'ACTIVE' && record.status !== 'ARCHIVED') ||
     typeof record.version !== 'number' ||
@@ -1425,6 +1462,453 @@ export async function patchFinancialAccount(
     response,
     response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
     'Financial account update could not be completed.',
+  );
+}
+
+export type {
+  AccountSelectionResult,
+  ConnectionAccountMapping,
+  ConnectionAccountMappingPage,
+  ConnectionOperation,
+  ConnectionOperationState,
+  ConnectionOperationType,
+  FinancialConnection,
+  FinancialConnectionPage,
+  FinancialConnectionState,
+  LinkAttempt,
+  LinkFlow,
+  SelectedConnectedAccount,
+} from '../finance/connections';
+
+/**
+ * Connected-finance endpoints
+ * (docs/architecture/connected-finance-contract.md, section 7). Every POST
+ * carries an Idempotency-Key plus CSRF; versioned POSTs send the exact
+ * backend body shape `{expectedVersion, ...}`. There is no `/sync` or
+ * webhook surface on these routes.
+ */
+
+function connectionBase(householdId: string): string {
+  return `/api/households/${encodeURIComponent(householdId)}`;
+}
+
+function unexpectedConnectionResponse(
+  status: number,
+  message: string,
+): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message,
+  });
+}
+
+async function postWithIdempotencyKey(
+  url: string,
+  body: unknown,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<BufferedBody> {
+  return apiFetch(
+    url,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        ...unsafeHeaders(csrf),
+        'Idempotency-Key': idempotencyKey,
+      },
+      cache: 'no-store',
+      body: JSON.stringify(body),
+    },
+    signal,
+    timeoutMs,
+  );
+}
+
+/**
+ * Start a NEW link attempt. Body is exactly `{}`; unknown fields are
+ * rejected server-side. 201 is a fresh attempt, 200 a same-key replay while
+ * the token is valid.
+ */
+export async function startConnectionLink(
+  householdId: string,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<LinkAttempt> {
+  const response = await postWithIdempotencyKey(
+    `${connectionBase(householdId)}/connection-link-attempts`,
+    {},
+    idempotencyKey,
+    csrf,
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200 || response.status === 201) {
+    const attempt = parseLinkAttempt(await readJson<unknown>(response));
+    if (!attempt) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected link response.',
+      );
+    }
+    return attempt;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Bank linking could not be started.',
+  );
+}
+
+export type CompleteLinkBody = { publicToken: string } | Record<string, never>;
+
+/**
+ * Complete a link attempt and receive the durable operation behind the poll
+ * URL. NEW links send `{publicToken}` exactly once; UPDATE (reconnect)
+ * completions send `{}`. Always 202; the operation state carries the outcome,
+ * including explicit OUTCOME_UNKNOWN.
+ */
+export async function completeConnectionLink(
+  householdId: string,
+  attemptId: string,
+  body: CompleteLinkBody,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<ConnectionOperation> {
+  const response = await postWithIdempotencyKey(
+    `${connectionBase(householdId)}/connection-link-attempts/${encodeURIComponent(attemptId)}/complete`,
+    body,
+    idempotencyKey,
+    csrf,
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 202) {
+    const operation = parseConnectionOperation(
+      await readJson<unknown>(response),
+    );
+    if (!operation) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected link response.',
+      );
+    }
+    return operation;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Bank linking could not be completed.',
+  );
+}
+
+/** Owner-only durable-operation status poll behind the operation statusUrl. */
+export async function fetchConnectionOperation(
+  statusUrl: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<ConnectionOperation> {
+  const response = await apiFetch(
+    statusUrl,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const operation = parseConnectionOperation(
+      await readJson<unknown>(response),
+    );
+    if (!operation) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected connection response.',
+      );
+    }
+    return operation;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+    'Could not check the connection request.',
+  );
+}
+
+/** Owner-only private connection list; bounded page, deterministic order. */
+export async function fetchFinancialConnections(
+  householdId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<FinancialConnectionPage> {
+  const response = await apiFetch(
+    `${connectionBase(householdId)}/financial-connections?limit=100&offset=0`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const page = parseFinancialConnectionPage(
+      await readJson<unknown>(response),
+    );
+    if (!page) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected connection response.',
+      );
+    }
+    return page;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+    'Could not load your bank connections.',
+  );
+}
+
+/** Owner-only private connection detail. */
+export async function fetchFinancialConnection(
+  householdId: string,
+  connectionId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<FinancialConnection> {
+  const response = await apiFetch(
+    `${connectionBase(householdId)}/financial-connections/${encodeURIComponent(connectionId)}`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const connection = parseFinancialConnection(
+      await readJson<unknown>(response),
+    );
+    if (!connection) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected connection response.',
+      );
+    }
+    return connection;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+    'Could not load this bank connection.',
+  );
+}
+
+/** Owner-only bounded page of discovered account mappings behind local IDs. */
+export async function fetchConnectionAccounts(
+  householdId: string,
+  connectionId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<ConnectionAccountMappingPage> {
+  const response = await apiFetch(
+    `${connectionBase(householdId)}/financial-connections/${encodeURIComponent(connectionId)}/accounts?limit=100&offset=0`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const page = parseConnectionAccountMappingPage(
+      await readJson<unknown>(response),
+    );
+    if (!page) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected connection response.',
+      );
+    }
+    return page;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+    'Could not load the discovered accounts.',
+  );
+}
+
+/**
+ * Save the explicit account selection. Body is exactly
+ * `{expectedVersion, accountMappingIds}` with local mapping IDs; empty
+ * selection is allowed. 200 carries the admitted CONNECTED accounts.
+ */
+export async function postAccountSelection(
+  householdId: string,
+  connectionId: string,
+  expectedVersion: number,
+  accountMappingIds: string[],
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<AccountSelectionResult> {
+  const response = await postWithIdempotencyKey(
+    `${connectionBase(householdId)}/financial-connections/${encodeURIComponent(connectionId)}/account-selection`,
+    { expectedVersion, accountMappingIds },
+    idempotencyKey,
+    csrf,
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const result = parseAccountSelectionResult(
+      await readJson<unknown>(response),
+    );
+    if (!result) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected connection response.',
+      );
+    }
+    return result;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Account selection could not be saved.',
+  );
+}
+
+/**
+ * Start an UPDATE (reconnect) attempt. Body is exactly `{expectedVersion}`.
+ * 201 is a fresh attempt, 200 a same-key replay. Completion goes through
+ * `completeConnectionLink` with an empty body.
+ */
+export async function postConnectionReconnect(
+  householdId: string,
+  connectionId: string,
+  expectedVersion: number,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<LinkAttempt> {
+  const response = await postWithIdempotencyKey(
+    `${connectionBase(householdId)}/financial-connections/${encodeURIComponent(connectionId)}/reconnect`,
+    { expectedVersion },
+    idempotencyKey,
+    csrf,
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200 || response.status === 201) {
+    const attempt = parseLinkAttempt(await readJson<unknown>(response));
+    if (!attempt) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected link response.',
+      );
+    }
+    return attempt;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Bank reconnection could not be started.',
+  );
+}
+
+/**
+ * Disconnect. Body is exactly `{expectedVersion}`. Always 202; the local
+ * state moves to DISCONNECTING immediately and the operation poll confirms
+ * the remote removal or a retryable state.
+ */
+export async function postConnectionDisconnect(
+  householdId: string,
+  connectionId: string,
+  expectedVersion: number,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<ConnectionOperation> {
+  const response = await postWithIdempotencyKey(
+    `${connectionBase(householdId)}/financial-connections/${encodeURIComponent(connectionId)}/disconnect`,
+    { expectedVersion },
+    idempotencyKey,
+    csrf,
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 202) {
+    const operation = parseConnectionOperation(
+      await readJson<unknown>(response),
+    );
+    if (!operation) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected connection response.',
+      );
+    }
+    return operation;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Bank disconnection could not be started.',
   );
 }
 

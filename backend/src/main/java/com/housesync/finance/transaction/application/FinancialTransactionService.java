@@ -149,6 +149,11 @@ public class FinancialTransactionService {
     if (account.getStatus() == FinancialAccountStatus.ARCHIVED) {
       throw new AccountArchivedException();
     }
+    if (!"MANUAL".equals(account.getSource())) {
+      // Manual transaction entry stays MANUAL-only: CONNECTED accounts are
+      // admitted only through bank-activity confirmation.
+      throw new ValidationFailedException(Map.of("accountId", "Choose a manual account."));
+    }
     if (account.getCurrency() != values.currency()) {
       throw new ValidationFailedException(
           Map.of("money.currency", "Enter the account's currency."));

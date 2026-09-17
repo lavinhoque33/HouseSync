@@ -4,6 +4,13 @@ import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAcc
 import com.housesync.finance.account.web.FinancialAccountExceptions.IdempotencyConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionExhaustedException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ConnectedFinanceDisabledException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ConnectionDisconnectedException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ConnectionIdempotencyConflictException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ConnectionNotFoundException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ConnectionNotReadyException;
+import com.housesync.finance.connection.web.ConnectionExceptions.LinkAttemptExpiredException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ProviderTransientException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsForbiddenException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionConflictException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionExhaustedException;
@@ -286,12 +293,84 @@ public class FinancialAccountExceptionHandler {
         failure);
   }
 
+  @ExceptionHandler(ConnectionNotFoundException.class)
+  public ResponseEntity<ApiError> connectionNotFound(ConnectionNotFoundException failure) {
+    return error(
+        HttpStatus.NOT_FOUND,
+        ErrorCodes.FINANCIAL_CONNECTION_NOT_FOUND,
+        "Financial connection was not found.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(LinkAttemptExpiredException.class)
+  public ResponseEntity<ApiError> linkAttemptExpired(LinkAttemptExpiredException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.LINK_ATTEMPT_EXPIRED,
+        "This link attempt expired. Start a new one.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ConnectionNotReadyException.class)
+  public ResponseEntity<ApiError> connectionNotReady(ConnectionNotReadyException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.CONNECTION_NOT_READY,
+        "The connection is not ready for this action.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ConnectionDisconnectedException.class)
+  public ResponseEntity<ApiError> connectionDisconnected(ConnectionDisconnectedException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.CONNECTION_DISCONNECTED,
+        "The connection is no longer active. Link again.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ConnectionIdempotencyConflictException.class)
+  public ResponseEntity<ApiError> connectionIdempotencyConflict(
+      ConnectionIdempotencyConflictException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.IDEMPOTENCY_CONFLICT,
+        "That request key was already used for different connection details.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ConnectedFinanceDisabledException.class)
+  public ResponseEntity<ApiError> connectedFinanceDisabled(
+      ConnectedFinanceDisabledException failure) {
+    return error(
+        HttpStatus.SERVICE_UNAVAILABLE,
+        ErrorCodes.CONNECTED_FINANCE_DISABLED,
+        "Connected finance is not enabled.",
+        null,
+        failure);
+  }
+
   @ExceptionHandler({PessimisticLockingFailureException.class, QueryTimeoutException.class})
   public ResponseEntity<ApiError> busy(Exception failure) {
     return error(
         HttpStatus.SERVICE_UNAVAILABLE,
         ErrorCodes.FINANCE_BUSY,
         "Finance is busy. Refresh before retrying.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ProviderTransientException.class)
+  public ResponseEntity<ApiError> providerTransient(ProviderTransientException failure) {
+    return error(
+        HttpStatus.SERVICE_UNAVAILABLE,
+        ErrorCodes.FINANCE_BUSY,
+        "The provider is temporarily unavailable. Refresh before retrying.",
         null,
         failure);
   }

@@ -378,6 +378,44 @@ describe('sibling account-list refresh', () => {
     expect(screen.getByLabelText('Description')).toHaveValue('Draft groceries');
   });
 
+  it('excludes connected accounts from manual entry without touching the draft', async () => {
+    const connected: FinancialAccount = {
+      ...account(),
+      id: '10000000-0000-4000-8000-000000000009',
+      name: 'Everyday Chequing',
+      currency: 'CAD',
+      source: 'CONNECTED',
+    };
+    let visibleAccounts: FinancialAccount[] = [account()];
+    const { rerenderWithAccountSignal } = renderSection({
+      accountsGet: () => accountPage([...visibleAccounts]),
+      transactionsGet: () => transactionPage([]),
+    });
+    await screen.findByText('No transactions yet.');
+
+    fireEvent.change(screen.getByLabelText('Amount'), {
+      target: { value: '12.34' },
+    });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Draft groceries' },
+    });
+
+    // A sibling admits a CONNECTED account: manual entry stays MANUAL-only,
+    // so the selector must not offer it, and the draft must survive.
+    visibleAccounts = [account(), connected];
+    act(() => {
+      rerenderWithAccountSignal(1);
+    });
+    expect(
+      await screen.findByRole('option', { name: 'Daily spending · BRL' }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Amount')).toHaveValue('12.34');
+    expect(screen.getByLabelText('Description')).toHaveValue('Draft groceries');
+    expect(
+      screen.queryByRole('option', { name: 'Everyday Chequing · CAD' }),
+    ).toBeNull();
+  });
+
   it('keeps the last-known selector and draft when the background refetch fails', async () => {
     let failMetadata = false;
     const { calls, rerenderWithAccountSignal } = renderSection({
@@ -1251,10 +1289,9 @@ describe('durable creation retries', () => {
       screen.getAllByRole('button', { name: 'Refresh transactions' })[0]!,
     );
     expect(await screen.findByText(/unknown result/i)).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: 'Retry same request' }),
-    ).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: 'Retry same request' }));
+    const retry = screen.getByRole('button', { name: 'Retry same request' });
+    await waitFor(() => expect(retry).toBeEnabled());
+    fireEvent.click(retry);
     expect(
       await screen.findByText(`Expense recorded: -12.34 BRL on ${FIXED_DATE}.`),
     ).toBeInTheDocument();
@@ -3106,7 +3143,7 @@ describe('allocations', () => {
     });
     // The payer is identified; every current member starts selected.
     expect(
-      within(panel).getByRole('checkbox', {
+      await within(panel).findByRole('checkbox', {
         name: `${ACTOR_EMAIL} — you (payer) ${ACTOR_ID}`,
       }),
     ).toBeChecked();
@@ -3139,21 +3176,15 @@ describe('allocations', () => {
     const panel = await screen.findByRole('group', {
       name: 'Allocation for Groceries',
     });
-    const preview = within(panel).getAllByRole('status')[0] as HTMLElement;
-    await waitFor(() =>
-      expect(preview.textContent).toMatch(
-        /3\.34 USD \+ 3\.33 USD \+ 3\.33 USD/,
-      ),
-    ); // Omitting the payer updates the exact split to the two members.
+    await within(panel).findByText(/3\.34 USD \+ 3\.33 USD \+ 3\.33 USD/);
+    // Omitting the payer updates the exact split to the two members.
     fireEvent.click(
       within(panel).getByRole('checkbox', {
         name: `${ACTOR_EMAIL} — you (payer) ${ACTOR_ID}`,
       }),
     );
-    await waitFor(() =>
-      expect(preview.textContent).toMatch(
-        /5\.00 USD \+ 5\.00 USD across 2 participants/,
-      ),
+    await within(panel).findByText(
+      /5\.00 USD \+ 5\.00 USD across 2 participants/,
     );
     // Unchecking everyone rejects the empty draft locally.
     fireEvent.click(

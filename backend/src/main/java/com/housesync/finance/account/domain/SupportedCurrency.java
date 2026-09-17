@@ -6,7 +6,8 @@ public enum SupportedCurrency {
   EUR(2),
   GBP(2),
   JPY(0),
-  KWD(3);
+  KWD(3),
+  CAD(2);
 
   private final int scale;
 

@@ -113,6 +113,9 @@ interface RouteHandlers {
   financialAccountsPost?: (
     householdId?: string,
   ) => Response | Promise<Response>;
+  financialConnectionsGet?: (
+    householdId?: string,
+  ) => Response | Promise<Response>;
   transactionsGet?: (householdId?: string) => Response | Promise<Response>;
   categoriesGet?: () => Response | Promise<Response>;
   settingsGet?: (householdId?: string) => Response | Promise<Response>;
@@ -226,6 +229,18 @@ function stubFetch(routes: RouteHandlers) {
             jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
           );
         }
+      }
+      const connectionsMatch =
+        /^\/api\/households\/([^/]+)\/financial-connections(?:\/([^/?]+))?(?:\?.*)?$/.exec(
+          url,
+        );
+      if (connectionsMatch && (init?.method ?? 'GET') === 'GET') {
+        return (
+          routes.financialConnectionsGet?.(
+            decodeURIComponent(connectionsMatch[1] ?? ''),
+          ) ??
+          jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
+        );
       }
       const transactionsMatch =
         /^\/api\/households\/([^/]+)\/transactions/.exec(url);
