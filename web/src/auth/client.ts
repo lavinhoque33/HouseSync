@@ -1,3 +1,12 @@
+import {
+  isFinancialAccountCurrency,
+  isSupportedAmountString,
+  isSupportedTransactionDate,
+  type FinancialAccountCurrency,
+} from '../finance/money';
+
+export type { FinancialAccountCurrency } from '../finance/money';
+
 export interface SafeUser {
   id: string;
   email: string;
@@ -25,9 +34,13 @@ export type ApiErrorCode =
   | 'MEMBERSHIP_NOT_FOUND'
   | 'LAST_OWNER_REQUIRED'
   | 'FINANCIAL_ACCOUNT_NOT_FOUND'
+  | 'TRANSACTION_NOT_FOUND'
+  | 'ACCOUNT_ARCHIVED'
   | 'IDEMPOTENCY_CONFLICT'
   | 'RESOURCE_VERSION_CONFLICT'
   | 'RESOURCE_VERSION_EXHAUSTED'
+  | 'REFUND_CONFLICT'
+  | 'TRANSACTION_VOIDED'
   | 'FINANCE_BUSY'
   | 'INTERNAL_ERROR'
   | 'NETWORK_ERROR'
@@ -83,9 +96,13 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'MEMBERSHIP_NOT_FOUND',
     'LAST_OWNER_REQUIRED',
     'FINANCIAL_ACCOUNT_NOT_FOUND',
+    'TRANSACTION_NOT_FOUND',
+    'ACCOUNT_ARCHIVED',
     'IDEMPOTENCY_CONFLICT',
     'RESOURCE_VERSION_CONFLICT',
     'RESOURCE_VERSION_EXHAUSTED',
+    'REFUND_CONFLICT',
+    'TRANSACTION_VOIDED',
     'FINANCE_BUSY',
     'INTERNAL_ERROR',
   ];
@@ -117,7 +134,14 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
         key === 'limit' ||
         key === 'offset' ||
         key === 'query' ||
-        key === 'account') &&
+        key === 'account' ||
+        key === 'accountId' ||
+        key === 'occurredOn' ||
+        key === 'description' ||
+        key === 'visibility' ||
+        key === 'refundOfTransactionId' ||
+        key === 'money.amount' ||
+        key === 'money.currency') &&
       typeof message === 'string'
     ) {
       result[key] = message;
@@ -1189,8 +1213,6 @@ export async function postInvitationAccept(
 
 export type FinancialAccountKind =
   'CASH' | 'CHECKING' | 'SAVINGS' | 'CREDIT_CARD';
-export type FinancialAccountCurrency =
-  'BRL' | 'USD' | 'EUR' | 'GBP' | 'JPY' | 'KWD';
 export type FinancialAccountStatus = 'ACTIVE' | 'ARCHIVED';
 
 export interface FinancialAccount {
@@ -1234,19 +1256,6 @@ function isFinancialAccountKind(value: unknown): value is FinancialAccountKind {
     value === 'CHECKING' ||
     value === 'SAVINGS' ||
     value === 'CREDIT_CARD'
-  );
-}
-
-function isFinancialAccountCurrency(
-  value: unknown,
-): value is FinancialAccountCurrency {
-  return (
-    value === 'BRL' ||
-    value === 'USD' ||
-    value === 'EUR' ||
-    value === 'GBP' ||
-    value === 'JPY' ||
-    value === 'KWD'
   );
 }
 
@@ -1403,5 +1412,358 @@ export async function patchFinancialAccount(
     response,
     response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
     'Financial account update could not be completed.',
+  );
+}
+
+export type TransactionKind = 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER';
+export type TransactionStatus = 'POSTED' | 'VOIDED';
+/** Only PRIVATE visibility is supported. */
+export type TransactionVisibility = 'PRIVATE';
+
+export interface Money {
+  readonly amount: string;
+  readonly currency: FinancialAccountCurrency;
+}
+
+/**
+ * Exactly the documented 15-field transaction DTO. Here every
+ * authorized response is the actor's own entry, so `accountId` is always a
+ * string; redacted `HOUSEHOLD` reads are not parsed here.
+ */
+export interface Transaction {
+  id: string;
+  householdId: string;
+  ownerUserId: string;
+  accountId: string;
+  kind: TransactionKind;
+  money: Money;
+  occurredOn: string;
+  description: string;
+  visibility: TransactionVisibility;
+  source: 'MANUAL';
+  status: TransactionStatus;
+  refundOfTransactionId: string | null;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TransactionPage {
+  items: Transaction[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+/**
+ * Create inputs are a discriminated union: `refundOfTransactionId` is
+ * required and non-null for REFUND creation and forbidden on every other
+ * kind (even as null). Refund payloads omit `visibility` so the source
+ * expense's disclosure is inherited; non-refunds send PRIVATE explicitly.
+ */
+export type CreateTransactionInput =
+  | {
+      accountId: string;
+      kind: 'EXPENSE' | 'INCOME' | 'TRANSFER';
+      money: Money;
+      occurredOn: string;
+      description: string;
+      visibility: TransactionVisibility;
+    }
+  | {
+      accountId: string;
+      kind: 'REFUND';
+      money: Money;
+      occurredOn: string;
+      description: string;
+      refundOfTransactionId: string;
+    };
+
+export type UpdateTransactionPatch = {
+  expectedVersion: number;
+  money?: Money;
+  occurredOn?: string;
+  description?: string;
+  visibility?: TransactionVisibility;
+  status?: 'VOIDED';
+};
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isTransactionKind(value: unknown): value is TransactionKind {
+  return (
+    value === 'EXPENSE' ||
+    value === 'INCOME' ||
+    value === 'REFUND' ||
+    value === 'TRANSFER'
+  );
+}
+
+function isMoney(value: unknown): value is Money {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return (
+    keys.length === 2 &&
+    typeof record.amount === 'string' &&
+    typeof record.currency === 'string' &&
+    isFinancialAccountCurrency(record.currency) &&
+    isSupportedAmountString(record.amount, record.currency)
+  );
+}
+
+function isSupportedDate(value: string): boolean {
+  return isSupportedTransactionDate(value);
+}
+
+function parseTransaction(value: unknown): Transaction | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  // The contract's response DTO has exactly these 15 fields; any extra or
+  // missing key is a contract drift and must fail loudly rather than be
+  // carried into the UI.
+  if (
+    Object.keys(record).length !== 15 ||
+    typeof record.id !== 'string' ||
+    !UUID_PATTERN.test(record.id) ||
+    typeof record.householdId !== 'string' ||
+    !UUID_PATTERN.test(record.householdId) ||
+    typeof record.ownerUserId !== 'string' ||
+    !UUID_PATTERN.test(record.ownerUserId) ||
+    typeof record.accountId !== 'string' ||
+    !UUID_PATTERN.test(record.accountId) ||
+    !isTransactionKind(record.kind) ||
+    !isMoney(record.money) ||
+    typeof record.occurredOn !== 'string' ||
+    !isSupportedDate(record.occurredOn) ||
+    typeof record.description !== 'string' ||
+    record.visibility !== 'PRIVATE' ||
+    record.source !== 'MANUAL' ||
+    (record.status !== 'POSTED' && record.status !== 'VOIDED') ||
+    typeof record.version !== 'number' ||
+    !Number.isInteger(record.version) ||
+    record.version < 0 ||
+    record.version > 2147483647 ||
+    typeof record.createdAt !== 'string' ||
+    typeof record.updatedAt !== 'string'
+  ) {
+    return undefined;
+  }
+  const refundOf = record.refundOfTransactionId;
+  if (record.kind === 'REFUND') {
+    if (typeof refundOf !== 'string' || !UUID_PATTERN.test(refundOf)) {
+      return undefined;
+    }
+  } else if (refundOf !== null) {
+    return undefined;
+  }
+  return {
+    id: record.id,
+    householdId: record.householdId,
+    ownerUserId: record.ownerUserId,
+    accountId: record.accountId,
+    kind: record.kind,
+    money: {
+      amount: (record.money as Money).amount,
+      currency: (record.money as Money).currency,
+    },
+    occurredOn: record.occurredOn,
+    description: record.description,
+    visibility: 'PRIVATE',
+    source: 'MANUAL',
+    status: record.status,
+    // The guard above proved the refund shape per kind.
+    refundOfTransactionId:
+      record.kind === 'REFUND' ? (refundOf as string) : null,
+    version: record.version,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function unexpectedTransactionResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message: 'The server returned an unexpected transaction response.',
+  });
+}
+
+function transactionPath(householdId: string, transactionId?: string): string {
+  const base = `/api/households/${encodeURIComponent(householdId)}/transactions`;
+  return transactionId === undefined
+    ? base
+    : `${base}/${encodeURIComponent(transactionId)}`;
+}
+
+function parseTransactionPage(
+  response: BodySource,
+  body: {
+    items?: unknown;
+    limit?: unknown;
+    offset?: unknown;
+    hasMore?: unknown;
+  },
+): TransactionPage {
+  if (
+    !Array.isArray(body.items) ||
+    typeof body.limit !== 'number' ||
+    !Number.isInteger(body.limit) ||
+    typeof body.offset !== 'number' ||
+    !Number.isInteger(body.offset) ||
+    typeof body.hasMore !== 'boolean'
+  ) {
+    throw unexpectedTransactionResponse(response.status);
+  }
+  const items: Transaction[] = [];
+  for (const value of body.items) {
+    const transaction = parseTransaction(value);
+    if (!transaction) throw unexpectedTransactionResponse(response.status);
+    items.push(transaction);
+  }
+  return {
+    items,
+    limit: body.limit,
+    offset: body.offset,
+    hasMore: body.hasMore,
+  };
+}
+
+/**
+ * List query: OWN view only, all statuses so retained voided
+ * entries stay visible, page 1 with the documented 1–100 limit bound.
+ */
+export async function fetchTransactions(
+  householdId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<TransactionPage> {
+  const response = await apiFetch(
+    `${transactionPath(householdId)}?limit=100&offset=0&view=OWN&status=ALL`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load your transactions.',
+    );
+  }
+  return parseTransactionPage(
+    response,
+    await readJson<{
+      items?: unknown;
+      limit?: unknown;
+      offset?: unknown;
+      hasMore?: unknown;
+    }>(response),
+  );
+}
+
+export async function fetchTransaction(
+  householdId: string,
+  transactionId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<Transaction> {
+  const response = await apiFetch(
+    transactionPath(householdId, transactionId),
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load this transaction.',
+    );
+  }
+  const transaction = parseTransaction(await readJson<unknown>(response));
+  if (!transaction) throw unexpectedTransactionResponse(response.status);
+  return transaction;
+}
+
+export async function postTransaction(
+  householdId: string,
+  input: CreateTransactionInput,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<Transaction> {
+  const response = await apiFetch(
+    transactionPath(householdId),
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        ...unsafeHeaders(csrf),
+        'Idempotency-Key': idempotencyKey,
+      },
+      cache: 'no-store',
+      body: JSON.stringify(input),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200 || response.status === 201) {
+    const transaction = parseTransaction(await readJson<unknown>(response));
+    if (!transaction) throw unexpectedTransactionResponse(response.status);
+    return transaction;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Transaction creation could not be completed.',
+  );
+}
+
+export async function patchTransaction(
+  householdId: string,
+  transactionId: string,
+  patch: UpdateTransactionPatch,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<Transaction> {
+  const response = await apiFetch(
+    transactionPath(householdId, transactionId),
+    {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify(patch),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const transaction = parseTransaction(await readJson<unknown>(response));
+    if (!transaction) throw unexpectedTransactionResponse(response.status);
+    return transaction;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Transaction update could not be completed.',
   );
 }

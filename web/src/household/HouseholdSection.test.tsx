@@ -91,6 +91,7 @@ interface RouteHandlers {
     invitationId?: string,
   ) => Response | Promise<Response>;
   financialAccountsGet?: (householdId?: string) => Response | Promise<Response>;
+  transactionsGet?: (householdId?: string) => Response | Promise<Response>;
 }
 
 function stubFetch(routes: RouteHandlers) {
@@ -189,6 +190,16 @@ function stubFetch(routes: RouteHandlers) {
           jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
         );
       }
+      const transactionsMatch =
+        /^\/api\/households\/([^/]+)\/transactions/.exec(url);
+      if (transactionsMatch) {
+        return (
+          routes.transactionsGet?.(
+            decodeURIComponent(transactionsMatch[1] ?? ''),
+          ) ??
+          jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
+        );
+      }
       throw new Error(`unexpected fetch ${url} ${init?.method ?? ''}`);
     },
   );
@@ -226,6 +237,74 @@ async function signIn(
   typeInto('Password', password);
   clickLastButton('Sign in');
 }
+
+describe('transaction section integration', () => {
+  it('mounts a keyed private-transaction section inside each household card', async () => {
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+      financialAccountsGet: () =>
+        jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+      transactionsGet: () =>
+        jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+    });
+    render(<AuthSection />);
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Transactions' })).toBeVisible();
+    expect(
+      screen.getByRole('button', { name: 'Record transaction' }),
+    ).toBeEnabled();
+  });
+});
+
+describe('transaction section authority gating', () => {
+  function transactionSection(signal: number) {
+    return (
+      <HouseholdSection
+        csrf={CSRF}
+        onCsrfRefreshed={() => {}}
+        onSessionExpired={() => {}}
+        refreshSignal={signal}
+        currentUserId={USER.id}
+      />
+    );
+  }
+
+  it('gates transaction controls while the household list is stale', async () => {
+    let gets = 0;
+    stubFetch({
+      csrf: csrfOk,
+      householdsGet: () => {
+        gets += 1;
+        return gets === 1
+          ? householdsOk([HOUSEHOLD_1])
+          : jsonResponse(
+              { code: 'NETWORK_ERROR', message: 'Could not reach the server.' },
+              500,
+            );
+      },
+      transactionsGet: () =>
+        jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+    });
+    const { rerender } = render(transactionSection(0));
+    expect(
+      await screen.findByRole('button', { name: 'Record transaction' }),
+    ).toBeEnabled();
+
+    rerender(transactionSection(1));
+    expect(
+      await screen.findByText(/Showing previously loaded households/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Refresh the household before changing transactions.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Record transaction' }),
+    ).toBeDisabled();
+  });
+});
 
 describe('household name validation', () => {
   it('trims outer space but keeps interior content and bounds', () => {

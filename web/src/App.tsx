@@ -92,8 +92,9 @@ export function App() {
             <h2 id="foundation-title">First, a solid foundation.</h2>
             <p>
               Accounts, sign-in, and household collaboration are available.
-              Private manual financial accounts are the first finance step;
-              transactions and balances are still ahead.
+              Private manual accounts and transactions now cover the first
+              finance steps; sharing, categories, balances, and summaries are
+              still ahead.
             </p>
           </div>
           <HealthStatus />
@@ -110,7 +111,7 @@ export function App() {
 
       <footer className="site-footer">
         <p>HouseSync · Built for the household, mindful of the individual.</p>
-        <p>Manual account preview — no bank connection or inferred balance.</p>
+        <p>Manual finance preview — no bank connection or inferred balance.</p>
       </footer>
     </div>
   );

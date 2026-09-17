@@ -17,7 +17,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 /**
  * Proves the V2 upgrade path on a database that already ran the first two migrations (as main's
  * local development database did): migrate only to V2, seed a session row the way an existing
- * deployment holds one, then apply V3-V6 and confirm the widened column with data intact.
+ * deployment holds one, then apply V3-V7 and confirm the widened column with data intact.
  */
 @Testcontainers
 class SessionSchemaUpgradeIT {
@@ -69,9 +69,9 @@ class SessionSchemaUpgradeIT {
             .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
             .locations("classpath:db/migration")
             .load();
-    assertThat(current.migrate().migrationsExecuted).isEqualTo(4);
+    assertThat(current.migrate().migrationsExecuted).isEqualTo(5);
     current.validate();
-    assertThat(current.info().applied()).hasSize(6);
+    assertThat(current.info().applied()).hasSize(7);
     assertThat(principalNameLength(credentials)).isEqualTo(254);
 
     try (Connection connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), credentials);

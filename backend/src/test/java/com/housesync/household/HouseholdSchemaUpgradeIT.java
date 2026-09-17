@@ -15,10 +15,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Proves the V3 to V6 upgrade path: migrate identity/session-only history, seed a user, a
- * household, a membership, and a session row the way a live deployment holds them, then apply V4-V6
- * step by step and confirm household, invitation, and private-account tables with prior data
- * intact.
+ * Proves the V3 to V7 upgrade path: migrate identity/session-only history, seed a user, a
+ * household, a membership, and a session row the way a live deployment holds them, then apply V4-V7
+ * step by step and confirm household, invitation, private-account, and private-transaction tables
+ * with prior data intact.
  */
 @Testcontainers
 class HouseholdSchemaUpgradeIT {
@@ -31,7 +31,7 @@ class HouseholdSchemaUpgradeIT {
           .withPassword("integration-test-only");
 
   @Test
-  void v3DatabaseUpgradesToV6WithIdentitySessionAndHouseholdDataPreserved() throws Exception {
+  void v3DatabaseUpgradesToV7WithIdentitySessionAndHouseholdDataPreserved() throws Exception {
     Properties credentials = new Properties();
     credentials.setProperty("user", POSTGRES.getUsername());
     credentials.setProperty("password", POSTGRES.getPassword());
@@ -106,9 +106,9 @@ class HouseholdSchemaUpgradeIT {
             .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
             .locations("classpath:db/migration")
             .load();
-    assertThat(current.migrate().migrationsExecuted).isEqualTo(2);
+    assertThat(current.migrate().migrationsExecuted).isEqualTo(3);
     current.validate();
-    assertThat(current.info().applied()).hasSize(6);
+    assertThat(current.info().applied()).hasSize(7);
 
     try (Connection connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), credentials)) {
       try (PreparedStatement user =

@@ -15,6 +15,10 @@ public final class ErrorCodes {
   public static final String LAST_OWNER_REQUIRED = "LAST_OWNER_REQUIRED";
   public static final String INVITATION_NOT_FOUND = "INVITATION_NOT_FOUND";
   public static final String FINANCIAL_ACCOUNT_NOT_FOUND = "FINANCIAL_ACCOUNT_NOT_FOUND";
+  public static final String TRANSACTION_NOT_FOUND = "TRANSACTION_NOT_FOUND";
+  public static final String ACCOUNT_ARCHIVED = "ACCOUNT_ARCHIVED";
+  public static final String REFUND_CONFLICT = "REFUND_CONFLICT";
+  public static final String TRANSACTION_VOIDED = "TRANSACTION_VOIDED";
   public static final String IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT";
   public static final String RESOURCE_VERSION_CONFLICT = "RESOURCE_VERSION_CONFLICT";
   public static final String RESOURCE_VERSION_EXHAUSTED = "RESOURCE_VERSION_EXHAUSTED";

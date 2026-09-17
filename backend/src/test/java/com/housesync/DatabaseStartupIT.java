@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.housesync.finance.account.persistence.AccountIdempotencyEntity;
 import com.housesync.finance.account.persistence.FinancialAccountEntity;
+import com.housesync.finance.transaction.persistence.FinancialTransactionEntity;
+import com.housesync.finance.transaction.persistence.TransactionIdempotencyEntity;
 import com.housesync.household.persistence.HouseholdEntity;
 import com.housesync.household.persistence.HouseholdMemberEntity;
 import com.housesync.identity.persistence.UserEntity;
@@ -64,7 +66,9 @@ class DatabaseStartupIT {
             HouseholdEntity.class.getSimpleName(),
             HouseholdMemberEntity.class.getSimpleName(),
             FinancialAccountEntity.class.getSimpleName(),
-            AccountIdempotencyEntity.class.getSimpleName());
+            AccountIdempotencyEntity.class.getSimpleName(),
+            FinancialTransactionEntity.class.getSimpleName(),
+            TransactionIdempotencyEntity.class.getSimpleName());
     assertThat(
             jdbc.queryForList(
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public'", String.class))
@@ -77,8 +81,10 @@ class DatabaseStartupIT {
             "household_members",
             "household_invitations",
             "financial_accounts",
-            "financial_account_idempotency_keys");
-    assertThat(flyway.info().applied()).hasSize(6);
+            "financial_account_idempotency_keys",
+            "financial_transactions",
+            "financial_transaction_idempotency_keys");
+    assertThat(flyway.info().applied()).hasSize(7);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
     assertThat(

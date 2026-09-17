@@ -59,7 +59,7 @@ describe('backend health', () => {
       'A shared home for household finances.',
     );
     expect(
-      screen.getByText(/Private manual financial accounts/),
+      screen.getByText(/Private manual accounts and transactions/),
     ).toBeInTheDocument();
     // The health panel is a generic block, not a complementary landmark:
     // inside <main> an <aside> would violate the top-level landmark rule.

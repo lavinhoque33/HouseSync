@@ -855,6 +855,7 @@ code {
 
 .finance-accounts {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-2);
   min-width: 0;
   margin-top: var(--space-2);
@@ -881,6 +882,7 @@ code {
 .finance-create-form h5 {
   margin: 0;
   color: var(--color-ink);
+  overflow-wrap: anywhere;
 }
 
 .finance-accounts-heading h4 {
@@ -930,6 +932,15 @@ code {
   box-shadow: 0 8px 24px rgb(35 63 42 / 7%);
 }
 
+.finance-account-card > *,
+.finance-transaction-card > *,
+.finance-create-form > *,
+.finance-edit-form > *,
+.finance-create-grid > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .finance-account-card--archived {
   border-left-color: var(--color-muted);
   background: #f4f3ee;
@@ -944,6 +955,8 @@ code {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .finance-account-actions > * {
@@ -955,6 +968,8 @@ code {
   display: grid;
   gap: var(--space-2);
   min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .finance-create-form {
@@ -995,7 +1010,221 @@ code {
   overflow-wrap: break-word;
 }
 
+.finance-transactions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 30%, white);
+  border-radius: 1rem;
+  background: #f7f8f3;
+}
+
+.finance-transactions > * {
+  min-width: 0;
+}
+
+.finance-transaction-list {
+  list-style: none;
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+}
+
+.finance-transaction-card {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2);
+  border-left: 4px solid var(--color-accent);
+  border-radius: 0.85rem;
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(35 63 42 / 7%);
+}
+
+.finance-transaction-card--voided {
+  border-left-color: var(--color-muted);
+  background: #f4f3ee;
+}
+
+.finance-transaction-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.finance-transaction-name {
+  font-weight: 750;
+  overflow-wrap: anywhere;
+}
+
+.finance-amount {
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.finance-transaction-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.finance-voided-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0.25rem 0.65rem;
+  border: 1px solid var(--color-line);
+  border-radius: 999px;
+  background: var(--color-soft);
+  color: var(--color-muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
+.finance-amount-preview {
+  color: var(--color-muted);
+  font-size: 0.82rem;
+  overflow-wrap: break-word;
+  font-variant-numeric: tabular-nums;
+}
+
+.finance-locked-value {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  font-weight: 650;
+  color: var(--color-ink);
+  overflow-wrap: anywhere;
+}
+
+.household-field-label {
+  font-weight: 650;
+  font-size: 0.9rem;
+  overflow-wrap: break-word;
+}
+
+.finance-refund-context {
+  padding: var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 45%, white);
+  border-radius: 0.75rem;
+  background: #e9f1e8;
+  color: var(--color-ink);
+  overflow-wrap: break-word;
+}
+
+.finance-direction-fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  min-width: 0;
+}
+
+.finance-direction-fieldset legend {
+  font-weight: 650;
+  font-size: 0.9rem;
+  padding-inline: 0.25rem;
+}
+
+.finance-direction-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.finance-direction-option input {
+  width: 1.35rem;
+  height: 1.35rem;
+  accent-color: var(--color-accent);
+}
+
+.finance-edit-form {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-line);
+}
+
+.finance-detail-panel {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 0.85rem;
+  background: var(--color-soft);
+}
+
+.finance-detail-panel > * {
+  min-width: 0;
+}
+
+.finance-detail-panel h5 {
+  margin: 0;
+  color: var(--color-ink);
+}
+
+.finance-detail-list {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  min-width: 0;
+}
+
+.finance-detail-list > div {
+  display: grid;
+  grid-template-columns: minmax(8rem, auto) 1fr;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.finance-detail-list dt {
+  color: var(--color-muted);
+  font-size: 0.82rem;
+  overflow-wrap: break-word;
+}
+
+.finance-detail-list dd {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 620px) {
+  .finance-detail-list > div {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+  }
+}
+
 @media (max-width: 420px) {
+  .finance-accounts,
+  .finance-transactions {
+    display: flex;
+    flex-direction: column;
+  }
+
   .shell,
   .foundation,
   .health,
@@ -1009,6 +1238,10 @@ code {
   .finance-account-card,
   .finance-status-confirm,
   .finance-pending-request,
+  .finance-transactions,
+  .finance-transaction-card,
+  .finance-detail-panel,
+  .finance-refund-context,
   .invite-notice,
   .join-notice,
   .join-card {
@@ -1016,13 +1249,18 @@ code {
   }
 
   .finance-accounts-heading,
-  .finance-account-summary {
+  .finance-account-summary,
+  .finance-transaction-summary {
     align-items: stretch;
     flex-direction: column;
   }
 
   .privacy-chip {
     align-self: flex-start;
+  }
+
+  .finance-amount {
+    text-align: left;
   }
 
   .finance-create-grid {

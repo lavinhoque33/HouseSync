@@ -4,6 +4,13 @@ import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAcc
 import com.housesync.finance.account.web.FinancialAccountExceptions.IdempotencyConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionExhaustedException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AccountArchivedException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.RefundConflictException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionIdempotencyConflictException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionNotFoundException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionVersionConflictException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionVersionExhaustedException;
+import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionVoidedException;
 import com.housesync.household.web.HouseholdExceptions.HouseholdNotFoundException;
 import com.housesync.identity.web.ApiError;
 import com.housesync.identity.web.CorrelationIds;
@@ -27,8 +34,9 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 /**
- * Maps finance-flow failures to the shared safe error shape (reusing the identity {@link ApiError},
- * {@link ErrorCodes}, and {@link CorrelationIds} so there is exactly one error contract).
+ * Maps finance-flow failures (accounts and transactions) to the shared safe error shape (reusing
+ * the identity {@link ApiError}, {@link ErrorCodes}, and {@link CorrelationIds} so there is exactly
+ * one error contract).
  *
  * <p>Scoped to the finance package so identity endpoints keep their existing mappings. There is
  * deliberately no catch-all {@code Exception} handler: unexpected failures and the finance
@@ -94,6 +102,79 @@ public class FinancialAccountExceptionHandler {
         failure);
   }
 
+  @ExceptionHandler(TransactionNotFoundException.class)
+  public ResponseEntity<ApiError> transactionNotFound(TransactionNotFoundException failure) {
+    return error(
+        HttpStatus.NOT_FOUND,
+        ErrorCodes.TRANSACTION_NOT_FOUND,
+        "Financial transaction was not found.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(AccountArchivedException.class)
+  public ResponseEntity<ApiError> accountArchived(AccountArchivedException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.ACCOUNT_ARCHIVED,
+        "The financial account is archived.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RefundConflictException.class)
+  public ResponseEntity<ApiError> refundConflict(RefundConflictException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.REFUND_CONFLICT,
+        "The refund conflicts with its expense.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(TransactionVoidedException.class)
+  public ResponseEntity<ApiError> transactionVoided(TransactionVoidedException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.TRANSACTION_VOIDED,
+        "The transaction is voided.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(TransactionIdempotencyConflictException.class)
+  public ResponseEntity<ApiError> transactionIdempotencyConflict(
+      TransactionIdempotencyConflictException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.IDEMPOTENCY_CONFLICT,
+        "That request key was already used for different transaction details.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(TransactionVersionConflictException.class)
+  public ResponseEntity<ApiError> transactionVersionConflict(
+      TransactionVersionConflictException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RESOURCE_VERSION_CONFLICT,
+        "The transaction changed. Refresh it before trying again.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(TransactionVersionExhaustedException.class)
+  public ResponseEntity<ApiError> transactionVersionExhausted(
+      TransactionVersionExhaustedException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RESOURCE_VERSION_EXHAUSTED,
+        "The transaction can no longer be changed.",
+        null,
+        failure);
+  }
+
   @ExceptionHandler(IdempotencyConflictException.class)
   public ResponseEntity<ApiError> idempotencyConflict(IdempotencyConflictException failure) {
     return error(
@@ -143,13 +224,13 @@ public class FinancialAccountExceptionHandler {
     String correlationId = CorrelationIds.newId();
     if (status.is5xxServerError()) {
       log.error(
-          "event=finance_account.request_failed code={} correlationId={} cause={}",
+          "event=finance.request_failed code={} correlationId={} cause={}",
           code,
           correlationId,
           failure.getClass().getSimpleName());
     } else {
       log.warn(
-          "event=finance_account.request_failed code={} correlationId={} cause={}",
+          "event=finance.request_failed code={} correlationId={} cause={}",
           code,
           correlationId,
           failure.getClass().getSimpleName());

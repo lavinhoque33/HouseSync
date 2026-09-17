@@ -25,9 +25,13 @@ import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler
  * /api/households/{householdId}/leave} for authenticated users. Invitations permit
  * exactly {@code POST} and {@code GET /api/households/{householdId}/invitations}, {@code DELETE
  * /api/households/{householdId}/invitations/{invitationId}}, and {@code POST
- * /api/invitations/preview} plus {@code POST /api/invitations/accept} for authenticated users.
- * Every other route stays denied (401 anonymous / 403 authenticated). No CORS allowances, no
- * form/basic login, no remember-me: browsers use the same-origin session cookie plus CSRF header.
+ * /api/invitations/preview} plus {@code POST /api/invitations/accept} for authenticated users. The
+ * finance routes permit exactly the private-account routes and the transaction {@code POST} and
+ * {@code GET /api/households/{householdId}/transactions}, {@code GET
+ * /api/households/{householdId}/transactions/{transactionId}}, and {@code PATCH
+ * /api/households/{householdId}/transactions/{transactionId}} for authenticated users. Every other
+ * route stays denied (401 anonymous / 403 authenticated). No CORS allowances, no form/basic login,
+ * no remember-me: browsers use the same-origin session cookie plus CSRF header.
  */
 @Configuration(proxyBeanMethods = false)
 public class SecurityConfiguration {
@@ -90,6 +94,15 @@ public class SecurityConfiguration {
                         "/api/households/*/financial-accounts/*")
                     .authenticated()
                     .requestMatchers(HttpMethod.PATCH, "/api/households/*/financial-accounts/*")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.POST, "/api/households/*/transactions")
+                    .authenticated()
+                    .requestMatchers(
+                        HttpMethod.GET,
+                        "/api/households/*/transactions",
+                        "/api/households/*/transactions/*")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.PATCH, "/api/households/*/transactions/*")
                     .authenticated()
                     .anyRequest()
                     .denyAll())
