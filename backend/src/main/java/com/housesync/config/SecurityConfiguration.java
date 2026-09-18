@@ -151,7 +151,9 @@ public class SecurityConfiguration {
                     .requestMatchers(
                         HttpMethod.POST,
                         "/api/households/*/bank-activity/*/confirm",
-                        "/api/households/*/bank-activity/*/dismiss")
+                        "/api/households/*/bank-activity/*/dismiss",
+                        "/api/households/*/bank-activity/*/resolve",
+                        "/api/households/*/bank-activity/*/replace-ledger")
                     .authenticated()
                     // The only session/CSRF-exempt provider endpoint; verification is signature
                     // based and the exact route is also bounded by the admission filter.

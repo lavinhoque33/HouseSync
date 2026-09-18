@@ -757,7 +757,9 @@ export function TransactionsSection({
    * Serves the dedicated ledger signal with a metadata-inclusive reload so a
    * confirmed CONNECTED entry and a possibly stale selector converge while
    * every form and detail draft stays in place. A signal arriving before the
-   * initial load settles is parked, never marked served.
+   * initial load settles is parked, never marked served. The allocation
+   * cache is cleared because a void or replacement deactivates
+   * allocations atomically; the feed-driven probe repopulates live state.
    */
   function serveLedgerSignal(signal: number) {
     // Deferred past the current task so the signal effect never performs a
@@ -772,6 +774,9 @@ export function TransactionsSection({
       }
       pendingLedgerSignalRef.current = false;
       servedLedgerSignalRef.current = signal;
+      // A sibling void or replacement retires allocations: unknown beats
+      // stale, and the probe below repopulates only live entries.
+      setAllocationByTransaction({});
       reloadViews(views, true, true);
       // A confirmed entry can move household spending exactly like a manual
       // mutation, so the dashboard refetches the shown period too.

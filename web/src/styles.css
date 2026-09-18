@@ -1890,6 +1890,12 @@ code {
   font-weight: 700;
 }
 
+.bank-badge--review {
+  background: #faf0e2;
+  border: 1px solid #b06a28;
+  color: #7a3d12;
+}
+
 .bank-activity-meta {
   margin: 0;
   color: var(--color-muted);

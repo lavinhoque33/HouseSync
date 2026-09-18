@@ -48,4 +48,11 @@ public final class ConnectionExceptions {
 
   /** Dismissal target is already admitted; dismiss only applies to unadmitted observations. */
   public static final class ObservationAdmittedException extends RuntimeException {}
+
+  /**
+   * Ledger and bank facts cannot be reconciled with the requested action: applying bank facts to a
+   * removed observation, replacing without a current posted revision, or a currency/account
+   * mismatch that needs a separately reviewed mapping correction.
+   */
+  public static final class ReconciliationRequiredException extends RuntimeException {}
 }

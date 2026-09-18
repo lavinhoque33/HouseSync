@@ -5,10 +5,15 @@ import {
   dismissBankActivityBody,
   isConfirmable,
   isDismissable,
+  isNeedsReview,
   isSyncStale,
   parseBankActivity,
   parseBankActivityDecision,
   parseBankActivityPage,
+  replaceBankActivityBody,
+  replaceDraftFor,
+  resolveBankActivityBody,
+  resolveDraftFor,
   requiresOwnerDescription,
   type BankActivity,
 } from './bank-activity';
@@ -257,5 +262,143 @@ describe('bank activity parsing', () => {
     );
     expect(invalidDraft.description).toBe('');
     expect(invalidDraft.descriptionValid).toBe(false);
+  });
+
+  it('flags only admitted MODIFIED/REMOVED rows as needing review', () => {
+    const modified = parseBankActivity(
+      posted({
+        reviewState: 'CONFIRMED',
+        changeState: 'MODIFIED',
+        ledgerTransactionId: LEDGER_ID,
+      }),
+    ) as BankActivity;
+    const removed = parseBankActivity(
+      posted({
+        state: 'REMOVED',
+        reviewState: 'CONFIRMED',
+        changeState: 'REMOVED',
+        money: null,
+        occurredOn: null,
+        ledgerTransactionId: LEDGER_ID,
+      }),
+    ) as BankActivity;
+    expect(isNeedsReview(modified)).toBe(true);
+    expect(isNeedsReview(removed)).toBe(true);
+    expect(isNeedsReview(parseBankActivity(posted()) as BankActivity)).toBe(
+      false,
+    );
+    expect(
+      isNeedsReview(
+        parseBankActivity(
+          posted({ reviewState: 'CONFIRMED', ledgerTransactionId: LEDGER_ID }),
+        ) as BankActivity,
+      ),
+    ).toBe(false);
+  });
+
+  it('builds exact resolve bodies with both versions and a sorted field subset', () => {
+    expect(
+      resolveBankActivityBody({
+        expectedVersion: 3,
+        expectedLedgerVersion: 1,
+        action: 'KEEP_LEDGER',
+      }),
+    ).toEqual({
+      expectedVersion: 3,
+      expectedLedgerVersion: 1,
+      action: 'KEEP_LEDGER',
+    });
+    expect(
+      resolveBankActivityBody({
+        expectedVersion: 3,
+        expectedLedgerVersion: 1,
+        action: 'VOID_LEDGER',
+      }),
+    ).toEqual({
+      expectedVersion: 3,
+      expectedLedgerVersion: 1,
+      action: 'VOID_LEDGER',
+    });
+    // The subset is deduped and sorted for fingerprint parity; unknown
+    // fields never travel.
+    expect(
+      resolveBankActivityBody({
+        expectedVersion: 3,
+        expectedLedgerVersion: 1,
+        action: 'APPLY_BANK',
+        fields: ['description', 'amount', 'amount', 'occurredOn'],
+      }),
+    ).toEqual({
+      expectedVersion: 3,
+      expectedLedgerVersion: 1,
+      action: 'APPLY_BANK',
+      fields: ['amount', 'description', 'occurredOn'],
+    });
+  });
+
+  it('builds exact replacement bodies with canonical acknowledgements', () => {
+    expect(
+      replaceBankActivityBody({
+        expectedVersion: 3,
+        expectedLedgerVersion: 1,
+        kind: 'EXPENSE',
+        description: 'Corrected',
+      }),
+    ).toEqual({
+      expectedVersion: 3,
+      expectedLedgerVersion: 1,
+      kind: 'EXPENSE',
+      description: 'Corrected',
+      category: null,
+      acknowledgeAllocationRemoval: false,
+    });
+
+    const refund = replaceBankActivityBody({
+      expectedVersion: 3,
+      expectedLedgerVersion: 1,
+      kind: 'REFUND',
+      description: 'Refund',
+      refundOfTransactionId: LEDGER_ID,
+      acknowledgeDisclosure: true,
+      acknowledgeAllocationRemoval: true,
+    });
+    expect(refund).toEqual({
+      expectedVersion: 3,
+      expectedLedgerVersion: 1,
+      kind: 'REFUND',
+      description: 'Refund',
+      refundOfTransactionId: LEDGER_ID,
+      acknowledgeDisclosure: true,
+      acknowledgeAllocationRemoval: true,
+    });
+    // Refund omission stays INHERIT: no category key at all.
+    expect(
+      replaceBankActivityBody({
+        expectedVersion: 3,
+        expectedLedgerVersion: 1,
+        kind: 'REFUND',
+        description: 'Refund',
+      }),
+    ).not.toHaveProperty('category');
+
+    const activity = parseBankActivity(
+      posted({
+        reviewState: 'CONFIRMED',
+        changeState: 'MODIFIED',
+        ledgerTransactionId: LEDGER_ID,
+        version: 4,
+      }),
+    ) as BankActivity;
+    expect(resolveDraftFor(activity, 2)).toMatchObject({
+      activityId: activity.id,
+      version: 4,
+      expectedLedgerVersion: 2,
+      action: 'KEEP_LEDGER',
+    });
+    expect(replaceDraftFor(activity, null)).toMatchObject({
+      activityId: activity.id,
+      version: 4,
+      expectedLedgerVersion: null,
+    });
   });
 });

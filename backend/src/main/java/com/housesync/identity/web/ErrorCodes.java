@@ -36,6 +36,7 @@ public final class ErrorCodes {
   public static final String OBSERVATION_INVALID = "OBSERVATION_INVALID";
   public static final String OBSERVATION_DISMISSED = "OBSERVATION_DISMISSED";
   public static final String OBSERVATION_ADMITTED = "OBSERVATION_ADMITTED";
+  public static final String RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED";
   public static final String MANUAL_SYNC_RATE_LIMITED = "MANUAL_SYNC_RATE_LIMITED";
   public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 

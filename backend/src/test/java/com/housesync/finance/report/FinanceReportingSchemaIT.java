@@ -157,9 +157,9 @@ class FinanceReportingSchemaIT {
             .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
             .locations("classpath:db/migration")
             .load();
-    assertThat(current.migrate().migrationsExecuted).isEqualTo(4);
+    assertThat(current.migrate().migrationsExecuted).isEqualTo(5);
     current.validate();
-    assertThat(current.info().applied()).hasSize(13);
+    assertThat(current.info().applied()).hasSize(14);
 
     try (Connection connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), credentials)) {
       try (PreparedStatement settings =

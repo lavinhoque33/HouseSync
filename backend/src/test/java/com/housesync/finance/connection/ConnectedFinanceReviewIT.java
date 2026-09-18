@@ -2,6 +2,7 @@ package com.housesync.finance.connection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.housesync.finance.activity.persistence.ConnectionObservationRepository;
 import com.housesync.finance.connection.application.ConnectionLifecycleService;
 import com.housesync.finance.connection.application.RevocationRetryPolicy;
 import com.housesync.finance.connection.config.ConnectedFinanceProperties;
@@ -77,6 +78,7 @@ class ConnectedFinanceReviewIT extends ConnectedFinanceITSupport {
   @Autowired private ConnectedFinanceProperties properties;
   @Autowired private FinancialConnectionRepository connectionRepository;
   @Autowired private ConnectionAccountMappingRepository mappingRepository;
+  @Autowired private ConnectionObservationRepository observationRepository;
   @Autowired private ConnectionLinkAttemptRepository attemptRepository;
   @Autowired private ConnectionOperationRepository operationRepository;
   @Autowired private ConnectionOperationIdempotencyRepository idempotencyRepository;
@@ -827,6 +829,7 @@ class ConnectedFinanceReviewIT extends ConnectedFinanceITSupport {
             properties,
             connectionRepository,
             mappingRepository,
+            observationRepository,
             attemptRepository,
             operationRepository,
             idempotencyRepository,

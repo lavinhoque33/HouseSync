@@ -1,14 +1,25 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import {
   ApiError,
   confirmBankActivity,
   dismissBankActivity,
   fetchBankActivity,
+  fetchBankActivityDetail,
   fetchCsrf,
   fetchFinancialConnections,
+  fetchTransaction,
+  fetchTransactionAllocation,
   fetchTransactionCategories,
   fetchTransactions,
   postConnectionSync,
+  replaceBankActivityLedger,
+  resolveBankActivity,
   type BankActivity,
   type BankActivityDecision,
   type BankActivityDismissReason,
@@ -18,13 +29,25 @@ import {
   type CsrfToken,
   type FinancialConnection,
   type Household,
+  type ReplaceBody,
+  type ResolveApplyField,
+  type ResolveBody,
   type Transaction,
+  type TransactionAllocation,
   type TransactionCategory,
 } from '../auth/client';
-import { draftFor, type ConfirmDraft } from './bank-activity';
+import {
+  draftFor,
+  replaceDraftFor,
+  resolveDraftFor,
+  type ConfirmDraft,
+  type ReplaceDraft,
+  type ResolveDraft,
+} from './bank-activity';
 import {
   isConfirmable,
   isDismissable,
+  isNeedsReview,
   isSyncStale,
   requiresOwnerDescription,
 } from './bank-activity';
@@ -126,10 +149,10 @@ function connectionStateLabel(state: FinancialConnection['state']): string {
 
 function changeLabel(activity: BankActivity): string | null {
   if (activity.changeState === 'MODIFIED') {
-    return 'The bank revised this after you added it. The ledger entry is unchanged; review it in a later step.';
+    return 'Needs review: the bank revised this after you added it. Your ledger entry is unchanged and household totals still use it. Open Review to keep the ledger, apply the bank revision, or void it.';
   }
   if (activity.changeState === 'REMOVED') {
-    return 'The bank removed this after you added it. The ledger entry is unchanged; review it in a later step.';
+    return 'Needs review: the bank removed this after you added it. Your ledger entry is unchanged and household totals still use it. Open Review to keep the ledger or void it; the bank revision cannot be applied because the bank no longer carries it.';
   }
   return null;
 }
@@ -161,6 +184,385 @@ function syncStateLabel(connection: FinancialConnection): string | null {
     case 'IDLE':
       return null;
   }
+}
+
+/**
+ * Reconciliation panel for one needs-review row. Everything shown
+ * stays in this owner-only inbox: the ledger summary is the owner's own
+ * entry and the bank revision never leaves this view. Resolution never
+ * depends on connection state, so a retained admitted entry can be resolved
+ * after disconnect.
+ */
+function ResolvePanel({
+  activity,
+  draft,
+  ledger,
+  ledgerLoading,
+  activeAllocation,
+  decisionBusy,
+  ref,
+  onPatch,
+  onSubmit,
+  onCancel,
+}: {
+  activity: BankActivity;
+  draft: ResolveDraft;
+  ledger: Transaction | null | undefined;
+  ledgerLoading: boolean;
+  activeAllocation: TransactionAllocation | null | undefined;
+  decisionBusy: boolean;
+  ref: RefObject<HTMLHeadingElement | null>;
+  onPatch: (patch: Partial<ResolveDraft>) => void;
+  onSubmit: (activity: BankActivity) => void;
+  onCancel: (activityId: string) => void;
+}) {
+  const applyUnavailable =
+    activity.state === 'REMOVED' || activity.changeState === 'REMOVED';
+  return (
+    <div
+      className="bank-activity-form"
+      role="group"
+      aria-labelledby={`resolve-heading-${activity.id}`}
+    >
+      <h5 ref={ref} tabIndex={-1} id={`resolve-heading-${activity.id}`}>
+        Review the bank revision for {activitySummary(activity)}
+      </h5>
+      <p className="finance-helper">
+        Your ledger entry is unchanged and household totals still use it.
+        Nothing here restarts sync or shares bank detail with the household.
+      </p>
+      {ledgerLoading && <p role="status">Loading your ledger entry…</p>}
+      {!ledgerLoading && ledger === null && (
+        <p className="bank-activity-warning" role="status">
+          The ledger entry is no longer available. Refresh the inbox before
+          reviewing.
+        </p>
+      )}
+      {!ledgerLoading && ledger !== undefined && ledger !== null && (
+        <p className="bank-activity-meta">
+          Ledger now: {formatMoney(ledger.money.amount, ledger.money.currency)}{' '}
+          on {ledger.occurredOn} · {ledger.description}
+        </p>
+      )}
+      <p className="bank-activity-meta">
+        Bank now:{' '}
+        {activity.money === null
+          ? 'amount unavailable (removed by the bank)'
+          : formatMoney(activity.money.amount, activity.money.currency)}{' '}
+        on {activity.occurredOn ?? 'an unknown date'}
+        {activity.providerDescription
+          ? ` · ${activity.providerDescription}`
+          : ''}
+      </p>
+      <fieldset className="finance-direction-fieldset">
+        <legend>Resolution</legend>
+        <label className="finance-direction-option">
+          <input
+            type="radio"
+            name={`resolve-action-${activity.id}`}
+            checked={draft.action === 'KEEP_LEDGER'}
+            onChange={() => onPatch({ action: 'KEEP_LEDGER' })}
+          />
+          Keep my ledger entry
+        </label>
+        <label className="finance-direction-option">
+          <input
+            type="radio"
+            name={`resolve-action-${activity.id}`}
+            checked={draft.action === 'APPLY_BANK'}
+            disabled={applyUnavailable}
+            onChange={() => onPatch({ action: 'APPLY_BANK' })}
+          />
+          Apply the bank fields I choose
+        </label>
+        <label className="finance-direction-option">
+          <input
+            type="radio"
+            name={`resolve-action-${activity.id}`}
+            checked={draft.action === 'VOID_LEDGER'}
+            onChange={() => onPatch({ action: 'VOID_LEDGER' })}
+          />
+          Void my ledger entry
+        </label>
+      </fieldset>
+      {draft.action === 'KEEP_LEDGER' && (
+        <p className="finance-helper">
+          Records your decision against this exact bank revision. If the bank
+          revises it again materially, review reopens.
+        </p>
+      )}
+      {draft.action === 'APPLY_BANK' && !applyUnavailable && (
+        <fieldset className="finance-direction-fieldset">
+          <legend>Bank fields to apply</legend>
+          <label className="finance-direction-option">
+            <input
+              type="checkbox"
+              checked={draft.applyMoney}
+              onChange={(event) =>
+                onPatch({ applyMoney: event.target.checked })
+              }
+            />
+            Amount
+          </label>
+          <label className="finance-direction-option">
+            <input
+              type="checkbox"
+              checked={draft.applyDate}
+              onChange={(event) => onPatch({ applyDate: event.target.checked })}
+            />
+            Date
+          </label>
+          <label className="finance-direction-option">
+            <input
+              type="checkbox"
+              checked={draft.applyDescription}
+              disabled={!activity.descriptionValid}
+              onChange={(event) =>
+                onPatch({ applyDescription: event.target.checked })
+              }
+            />
+            Description
+          </label>
+        </fieldset>
+      )}
+      {draft.action === 'APPLY_BANK' && applyUnavailable && (
+        <p className="bank-activity-warning">
+          The bank removed this entry, so its revision cannot be applied. Keep
+          the ledger or void it instead.
+        </p>
+      )}
+      {draft.action === 'APPLY_BANK' &&
+        !applyUnavailable &&
+        !activity.descriptionValid && (
+          <p className="bank-activity-warning">
+            The bank description cannot be used as ledger text, so it cannot be
+            applied. Enter a correction through replacement instead, or apply
+            only amount and date.
+          </p>
+        )}
+      {draft.action === 'APPLY_BANK' && !applyUnavailable && (
+        <p className="finance-helper">
+          Only the selected amount, date, and description change, under the
+          usual ledger rules. Kind, account, category, visibility, and refund
+          links never change here.
+        </p>
+      )}
+      {activeAllocation !== undefined && activeAllocation !== null && (
+        <p className="bank-activity-warning">
+          This entry has an active allocation (
+          {activeAllocation.participants.length} participant
+          {activeAllocation.participants.length === 1 ? '' : 's'}). Its amount
+          cannot change while shares are recorded: uncheck the amount, revoke
+          the allocation in the ledger first, or void/replace instead.
+        </p>
+      )}
+      {draft.action === 'VOID_LEDGER' && (
+        <p className="bank-activity-warning">
+          Voiding removes this entry from household totals and obligations. Void
+          any live refunds on it first, as usual; an active allocation is
+          deactivated atomically. This cannot be undone from here.
+        </p>
+      )}
+      <div className="finance-account-actions">
+        <button
+          type="button"
+          className="household-button"
+          disabled={decisionBusy}
+          onClick={() => onSubmit(activity)}
+        >
+          {decisionBusy ? 'Resolving…' : 'Resolve revision'}
+        </button>
+        <button
+          type="button"
+          className="household-button household-button--secondary"
+          disabled={decisionBusy}
+          onClick={() => onCancel(activity.id)}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Atomic-replacement panel. One step voids the old entry under the
+ * usual rules, admits the replacement from the current posted bank revision,
+ * and moves the association while retaining history. The replacement is
+ * private unless it is a linked refund inheriting disclosure; no allocation
+ * is ever copied forward.
+ */
+function ReplacePanel({
+  activity,
+  draft,
+  ledgerLoading,
+  ledgerGone,
+  activeAllocation,
+  categories,
+  refundOptions,
+  decisionBusy,
+  ref,
+  onPatch,
+  onKindChange,
+  onSubmit,
+  onCancel,
+}: {
+  activity: BankActivity;
+  draft: ReplaceDraft;
+  ledgerLoading: boolean;
+  ledgerGone: boolean;
+  activeAllocation: TransactionAllocation | null | undefined;
+  categories: TransactionCategory[];
+  refundOptions: Transaction[] | null;
+  decisionBusy: boolean;
+  ref: RefObject<HTMLHeadingElement | null>;
+  onPatch: (patch: Partial<ReplaceDraft>) => void;
+  onKindChange: (kind: ReplaceDraft['kind'], draft: ReplaceDraft) => void;
+  onSubmit: (activity: BankActivity) => void;
+  onCancel: (activityId: string) => void;
+}) {
+  return (
+    <div
+      className="bank-activity-form"
+      role="group"
+      aria-labelledby={`replace-heading-${activity.id}`}
+    >
+      <h5 ref={ref} tabIndex={-1} id={`replace-heading-${activity.id}`}>
+        Replace the ledger entry for {activitySummary(activity)}
+      </h5>
+      <p className="finance-helper">
+        One atomic step: the old entry is voided under the usual rules, a
+        replacement is created from the current posted bank revision, and the
+        association moves while history is retained. The replacement is private
+        unless it is a linked refund inheriting disclosure. The old entry cannot
+        be replaced while live refunds remain, and no new allocation is created
+        here.
+      </p>
+      {ledgerLoading && <p role="status">Loading your ledger entry…</p>}
+      {!ledgerLoading && ledgerGone && (
+        <p className="bank-activity-warning" role="status">
+          The ledger entry is no longer available. Refresh the inbox before
+          replacing.
+        </p>
+      )}
+      <label>
+        Entry type
+        <select
+          value={draft.kind}
+          onChange={(event) =>
+            onKindChange(event.target.value as ReplaceDraft['kind'], draft)
+          }
+        >
+          <option value="EXPENSE">Expense</option>
+          <option value="INCOME">Income</option>
+          <option value="TRANSFER">Transfer</option>
+          <option value="REFUND">Refund</option>
+        </select>
+      </label>
+      <label>
+        Description
+        <input
+          type="text"
+          maxLength={200}
+          value={draft.description}
+          placeholder={activity.providerDescription ?? 'Enter a description'}
+          onChange={(event) => onPatch({ description: event.target.value })}
+        />
+      </label>
+      {categories.length > 0 && (
+        <label>
+          Category
+          <select
+            value={draft.category}
+            onChange={(event) => onPatch({ category: event.target.value })}
+          >
+            <option value="">Uncategorized</option>
+            {categories.map((category) => (
+              <option key={category.code} value={category.code}>
+                {category.label}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {draft.kind === 'REFUND' && (
+        <>
+          <label>
+            Refunded expense
+            <select
+              value={draft.refundOfTransactionId}
+              onChange={(event) =>
+                onPatch({ refundOfTransactionId: event.target.value })
+              }
+            >
+              <option value="">Choose a connected expense…</option>
+              {(refundOptions ?? []).map((option) => (
+                <option key={option.id} value={option.id}>
+                  {formatMoney(option.money.amount, option.money.currency)} ·{' '}
+                  {option.description} · {option.occurredOn}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="bank-activity-checkbox">
+            <input
+              type="checkbox"
+              checked={draft.acknowledgeDisclosure}
+              onChange={(event) =>
+                onPatch({ acknowledgeDisclosure: event.target.checked })
+              }
+            />
+            Share this refund with the household (required when the expense is
+            shared)
+          </label>
+          {refundOptions !== null && refundOptions.length === 0 && (
+            <p className="bank-activity-warning">
+              No connected posted expense matches this account and currency yet.
+            </p>
+          )}
+        </>
+      )}
+      {activeAllocation !== undefined && activeAllocation !== null && (
+        <>
+          <p className="bank-activity-warning">
+            Replacing removes the recorded allocation (
+            {activeAllocation.participants.length} participant
+            {activeAllocation.participants.length === 1 ? '' : 's'}) and its
+            obligations. The allocation is deactivated, never copied to the
+            replacement.
+          </p>
+          <label className="bank-activity-checkbox">
+            <input
+              type="checkbox"
+              checked={draft.acknowledgeAllocationRemoval}
+              onChange={(event) =>
+                onPatch({ acknowledgeAllocationRemoval: event.target.checked })
+              }
+            />
+            I understand the recorded allocation and its obligations are removed
+          </label>
+        </>
+      )}
+      <div className="finance-account-actions">
+        <button
+          type="button"
+          className="household-button"
+          disabled={decisionBusy}
+          onClick={() => onSubmit(activity)}
+        >
+          {decisionBusy ? 'Replacing…' : 'Replace entry'}
+        </button>
+        <button
+          type="button"
+          className="household-button household-button--secondary"
+          disabled={decisionBusy}
+          onClick={() => onCancel(activity.id)}
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -206,6 +608,26 @@ export function BankActivitySection({
   const [dismissReason, setDismissReason] =
     useState<BankActivityDismissReason>('ALREADY_RECORDED');
   const [decisionBusy, setDecisionBusy] = useState(false);
+  // Reconciliation state. Resolve/replace drafts live beside the
+  // confirm drafts so refreshes never discard them; the ledger cache holds
+  // the current ledger entry per needs-review activity (null only while
+  // loading or when the entry is gone) and the allocation cache holds the
+  // active allocation per ledger transaction id (null when none is active,
+  // undefined while unknown).
+  const [resolveDraft, setResolveDraft] = useState<ResolveDraft | null>(null);
+  const [replaceDraft, setReplaceDraft] = useState<ReplaceDraft | null>(null);
+  const [ledgerByActivity, setLedgerByActivity] = useState<
+    Record<string, Transaction | null>
+  >({});
+  const [ledgerLoading, setLedgerLoading] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [allocationByLedger, setAllocationByLedger] = useState<
+    Record<string, TransactionAllocation | null | undefined>
+  >({});
+  const [replaceRefundOptions, setReplaceRefundOptions] = useState<
+    Transaction[] | null
+  >(null);
   // Explicit pagination: the inbox never silently truncates; load-more walks
   // the bounded offset page until hasMore is false.
   const [loadingMore, setLoadingMore] = useState(false);
@@ -218,8 +640,12 @@ export function BankActivitySection({
   const unmountedRef = useRef(false);
   const ownedRef = useRef<Set<AbortController>>(new Set());
   const draftsRef = useRef<Record<string, ConfirmDraft>>({});
+  const resolveDraftsRef = useRef<Record<string, ResolveDraft>>({});
+  const replaceDraftsRef = useRef<Record<string, ReplaceDraft>>({});
   const noticeRef = useRef<HTMLDivElement>(null);
   const confirmHeadingRef = useRef<HTMLHeadingElement>(null);
+  const resolveHeadingRef = useRef<HTMLHeadingElement>(null);
+  const replaceHeadingRef = useRef<HTMLHeadingElement>(null);
   const loadGenerationRef = useRef(0);
   // Sibling refresh sequencing: a signal whose refetch converged, plus a
   // parked flag for signals that arrive before the initial load settles.
@@ -692,9 +1118,614 @@ export function BankActivitySection({
     });
   }
 
+  /**
+   * Loads the current ledger entry behind a needs-review row plus its active
+   * allocation probe. Results are cached per activity/ledger id so reopening
+   * a panel never refetches; a 404 clears only that entry and every other
+   * error leaves it unknown. Provider bank detail is never copied into a
+   * shared view: everything here stays in this owner-only inbox.
+   */
+  function ledgerKeyFor(activity: BankActivity): string | null {
+    return activity.ledgerTransactionId;
+  }
+
+  async function ensureLedgerFor(activity: BankActivity) {
+    if (
+      ledgerByActivity[activity.id] !== undefined ||
+      ledgerLoading[activity.id]
+    ) {
+      return;
+    }
+    const ledgerId = ledgerKeyFor(activity);
+    if (!ledgerId) return;
+    const generation = generationRef.current;
+    const controller = track();
+    setLedgerLoading((currentLoading) => ({
+      ...currentLoading,
+      [activity.id]: true,
+    }));
+    try {
+      const transaction = await fetchTransaction(
+        household.id,
+        ledgerId,
+        controller.signal,
+      );
+      if (!current(generation) || controller.signal.aborted) return;
+      setLedgerByActivity((currentLedger) => ({
+        ...currentLedger,
+        [activity.id]: transaction,
+      }));
+      // Reconcile the open draft's ledger version without touching typed
+      // fields, so a slow load never discards a choice made meanwhile.
+      setResolveDraft((currentDraft) =>
+        currentDraft?.activityId === activity.id &&
+        currentDraft.expectedLedgerVersion === null
+          ? { ...currentDraft, expectedLedgerVersion: transaction.version }
+          : currentDraft,
+      );
+      setReplaceDraft((currentDraft) =>
+        currentDraft?.activityId === activity.id &&
+        currentDraft.expectedLedgerVersion === null
+          ? { ...currentDraft, expectedLedgerVersion: transaction.version }
+          : currentDraft,
+      );
+      if (
+        transaction.kind === 'EXPENSE' &&
+        transaction.status === 'POSTED' &&
+        transaction.visibility === 'HOUSEHOLD' &&
+        allocationByLedger[transaction.id] === undefined
+      ) {
+        try {
+          const allocation = await fetchTransactionAllocation(
+            household.id,
+            transaction.id,
+            controller.signal,
+          );
+          if (!current(generation) || controller.signal.aborted) return;
+          setAllocationByLedger((currentAllocations) => ({
+            ...currentAllocations,
+            [transaction.id]: allocation,
+          }));
+        } catch (error) {
+          if (!current(generation) || controller.signal.aborted) return;
+          if (
+            error instanceof ApiError &&
+            (error.code === 'ALLOCATION_NOT_FOUND' ||
+              error.code === 'TRANSACTION_NOT_FOUND')
+          ) {
+            setAllocationByLedger((currentAllocations) => ({
+              ...currentAllocations,
+              [transaction.id]: null,
+            }));
+          }
+        }
+      }
+    } catch (error) {
+      if (!current(generation) || controller.signal.aborted) return;
+      if (error instanceof ApiError) {
+        if (handleAuthFailure(error, generation)) return;
+        if (
+          error.code === 'TRANSACTION_NOT_FOUND' ||
+          error.code === 'HOUSEHOLD_NOT_FOUND'
+        ) {
+          setLedgerByActivity((currentLedger) => ({
+            ...currentLedger,
+            [activity.id]: null,
+          }));
+          return;
+        }
+      }
+    } finally {
+      ownedRef.current.delete(controller);
+      if (current(generation)) {
+        setLedgerLoading((currentLoading) => ({
+          ...currentLoading,
+          [activity.id]: false,
+        }));
+      }
+    }
+  }
+
+  function openResolve(activity: BankActivity) {
+    const ledger = ledgerByActivity[activity.id];
+    const existing = resolveDraftsRef.current[activity.id];
+    const draft =
+      existing && existing.version === activity.version
+        ? existing
+        : resolveDraftFor(
+            activity,
+            ledger === undefined ? null : (ledger?.version ?? null),
+          );
+    resolveDraftsRef.current[activity.id] = draft;
+    setResolveDraft(draft);
+    setReplaceDraft((currentDraft) =>
+      currentDraft?.activityId === activity.id ? null : currentDraft,
+    );
+    setNotice(null);
+    void ensureLedgerFor(activity);
+  }
+
+  function updateResolveDraft(patch: Partial<ResolveDraft>) {
+    setResolveDraft((currentDraft) => {
+      if (!currentDraft) return currentDraft;
+      const next = { ...currentDraft, ...patch };
+      resolveDraftsRef.current[next.activityId] = next;
+      return next;
+    });
+  }
+
+  function openReplace(activity: BankActivity) {
+    const ledger = ledgerByActivity[activity.id];
+    const existing = replaceDraftsRef.current[activity.id];
+    const draft =
+      existing && existing.version === activity.version
+        ? existing
+        : replaceDraftFor(
+            activity,
+            ledger === undefined ? null : (ledger?.version ?? null),
+          );
+    replaceDraftsRef.current[activity.id] = draft;
+    setReplaceDraft(draft);
+    setResolveDraft((currentDraft) =>
+      currentDraft?.activityId === activity.id ? null : currentDraft,
+    );
+    setReplaceRefundOptions(null);
+    setNotice(null);
+    void ensureLedgerFor(activity);
+  }
+
+  function updateReplaceDraft(patch: Partial<ReplaceDraft>) {
+    setReplaceDraft((currentDraft) => {
+      if (!currentDraft) return currentDraft;
+      const next = { ...currentDraft, ...patch };
+      replaceDraftsRef.current[next.activityId] = next;
+      return next;
+    });
+  }
+
+  async function loadReplaceRefundOptions(draft: ReplaceDraft) {
+    const generation = generationRef.current;
+    const controller = track();
+    try {
+      const transactions = await fetchTransactions(
+        household.id,
+        'OWN',
+        controller.signal,
+      );
+      if (!current(generation) || controller.signal.aborted) return;
+      setReplaceRefundOptions(
+        transactions.items.filter(
+          (transaction) =>
+            transaction.source === 'CONNECTED' &&
+            transaction.kind === 'EXPENSE' &&
+            transaction.status === 'POSTED' &&
+            transaction.accountId !== null &&
+            transaction.accountId === draft.localAccountId &&
+            transaction.money.currency === draft.currency,
+        ),
+      );
+    } catch {
+      if (!current(generation)) return;
+      setReplaceRefundOptions([]);
+    } finally {
+      ownedRef.current.delete(controller);
+    }
+  }
+
+  function resolveFieldsOf(draft: ResolveDraft): ResolveApplyField[] {
+    const fields: ResolveApplyField[] = [];
+    if (draft.applyMoney) fields.push('amount');
+    if (draft.applyDate) fields.push('occurredOn');
+    if (draft.applyDescription) fields.push('description');
+    return fields;
+  }
+
+  /**
+   * Stale-version refetch-and-review: the bank revision or the ledger moved
+   * under the request, so refetch both, publish them into the page and the
+   * open draft versions, and ask for review instead of resending blindly.
+   * Typed draft fields are preserved; only versions converge.
+   */
+  async function refetchAfterConflict(activityId: string) {
+    const generation = generationRef.current;
+    const controller = track();
+    try {
+      const [freshActivity, ledgerId] = await (async () => {
+        const fresh = await fetchBankActivityDetail(
+          household.id,
+          activityId,
+          controller.signal,
+        );
+        return [fresh, fresh.ledgerTransactionId] as const;
+      })();
+      if (!current(generation) || controller.signal.aborted) return;
+      setPage((currentPage) => {
+        if (!currentPage) return currentPage;
+        return {
+          ...currentPage,
+          items: currentPage.items.map((item) =>
+            item.id === freshActivity.id ? freshActivity : item,
+          ),
+        };
+      });
+      const resolveOpen = resolveDraftsRef.current[activityId];
+      if (resolveOpen) {
+        const next = { ...resolveOpen, version: freshActivity.version };
+        resolveDraftsRef.current[activityId] = next;
+        setResolveDraft((currentDraft) =>
+          currentDraft?.activityId === activityId ? next : currentDraft,
+        );
+      }
+      const replaceOpen = replaceDraftsRef.current[activityId];
+      if (replaceOpen) {
+        const next = { ...replaceOpen, version: freshActivity.version };
+        replaceDraftsRef.current[activityId] = next;
+        setReplaceDraft((currentDraft) =>
+          currentDraft?.activityId === activityId ? next : currentDraft,
+        );
+      }
+      if (ledgerId) {
+        try {
+          const freshLedger = await fetchTransaction(
+            household.id,
+            ledgerId,
+            controller.signal,
+          );
+          if (!current(generation) || controller.signal.aborted) return;
+          setLedgerByActivity((currentLedger) => ({
+            ...currentLedger,
+            [activityId]: freshLedger,
+          }));
+          setResolveDraft((currentDraft) =>
+            currentDraft?.activityId === activityId
+              ? { ...currentDraft, expectedLedgerVersion: freshLedger.version }
+              : currentDraft,
+          );
+          setReplaceDraft((currentDraft) =>
+            currentDraft?.activityId === activityId
+              ? { ...currentDraft, expectedLedgerVersion: freshLedger.version }
+              : currentDraft,
+          );
+          const resolveStored = resolveDraftsRef.current[activityId];
+          if (resolveStored) {
+            resolveDraftsRef.current[activityId] = {
+              ...resolveStored,
+              version: freshActivity.version,
+              expectedLedgerVersion: freshLedger.version,
+            };
+          }
+          const replaceStored = replaceDraftsRef.current[activityId];
+          if (replaceStored) {
+            replaceDraftsRef.current[activityId] = {
+              ...replaceStored,
+              version: freshActivity.version,
+              expectedLedgerVersion: freshLedger.version,
+            };
+          }
+        } catch {
+          // The ledger read is best-effort here; the activity already
+          // converged above and the next submit refetches versions.
+        }
+      }
+      showNotice(
+        'warning',
+        'The bank or ledger changed while you were reviewing. The latest versions are loaded; review them before retrying.',
+      );
+    } catch (error) {
+      if (!current(generation)) return;
+      if (error instanceof ApiError) {
+        if (handleAuthFailure(error, generation)) return;
+      }
+      showNotice(
+        'warning',
+        'The bank or ledger changed while you were reviewing. Refresh the inbox and review the latest before retrying.',
+      );
+    } finally {
+      ownedRef.current.delete(controller);
+    }
+  }
+
+  function resolveFailureNotice(
+    apiError: ApiError,
+    activity: BankActivity,
+  ): boolean {
+    if (
+      apiError.code === 'RESOURCE_VERSION_CONFLICT' ||
+      apiError.code === 'RECONCILIATION_REQUIRED'
+    ) {
+      void refetchAfterConflict(activity.id);
+      return true;
+    }
+    return false;
+  }
+
+  async function submitResolve(activity: BankActivity) {
+    const draft = resolveDraft;
+    if (!draft || draft.activityId !== activity.id) return;
+    if (draft.expectedLedgerVersion === null) {
+      showNotice(
+        'warning',
+        'The ledger entry is still loading. Wait a moment and retry.',
+      );
+      return;
+    }
+    if (
+      draft.action === 'APPLY_BANK' &&
+      activity.state === 'REMOVED' &&
+      resolveFieldsOf(draft).length > 0
+    ) {
+      showNotice(
+        'warning',
+        'The bank removed this entry, so its revision cannot be applied. Keep the ledger or void it instead.',
+      );
+      return;
+    }
+    if (draft.action === 'APPLY_BANK' && resolveFieldsOf(draft).length === 0) {
+      showNotice(
+        'warning',
+        'Choose at least one bank field to apply: amount, date, or description.',
+      );
+      return;
+    }
+    if (
+      draft.action === 'APPLY_BANK' &&
+      draft.applyDescription &&
+      !activity.descriptionValid
+    ) {
+      showNotice(
+        'warning',
+        'The bank description cannot be used as ledger text. Uncheck the description or replace the entry with your own text instead.',
+      );
+      return;
+    }
+    const activeAllocation =
+      ledgerByActivity[activity.id] !== undefined &&
+      ledgerByActivity[activity.id] !== null
+        ? allocationByLedger[ledgerByActivity[activity.id]?.id ?? '']
+        : undefined;
+    if (draft.action === 'APPLY_BANK' && draft.applyMoney && activeAllocation) {
+      showNotice(
+        'warning',
+        'The amount is locked by the active allocation. Uncheck the amount, revoke the allocation in the ledger, or void/replace instead — nothing was sent and the ledger is unchanged.',
+      );
+      return;
+    }
+    const generation = generationRef.current;
+    const controller = track();
+    setDecisionBusy(true);
+    try {
+      const activeCsrf = await ensureCsrf(generation, controller.signal);
+      if (!current(generation) || controller.signal.aborted) return;
+      if (!activeCsrf) {
+        onSessionExpired();
+        return;
+      }
+      const body: ResolveBody = {
+        expectedVersion: draft.version,
+        expectedLedgerVersion: draft.expectedLedgerVersion,
+        action: draft.action,
+        fields:
+          draft.action === 'APPLY_BANK' ? resolveFieldsOf(draft) : undefined,
+      };
+      const decision = await resolveBankActivity(
+        household.id,
+        draft.activityId,
+        body,
+        draft.idempotencyKey,
+        activeCsrf,
+        controller.signal,
+      );
+      if (!current(generation)) return;
+      delete resolveDraftsRef.current[draft.activityId];
+      setResolveDraft(null);
+      applyDecision(decision);
+      if (draft.action === 'VOID_LEDGER') {
+        // A void deactivates allocations atomically; drop the cached active
+        // allocation for the old ledger entry so the sibling feed converges.
+        const ledgerId = ledgerByActivity[draft.activityId]?.id;
+        if (ledgerId) {
+          setAllocationByLedger((currentAllocations) => ({
+            ...currentAllocations,
+            [ledgerId]: null,
+          }));
+        }
+      }
+      // Every resolution bumps versions on one side or the other; drop the
+      // cached ledger entry so a reopened review refetches versions instead
+      // of reusing stale ones before the quiet refresh converges.
+      setLedgerByActivity((currentLedger) => {
+        if (!(draft.activityId in currentLedger)) return currentLedger;
+        const next = { ...currentLedger };
+        delete next[draft.activityId];
+        return next;
+      });
+      showNotice(
+        'info',
+        draft.action === 'KEEP_LEDGER'
+          ? 'Kept your ledger entry against this bank revision. It keeps contributing to household totals until the bank changes again.'
+          : draft.action === 'APPLY_BANK'
+            ? 'Applied the selected bank fields to your private ledger entry.'
+            : 'Voided the ledger entry. Household totals and obligations no longer include it.',
+      );
+      onLedgerChanged?.();
+      await refresh();
+    } catch (error) {
+      if (!current(generation)) return;
+      if (error instanceof ApiError) {
+        if (handleAuthFailure(error, generation)) return;
+        if (resolveFailureNotice(error, activity)) return;
+        showNotice(
+          'error',
+          error.message || 'That bank revision could not be resolved.',
+          error.correlationId,
+        );
+        return;
+      }
+      showNotice('error', 'That bank revision could not be resolved.');
+    } finally {
+      ownedRef.current.delete(controller);
+      if (!unmountedRef.current) setDecisionBusy(false);
+    }
+  }
+
+  async function submitReplace(activity: BankActivity) {
+    const draft = replaceDraft;
+    if (!draft || draft.activityId !== activity.id) return;
+    if (draft.expectedLedgerVersion === null) {
+      showNotice(
+        'warning',
+        'The ledger entry is still loading. Wait a moment and retry.',
+      );
+      return;
+    }
+    if (draft.description.trim().length === 0) {
+      showNotice('warning', 'Enter a description for the replacement entry.');
+      return;
+    }
+    if (draft.kind === 'REFUND' && !draft.refundOfTransactionId) {
+      showNotice('warning', 'Choose the connected expense being refunded.');
+      return;
+    }
+    const ledger = ledgerByActivity[activity.id];
+    const activeAllocation =
+      ledger !== undefined && ledger !== null
+        ? allocationByLedger[ledger.id]
+        : undefined;
+    if (activeAllocation && !draft.acknowledgeAllocationRemoval) {
+      showNotice(
+        'warning',
+        'This replacement removes the recorded allocation and its obligations. Review the shares below and acknowledge the removal before replacing.',
+      );
+      return;
+    }
+    const generation = generationRef.current;
+    const controller = track();
+    setDecisionBusy(true);
+    try {
+      const activeCsrf = await ensureCsrf(generation, controller.signal);
+      if (!current(generation) || controller.signal.aborted) return;
+      if (!activeCsrf) {
+        onSessionExpired();
+        return;
+      }
+      const body: ReplaceBody = {
+        expectedVersion: draft.version,
+        expectedLedgerVersion: draft.expectedLedgerVersion,
+        kind: draft.kind,
+        description: draft.description,
+        // A refund with no explicit category omits the field so the server
+        // inherits the source expense's category (INHERIT); an explicit null
+        // travels only for non-refunds, where it means uncategorized.
+        category:
+          draft.category.length === 0
+            ? draft.kind === 'REFUND'
+              ? undefined
+              : null
+            : draft.category,
+        refundOfTransactionId:
+          draft.kind === 'REFUND' ? draft.refundOfTransactionId : undefined,
+        acknowledgeDisclosure: draft.acknowledgeDisclosure,
+        acknowledgeAllocationRemoval: draft.acknowledgeAllocationRemoval,
+      };
+      const decision = await replaceBankActivityLedger(
+        household.id,
+        draft.activityId,
+        body,
+        draft.idempotencyKey,
+        activeCsrf,
+        controller.signal,
+      );
+      if (!current(generation)) return;
+      delete replaceDraftsRef.current[draft.activityId];
+      setReplaceDraft(null);
+      // The replacement response carries the full new entry plus the
+      // retained superseded identity; the inbox page converges on the
+      // review, whose association already points at the replacement.
+      applyDecision({
+        activity: decision.activity,
+        transactionId: decision.transaction.id,
+        transactionVersion: decision.transaction.version,
+      });
+      // Replacement voids the old entry (deactivating its allocation) and
+      // admits a new private one; never copy the allocation forward. The
+      // cached ledger entry is invalidated alongside the allocation so a
+      // reopened review refetches versions instead of reusing stale ones.
+      const oldLedgerId = ledger?.id;
+      if (oldLedgerId) {
+        setAllocationByLedger((currentAllocations) => ({
+          ...currentAllocations,
+          [oldLedgerId]: null,
+        }));
+      }
+      setLedgerByActivity((currentLedger) => {
+        if (!(draft.activityId in currentLedger)) return currentLedger;
+        const next = { ...currentLedger };
+        delete next[draft.activityId];
+        return next;
+      });
+      showNotice(
+        'info',
+        'Replaced the ledger entry. The replacement is private unless it is a linked refund inheriting disclosure; household totals use the new entry.',
+      );
+      onLedgerChanged?.();
+      await refresh();
+    } catch (error) {
+      if (!current(generation)) return;
+      if (error instanceof ApiError) {
+        if (handleAuthFailure(error, generation)) return;
+        if (resolveFailureNotice(error, activity)) return;
+        showNotice(
+          'error',
+          error.message || 'That ledger entry could not be replaced.',
+          error.correlationId,
+        );
+        return;
+      }
+      showNotice('error', 'That ledger entry could not be replaced.');
+    } finally {
+      ownedRef.current.delete(controller);
+      if (!unmountedRef.current) setDecisionBusy(false);
+    }
+  }
+
+  function closeReviewPanels(
+    activityId?: string,
+    panel?: 'resolve' | 'replace',
+  ) {
+    if (activityId) {
+      // Restore focus to the trigger that opened the closing panel, so
+      // keyboard users land back where they started instead of on removed
+      // panel controls.
+      const triggerId =
+        panel === 'replace'
+          ? `replace-trigger-${activityId}`
+          : `review-trigger-${activityId}`;
+      requestAnimationFrame(() => {
+        if (unmountedRef.current) return;
+        document.getElementById(triggerId)?.focus();
+      });
+    }
+    setResolveDraft(null);
+    setReplaceDraft(null);
+  }
+
+  useEffect(() => {
+    // Direct focus to the outcome notice so success and error states are
+    // announced without leaving focus on an unmounting panel control.
+    if (notice) noticeRef.current?.focus();
+  }, [notice]);
+
   useEffect(() => {
     if (confirmDraft) confirmHeadingRef.current?.focus();
   }, [confirmDraft]);
+
+  useEffect(() => {
+    if (resolveDraft) resolveHeadingRef.current?.focus();
+  }, [resolveDraft]);
+
+  useEffect(() => {
+    if (replaceDraft) replaceHeadingRef.current?.focus();
+  }, [replaceDraft]);
 
   useEffect(() => {
     if (Object.keys(cooldownUntil).length === 0) return;
@@ -726,9 +1757,10 @@ export function BankActivitySection({
       </div>
       <p className="finance-helper">
         Bank activity stays private until you confirm it. Pending, removed, and
-        invalid items never enter the ledger or household totals. Reviewing a
-        bank revision that changed after confirmation is a later step; nothing
-        is changed automatically.
+        invalid items never enter the ledger or household totals. A bank
+        revision that changed after confirmation never edits the ledger on its
+        own: the confirmed entry keeps contributing until you resolve the
+        difference below.
       </p>
 
       {!authorityConfirmed && (
@@ -903,6 +1935,11 @@ export function BankActivitySection({
                   <span className="bank-badge">
                     {reviewLabel(activity.reviewState)}
                   </span>
+                  {isNeedsReview(activity) && (
+                    <span className="bank-badge bank-badge--review">
+                      Needs review
+                    </span>
+                  )}
                 </p>
               </div>
               <p className="bank-activity-meta">
@@ -962,6 +1999,37 @@ export function BankActivitySection({
                     }}
                   >
                     Dismiss…
+                  </button>
+                )}
+                {/*
+                  Needs-review actions never depend on connection state: a
+                  retained admitted entry may be resolved after disconnect,
+                  and resolution never restarts sync or admits new history.
+                */}
+                {isNeedsReview(activity) && (
+                  <button
+                    type="button"
+                    id={`review-trigger-${activity.id}`}
+                    className="household-button"
+                    disabled={busy || !authorityConfirmed}
+                    aria-label={`Review bank revision ${activitySummary(activity)}`}
+                    aria-expanded={resolveDraft?.activityId === activity.id}
+                    onClick={() => openResolve(activity)}
+                  >
+                    Review…
+                  </button>
+                )}
+                {isNeedsReview(activity) && activity.state === 'POSTED' && (
+                  <button
+                    type="button"
+                    id={`replace-trigger-${activity.id}`}
+                    className="household-button household-button--secondary"
+                    disabled={busy || !authorityConfirmed}
+                    aria-label={`Replace ledger entry for bank activity ${activitySummary(activity)}`}
+                    aria-expanded={replaceDraft?.activityId === activity.id}
+                    onClick={() => openReplace(activity)}
+                  >
+                    Replace…
                   </button>
                 )}
               </div>
@@ -1096,6 +2164,64 @@ export function BankActivitySection({
                     </button>
                   </div>
                 </div>
+              )}
+
+              {resolveDraft?.activityId === activity.id && (
+                <ResolvePanel
+                  activity={activity}
+                  draft={resolveDraft}
+                  ledger={ledgerByActivity[activity.id]}
+                  ledgerLoading={ledgerLoading[activity.id] === true}
+                  activeAllocation={
+                    ledgerByActivity[activity.id] === undefined ||
+                    ledgerByActivity[activity.id] === null ||
+                    ledgerByActivity[activity.id]?.id === undefined
+                      ? undefined
+                      : allocationByLedger[
+                          ledgerByActivity[activity.id]?.id as string
+                        ]
+                  }
+                  decisionBusy={decisionBusy}
+                  ref={resolveHeadingRef}
+                  onPatch={(patch) => updateResolveDraft(patch)}
+                  onSubmit={(item) => void submitResolve(item)}
+                  onCancel={(activityId) =>
+                    closeReviewPanels(activityId, 'resolve')
+                  }
+                />
+              )}
+
+              {replaceDraft?.activityId === activity.id && (
+                <ReplacePanel
+                  activity={activity}
+                  draft={replaceDraft}
+                  ledgerLoading={ledgerLoading[activity.id] === true}
+                  ledgerGone={ledgerByActivity[activity.id] === null}
+                  activeAllocation={
+                    ledgerByActivity[activity.id] === undefined ||
+                    ledgerByActivity[activity.id] === null ||
+                    ledgerByActivity[activity.id]?.id === undefined
+                      ? undefined
+                      : allocationByLedger[
+                          ledgerByActivity[activity.id]?.id as string
+                        ]
+                  }
+                  categories={categories}
+                  refundOptions={replaceRefundOptions}
+                  decisionBusy={decisionBusy}
+                  ref={replaceHeadingRef}
+                  onPatch={(patch) => updateReplaceDraft(patch)}
+                  onKindChange={(kind, draft) => {
+                    updateReplaceDraft({ kind });
+                    if (kind === 'REFUND') {
+                      void loadReplaceRefundOptions({ ...draft, kind });
+                    }
+                  }}
+                  onSubmit={(item) => void submitReplace(item)}
+                  onCancel={(activityId) =>
+                    closeReviewPanels(activityId, 'replace')
+                  }
+                />
               )}
 
               {dismissOpen === activity.id && (

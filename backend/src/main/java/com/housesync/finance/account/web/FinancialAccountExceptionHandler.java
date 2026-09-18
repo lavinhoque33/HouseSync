@@ -18,6 +18,7 @@ import com.housesync.finance.connection.web.ConnectionExceptions.ObservationDism
 import com.housesync.finance.connection.web.ConnectionExceptions.ObservationInvalidException;
 import com.housesync.finance.connection.web.ConnectionExceptions.ObservationNotPostedException;
 import com.housesync.finance.connection.web.ConnectionExceptions.ProviderTransientException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ReconciliationRequiredException;
 import com.housesync.finance.connection.webhook.PlaidWebhookVerifier.WebhookUnavailableException;
 import com.housesync.finance.connection.webhook.PlaidWebhookVerifier.WebhookVerificationException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsForbiddenException;
@@ -451,6 +452,16 @@ public class FinancialAccountExceptionHandler {
         HttpStatus.CONFLICT,
         ErrorCodes.OBSERVATION_ADMITTED,
         "That bank activity is already in the ledger.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ReconciliationRequiredException.class)
+  public ResponseEntity<ApiError> reconciliationRequired(ReconciliationRequiredException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RECONCILIATION_REQUIRED,
+        "The bank change needs a separate review before this action.",
         null,
         failure);
   }

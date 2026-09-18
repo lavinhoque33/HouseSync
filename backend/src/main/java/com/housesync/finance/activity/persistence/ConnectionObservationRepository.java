@@ -5,6 +5,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -75,4 +76,21 @@ public interface ConnectionObservationRepository
         AND o.changeState IS NOT NULL
       """)
   long countChangedAdmitted(@Param("householdId") UUID householdId, @Param("actorId") UUID actorId);
+
+  /**
+   * Confirmed-disconnect erasure: deletes only unadmitted observations
+   * (PENDING/POSTED/INVALID) with no CURRENT ledger association. Admitted rows and their
+   * associations are retained so outstanding reviews stay resolvable after disconnect.
+   */
+  @Modifying
+  @Query(
+      """
+      DELETE FROM ConnectionObservationEntity o
+      WHERE o.connectionId = :connectionId
+        AND o.state IN ('PENDING', 'POSTED', 'INVALID')
+        AND NOT EXISTS (
+          SELECT 1 FROM ConnectionLedgerAssociationEntity a
+          WHERE a.observationId = o.id AND a.state = 'CURRENT')
+      """)
+  int scrubUnadmittedForConnection(@Param("connectionId") UUID connectionId);
 }

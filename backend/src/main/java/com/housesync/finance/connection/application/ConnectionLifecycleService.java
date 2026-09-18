@@ -1,5 +1,6 @@
 package com.housesync.finance.connection.application;
 
+import com.housesync.finance.activity.persistence.ConnectionObservationRepository;
 import com.housesync.finance.connection.config.ConnectedFinanceProperties;
 import com.housesync.finance.connection.crypto.ConnectionCrypto;
 import com.housesync.finance.connection.persistence.ConnectionAccountMappingRepository;
@@ -39,7 +40,8 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>Disconnect fences local state and generation immediately in the lifecycle transaction and
  * queues durable remote removal; the worker finishes removal without needing membership. Reconnect
  * start bumps generation plus version, and completion verifies the same generation so a late
- * completion cannot defeat a subsequent disconnect or removal.
+ * completion cannot defeat a subsequent disconnect or removal. Confirmed remote removal also erases
+ * unadmitted observations while retaining admitted rows and their associations.
  *
  * <p>Revocation claims carry a bounded fencing lease: only the holder of the current fence and
  * owner may commit an outcome. A crashed holder's lease expires and becomes reclaimable with a
@@ -52,6 +54,7 @@ public class ConnectionLifecycleService extends ConnectedFinanceBase
   private static final Duration LEASE_DURATION = Duration.ofMinutes(2);
 
   private final RevocationRetryPolicy retryPolicy;
+  private final ConnectionObservationRepository observations;
   private final String workerOwnerId;
 
   @Autowired
@@ -59,6 +62,7 @@ public class ConnectionLifecycleService extends ConnectedFinanceBase
       ConnectedFinanceProperties properties,
       FinancialConnectionRepository connections,
       ConnectionAccountMappingRepository mappings,
+      ConnectionObservationRepository observations,
       ConnectionLinkAttemptRepository attempts,
       ConnectionOperationRepository operations,
       ConnectionOperationIdempotencyRepository idempotency,
@@ -73,6 +77,7 @@ public class ConnectionLifecycleService extends ConnectedFinanceBase
         properties,
         connections,
         mappings,
+        observations,
         attempts,
         operations,
         idempotency,
@@ -95,6 +100,7 @@ public class ConnectionLifecycleService extends ConnectedFinanceBase
       ConnectedFinanceProperties properties,
       FinancialConnectionRepository connections,
       ConnectionAccountMappingRepository mappings,
+      ConnectionObservationRepository observations,
       ConnectionLinkAttemptRepository attempts,
       ConnectionOperationRepository operations,
       ConnectionOperationIdempotencyRepository idempotency,
@@ -120,6 +126,7 @@ public class ConnectionLifecycleService extends ConnectedFinanceBase
         clock,
         transactionManager);
     this.retryPolicy = retryPolicy;
+    this.observations = observations;
     this.workerOwnerId = workerOwnerId;
   }
 
@@ -459,6 +466,7 @@ public class ConnectionLifecycleService extends ConnectedFinanceBase
                 return null;
               }
               connection.confirmRemoteRemoval(now);
+              scrubUnadmitted(connection.getId());
             }
             work.complete(now);
             succeedDisconnectOperations(connection.getId(), now);
@@ -607,11 +615,21 @@ public class ConnectionLifecycleService extends ConnectedFinanceBase
               return null;
             }
             connection.confirmRemoteRemoval(now);
+            scrubUnadmitted(connection.getId());
           }
           work.complete(now);
           succeedDisconnectOperations(connection.getId(), now);
           return null;
         });
+  }
+
+  /**
+   * Confirmed-disconnect erasure: deletes only unadmitted observations with no CURRENT ledger
+   * association. Admitted rows and their associations are retained so outstanding reviews stay
+   * resolvable after disconnect; provider data needed for them survives as minimal provenance.
+   */
+  private void scrubUnadmitted(UUID connectionId) {
+    observations.scrubUnadmittedForConnection(connectionId);
   }
 
   /**

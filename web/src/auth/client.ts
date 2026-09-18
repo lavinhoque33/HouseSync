@@ -23,12 +23,18 @@ import {
 import {
   confirmBankActivityBody,
   dismissBankActivityBody,
+  parseBankActivity,
   parseBankActivityDecision,
   parseBankActivityPage,
+  replaceBankActivityBody,
+  resolveBankActivityBody,
+  type BankActivity,
   type BankActivityDecision,
   type BankActivityDismissReason,
   type BankActivityPage,
   type ConfirmBody,
+  type ReplaceBody,
+  type ResolveBody,
 } from '../finance/bank-activity';
 import { isRegionShapedZone } from '../finance/reporting';
 
@@ -82,6 +88,7 @@ export type ApiErrorCode =
   | 'OBSERVATION_INVALID'
   | 'OBSERVATION_DISMISSED'
   | 'OBSERVATION_ADMITTED'
+  | 'RECONCILIATION_REQUIRED'
   | 'MANUAL_SYNC_RATE_LIMITED'
   | 'INTERNAL_ERROR'
   | 'NETWORK_ERROR'
@@ -158,6 +165,7 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'OBSERVATION_INVALID',
     'OBSERVATION_DISMISSED',
     'OBSERVATION_ADMITTED',
+    'RECONCILIATION_REQUIRED',
     'MANUAL_SYNC_RATE_LIMITED',
     'INTERNAL_ERROR',
   ];
@@ -185,6 +193,10 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
         key === 'currency' ||
         key === 'status' ||
         key === 'expectedVersion' ||
+        key === 'expectedLedgerVersion' ||
+        key === 'action' ||
+        key === 'fields' ||
+        key === 'acknowledgeAllocationRemoval' ||
         key === 'idempotencyKey' ||
         key === 'limit' ||
         key === 'offset' ||
@@ -1949,6 +1961,10 @@ export type {
   BankActivityReviewState,
   BankActivityState,
   ConfirmBody,
+  ReplaceBody,
+  ResolveAction,
+  ResolveApplyField,
+  ResolveBody,
 } from '../finance/bank-activity';
 
 /**
@@ -2064,6 +2080,44 @@ export async function fetchBankActivity(
   return page;
 }
 
+/**
+ * Owner-scoped single observation; used for stale-version refetch-and-review
+ * so a 409 never discards the open draft or resends blindly.
+ */
+export async function fetchBankActivityDetail(
+  householdId: string,
+  activityId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<BankActivity> {
+  const response = await apiFetch(
+    `${connectionBase(householdId)}/bank-activity/${encodeURIComponent(activityId)}`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load this bank activity.',
+    );
+  }
+  const detail = parseBankActivity(await readJson<unknown>(response));
+  if (!detail) {
+    throw unexpectedConnectionResponse(
+      response.status,
+      'The server returned an unexpected bank activity response.',
+    );
+  }
+  return detail;
+}
+
 /** Confirm one posted observation into the ledger; 201 admits, 200 replays. */
 export async function confirmBankActivity(
   householdId: string,
@@ -2150,6 +2204,144 @@ export async function dismissBankActivity(
     response,
     response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
     'Bank activity could not be dismissed.',
+  );
+}
+
+/**
+ * Reconciliation (connected-finance contract sections 6-7). Both calls send the
+ * current observation version plus the ledger `Transaction.version`; a
+ * constraint failure leaves both unchanged. Resolve answers 200 with the
+ * current review + ledger decision; replace answers 201 with the
+ * replacement + retained association history (200 on same-key replay).
+ * Either may answer 409 RECONCILIATION_REQUIRED when the bank revision
+ * moved under the request: the caller refetches and reviews instead of
+ * resending blindly.
+ */
+export async function resolveBankActivity(
+  householdId: string,
+  activityId: string,
+  body: ResolveBody,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<BankActivityDecision> {
+  const response = await postWithIdempotencyKey(
+    `${connectionBase(householdId)}/bank-activity/${encodeURIComponent(activityId)}/resolve`,
+    resolveBankActivityBody(body),
+    idempotencyKey,
+    csrf,
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const decision = parseBankActivityDecision(
+      await readJson<unknown>(response),
+    );
+    if (!decision) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected bank activity response.',
+      );
+    }
+    return decision;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'That bank revision could not be resolved.',
+  );
+}
+
+/**
+ * Atomic-replacement outcome: the current review (whose ledger
+ * association already points at the replacement), the replacement entry
+ * itself, and the retained superseded entry identity. Exactly these four
+ * keys; anything else is contract drift.
+ */
+export interface BankActivityReplaceDecision {
+  activity: BankActivity;
+  transaction: Transaction;
+  supersededTransactionId: string;
+  supersededTransactionVersion: number;
+}
+
+function parseBankActivityReplace(
+  value: unknown,
+): BankActivityReplaceDecision | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== 4) return undefined;
+  const activity = parseBankActivity(record.activity);
+  const transaction = parseTransaction(record.transaction);
+  if (!activity || !transaction) return undefined;
+  if (
+    typeof record.supersededTransactionId !== 'string' ||
+    !UUID_PATTERN.test(record.supersededTransactionId) ||
+    typeof record.supersededTransactionVersion !== 'number' ||
+    !Number.isInteger(record.supersededTransactionVersion) ||
+    record.supersededTransactionVersion < 0 ||
+    record.supersededTransactionVersion > 2147483647
+  ) {
+    return undefined;
+  }
+  return {
+    activity,
+    transaction,
+    supersededTransactionId: record.supersededTransactionId,
+    supersededTransactionVersion: record.supersededTransactionVersion,
+  };
+}
+
+export async function replaceBankActivityLedger(
+  householdId: string,
+  activityId: string,
+  body: ReplaceBody,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<BankActivityReplaceDecision> {
+  const response = await postWithIdempotencyKey(
+    `${connectionBase(householdId)}/bank-activity/${encodeURIComponent(activityId)}/replace-ledger`,
+    replaceBankActivityBody(body),
+    idempotencyKey,
+    csrf,
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200 || response.status === 201) {
+    const decision = parseBankActivityReplace(
+      await readJson<unknown>(response),
+    );
+    if (!decision) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected bank activity response.',
+      );
+    }
+    return decision;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'That ledger entry could not be replaced.',
   );
 }
 

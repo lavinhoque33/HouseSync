@@ -12,8 +12,9 @@ import java.util.UUID;
  * observation (partial unique index) and per ledger entry; the association is what makes an
  * observation admitted, and a confirmation without it can never be visible reporting.
  *
- * <p>Resolution/replacement is out of scope: only CURRENT rows are created here, while the
- * VOIDED state reserves retained history for later use.
+ * <p>Replacement moves the CURRENT row to VOIDED while the replacement becomes CURRENT, so
+ * earlier provenance is retained and the partial unique index keeps exactly one current association
+ * per observation.
  */
 @Entity
 @Table(name = "connection_ledger_associations")
@@ -107,6 +108,15 @@ public class ConnectionLedgerAssociationEntity {
 
   public String getState() {
     return state;
+  }
+
+  /**
+   * Replacement history step: the superseded CURRENT row is retained as VOIDED while the
+   * replacement becomes CURRENT. A directly voided imported entry keeps its CURRENT row and stays
+   * associated and excluded.
+   */
+  public void voided() {
+    this.state = "VOIDED";
   }
 
   public Instant getCreatedAt() {

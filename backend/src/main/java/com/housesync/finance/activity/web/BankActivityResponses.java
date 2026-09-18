@@ -1,5 +1,6 @@
 package com.housesync.finance.activity.web;
 
+import com.housesync.finance.transaction.web.FinancialTransactionResponse;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -44,7 +45,17 @@ public final class BankActivityResponses {
       long unreviewedCount,
       long changedCount) {}
 
-  /** Decision outcome for both confirm and dismiss. */
+  /** Decision outcome for confirm, dismiss, and resolve. */
   public record BankActivityDecisionResponse(
       BankActivityResponse activity, UUID transactionId, Integer transactionVersion) {}
+
+  /**
+   * Replacement outcome: the current review (whose ledger association field already points at the
+   * replacement), the replacement entry, and the retained superseded entry identity.
+   */
+  public record BankActivityReplaceResponse(
+      BankActivityResponse activity,
+      FinancialTransactionResponse transaction,
+      UUID supersededTransactionId,
+      Integer supersededTransactionVersion) {}
 }

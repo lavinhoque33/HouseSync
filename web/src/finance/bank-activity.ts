@@ -292,6 +292,14 @@ export function parseBankActivityDecision(
   };
 }
 
+/** True when the provider revised/removed an admitted row: ledger unchanged, review owed. */
+export function isNeedsReview(activity: BankActivity): boolean {
+  return (
+    activity.reviewState === 'CONFIRMED' &&
+    (activity.changeState === 'MODIFIED' || activity.changeState === 'REMOVED')
+  );
+}
+
 /** True when the owner can turn this observation into a ledger entry now. */
 export function isConfirmable(activity: BankActivity): boolean {
   return activity.state === 'POSTED' && activity.reviewState === 'UNREVIEWED';
@@ -369,6 +377,102 @@ export function dismissBankActivityBody(
 }
 
 /**
+ * Reconciliation actions (connected-finance contract section 6). KEEP_LEDGER records an
+ * explicit decision against the exact bank revision; APPLY_BANK changes only
+ * the selected money/date/description fields; VOID_LEDGER deactivates the
+ * ledger entry under the existing void rules. APPLY_BANK is unavailable for
+ * removed observations.
+ */
+export type ResolveAction = 'KEEP_LEDGER' | 'APPLY_BANK' | 'VOID_LEDGER';
+
+/** APPLY_BANK field subset: amount, posting date, or description only. */
+export type ResolveApplyField = 'amount' | 'occurredOn' | 'description';
+
+export interface ResolveBody {
+  expectedVersion: number;
+  expectedLedgerVersion: number;
+  action: ResolveAction;
+  /** Only for APPLY_BANK; sorted/deduped before sending. */
+  fields?: ResolveApplyField[] | undefined;
+}
+
+const RESOLVE_APPLY_FIELDS: ReadonlySet<ResolveApplyField> = new Set([
+  'amount',
+  'occurredOn',
+  'description',
+]);
+
+/**
+ * Exact resolve body: both the current observation version and the ledger
+ * `Transaction.version` travel together. `fields` appears only for
+ * APPLY_BANK as a sorted unique subset; derived fields (account, currency,
+ * kind, visibility, refund links, category) are never sent here.
+ */
+export function resolveBankActivityBody(
+  body: ResolveBody,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    expectedVersion: body.expectedVersion,
+    expectedLedgerVersion: body.expectedLedgerVersion,
+    action: body.action,
+  };
+  if (body.action === 'APPLY_BANK') {
+    const fields = [...new Set(body.fields ?? [])]
+      .filter((field) => RESOLVE_APPLY_FIELDS.has(field))
+      .sort();
+    payload.fields = fields;
+  }
+  return payload;
+}
+
+export interface ReplaceBody {
+  expectedVersion: number;
+  expectedLedgerVersion: number;
+  kind: 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER';
+  description?: string | undefined;
+  category?: string | null | undefined;
+  refundOfTransactionId?: string | undefined;
+  acknowledgeDisclosure?: boolean | undefined;
+  acknowledgeAllocationRemoval?: boolean | undefined;
+}
+
+/**
+ * Exact atomic replacement body. Both versions travel together; derived
+ * account/money/date/source/visibility never do (money/date come from the
+ * current posted observation). Missing acknowledgements canonicalize to
+ * false. Non-refund omitted/null category canonicalizes to null; refund
+ * omission means INHERIT and stays distinct from an explicit value,
+ * following the confirm rule.
+ */
+export function replaceBankActivityBody(
+  body: ReplaceBody,
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    expectedVersion: body.expectedVersion,
+    expectedLedgerVersion: body.expectedLedgerVersion,
+    kind: body.kind,
+  };
+  if (body.description !== undefined && body.description.length > 0) {
+    payload.description = body.description;
+  }
+  if (body.kind === 'REFUND') {
+    payload.refundOfTransactionId = body.refundOfTransactionId ?? null;
+    payload.acknowledgeDisclosure = body.acknowledgeDisclosure === true;
+    if (typeof body.category === 'string' && body.category.length > 0) {
+      payload.category = body.category;
+    }
+  } else {
+    payload.category = body.category ?? null;
+    if (body.acknowledgeDisclosure === true) {
+      payload.acknowledgeDisclosure = true;
+    }
+  }
+  payload.acknowledgeAllocationRemoval =
+    body.acknowledgeAllocationRemoval === true;
+  return payload;
+}
+
+/**
  * In-memory confirm draft. It is keyed by observation id in the component so
  * a background refresh never discards typed text, and it carries one
  * idempotency key for the lifetime of the draft so a retry after a transport
@@ -403,6 +507,81 @@ export function draftFor(activity: BankActivity): ConfirmDraft {
     category: '',
     refundOfTransactionId: '',
     acknowledgeDisclosure: false,
+    idempotencyKey: crypto.randomUUID(),
+  };
+}
+
+/**
+ * In-memory resolve draft: the chosen reconciliation action, the APPLY_BANK
+ * field subset, and the ledger version read from the current ledger entry.
+ * Keyed by observation id like the confirm draft so background refreshes
+ * never discard it; one idempotency key per draft lifetime.
+ */
+export interface ResolveDraft {
+  activityId: string;
+  version: number;
+  expectedLedgerVersion: number | null;
+  action: ResolveAction;
+  applyMoney: boolean;
+  applyDate: boolean;
+  applyDescription: boolean;
+  idempotencyKey: string;
+}
+
+export function resolveDraftFor(
+  activity: BankActivity,
+  expectedLedgerVersion: number | null,
+): ResolveDraft {
+  return {
+    activityId: activity.id,
+    version: activity.version,
+    expectedLedgerVersion,
+    action: 'KEEP_LEDGER',
+    applyMoney: true,
+    applyDate: true,
+    applyDescription: true,
+    idempotencyKey: crypto.randomUUID(),
+  };
+}
+
+/**
+ * In-memory atomic-replacement draft. Like the confirm draft it carries one
+ * idempotency key; both acknowledgements default to false and the void of
+ * the old entry deactivates (never copies) an active allocation.
+ */
+export interface ReplaceDraft {
+  activityId: string;
+  version: number;
+  expectedLedgerVersion: number | null;
+  localAccountId: string | null;
+  currency: FinancialAccountCurrency;
+  kind: 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER';
+  description: string;
+  category: string;
+  refundOfTransactionId: string;
+  acknowledgeDisclosure: boolean;
+  acknowledgeAllocationRemoval: boolean;
+  idempotencyKey: string;
+}
+
+export function replaceDraftFor(
+  activity: BankActivity,
+  expectedLedgerVersion: number | null,
+): ReplaceDraft {
+  return {
+    activityId: activity.id,
+    version: activity.version,
+    expectedLedgerVersion,
+    localAccountId: activity.localAccountId,
+    currency: activity.money?.currency ?? 'USD',
+    kind: 'EXPENSE',
+    description: activity.descriptionValid
+      ? (activity.providerDescription ?? '')
+      : '',
+    category: '',
+    refundOfTransactionId: '',
+    acknowledgeDisclosure: false,
+    acknowledgeAllocationRemoval: false,
     idempotencyKey: crypto.randomUUID(),
   };
 }

@@ -4,8 +4,11 @@ import com.housesync.finance.activity.application.BankActivityService;
 import com.housesync.finance.activity.application.BankActivityService.Filters;
 import com.housesync.finance.activity.web.BankActivityRequests.ConfirmBankActivityRequest;
 import com.housesync.finance.activity.web.BankActivityRequests.DismissBankActivityRequest;
+import com.housesync.finance.activity.web.BankActivityRequests.ReplaceBankActivityRequest;
+import com.housesync.finance.activity.web.BankActivityRequests.ResolveBankActivityRequest;
 import com.housesync.finance.activity.web.BankActivityResponses.BankActivityDecisionResponse;
 import com.housesync.finance.activity.web.BankActivityResponses.BankActivityListResponse;
+import com.housesync.finance.activity.web.BankActivityResponses.BankActivityReplaceResponse;
 import com.housesync.finance.activity.web.BankActivityResponses.BankActivityResponse;
 import com.housesync.finance.activity.web.BankActivityResponses.MoneyResponse;
 import com.housesync.finance.connection.web.ConnectionLinkController;
@@ -31,9 +34,9 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * Owner-private bank-activity inbox. Reads and decisions are owner-scoped; foreign,
- * former-member, other-owner, and missing resources share one indistinguishable 404. Confirm and
- * dismiss require a valid Idempotency-Key and current observation version; a replay reauthorizes
- * and returns the persisted outcome.
+ * former-member, other-owner, and missing resources share one indistinguishable 404. Confirm,
+ * dismiss, resolve, and replace require a valid Idempotency-Key and current versions; a replay
+ * reauthorizes and returns the persisted outcome.
  */
 @RestController
 @RequestMapping("/api/households/{householdId}/bank-activity")
@@ -153,6 +156,61 @@ public class BankActivityController {
             decision.transactionVersion()));
   }
 
+  @PostMapping(path = "/{activityId}/resolve", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public ResponseEntity<BankActivityDecisionResponse> resolve(
+      @PathVariable UUID householdId,
+      @PathVariable UUID activityId,
+      @RequestHeader(name = "Idempotency-Key", required = false) String rawKey,
+      @RequestParam MultiValueMap<String, String> query,
+      @RequestBody(required = false) ResolveBankActivityRequest body,
+      Authentication authentication) {
+    ConnectionLinkController.rejectQuery(query);
+    UUID key = ConnectionLinkController.parseIdempotencyKey(rawKey);
+    BankActivityService.ResolveRequest request = parseResolve(body);
+    BankActivityService.Decision decision =
+        activity.resolve(
+            householdId,
+            activityId,
+            ConnectionLinkController.actorId(authentication),
+            key,
+            request);
+    // Resolution updates the review in place; fresh and replayed outcomes both return 200.
+    return ConnectionLinkController.noCache(
+        HttpStatus.OK,
+        new BankActivityDecisionResponse(
+            toResponse(decision.activity()),
+            decision.transactionId(),
+            decision.transactionVersion()));
+  }
+
+  @PostMapping(path = "/{activityId}/replace-ledger", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public ResponseEntity<BankActivityReplaceResponse> replaceLedger(
+      @PathVariable UUID householdId,
+      @PathVariable UUID activityId,
+      @RequestHeader(name = "Idempotency-Key", required = false) String rawKey,
+      @RequestParam MultiValueMap<String, String> query,
+      @RequestBody(required = false) ReplaceBankActivityRequest body,
+      Authentication authentication) {
+    ConnectionLinkController.rejectQuery(query);
+    UUID key = ConnectionLinkController.parseIdempotencyKey(rawKey);
+    BankActivityService.ReplaceRequest request = parseReplace(body);
+    BankActivityService.ReplaceDecision decision =
+        activity.replaceLedger(
+            householdId,
+            activityId,
+            ConnectionLinkController.actorId(authentication),
+            key,
+            request);
+    // The persisted replacement replays identically; a fresh replacement returns 201.
+    return ConnectionLinkController.noCache(
+        decision.replayed() ? HttpStatus.OK : HttpStatus.CREATED,
+        new BankActivityReplaceResponse(
+            toResponse(decision.activity()),
+            decision.transaction(),
+            decision.supersededTransactionId(),
+            decision.supersededTransactionVersion()));
+  }
+
   private static BankActivityService.ConfirmRequest parseConfirm(ConfirmBankActivityRequest body) {
     if (body == null) {
       throw new ValidationFailedException(Map.of());
@@ -203,6 +261,90 @@ public class BankActivityController {
         body.categoryPresent(),
         refundId,
         acknowledge);
+  }
+
+  private static BankActivityService.ResolveRequest parseResolve(ResolveBankActivityRequest body) {
+    if (body == null) {
+      throw new ValidationFailedException(Map.of());
+    }
+    Map<String, String> errors = new LinkedHashMap<>();
+    if (!body.expectedVersionPresent()
+        || body.expectedVersion() == null
+        || body.expectedVersion() < 0) {
+      errors.put("expectedVersion", "Provide the current bank activity version.");
+    }
+    if (!body.expectedLedgerVersionPresent()
+        || body.expectedLedgerVersion() == null
+        || body.expectedLedgerVersion() < 0) {
+      errors.put("expectedLedgerVersion", "Provide the current ledger entry version.");
+    }
+    if (!body.actionPresent() || body.action() == null) {
+      errors.put("action", "Choose a supported resolution.");
+    }
+    if (!errors.isEmpty()) {
+      throw new ValidationFailedException(errors);
+    }
+    return new BankActivityService.ResolveRequest(
+        body.expectedVersion(), body.expectedLedgerVersion(), body.action(), body.fields());
+  }
+
+  private static BankActivityService.ReplaceRequest parseReplace(ReplaceBankActivityRequest body) {
+    if (body == null) {
+      throw new ValidationFailedException(Map.of());
+    }
+    Map<String, String> errors = new LinkedHashMap<>();
+    if (!body.expectedVersionPresent()
+        || body.expectedVersion() == null
+        || body.expectedVersion() < 0) {
+      errors.put("expectedVersion", "Provide the current bank activity version.");
+    }
+    if (!body.expectedLedgerVersionPresent()
+        || body.expectedLedgerVersion() == null
+        || body.expectedLedgerVersion() < 0) {
+      errors.put("expectedLedgerVersion", "Provide the current ledger entry version.");
+    }
+    TransactionKind kind = null;
+    if (body.kind() != null) {
+      try {
+        kind = TransactionKind.valueOf(body.kind());
+      } catch (IllegalArgumentException rejected) {
+        errors.put("kind", "Choose expense, income, refund, or transfer.");
+      }
+    } else {
+      errors.put("kind", "Choose expense, income, refund, or transfer.");
+    }
+    String description = body.description();
+    if (body.descriptionPresent() && description == null) {
+      errors.put("description", "Enter a description.");
+    }
+    UUID refundId = null;
+    if (body.refundOfTransactionIdPresent()) {
+      if (body.refundOfTransactionId() == null) {
+        errors.put("refundOfTransactionId", "Choose the expense being refunded.");
+      } else {
+        try {
+          refundId = UUID.fromString(body.refundOfTransactionId());
+        } catch (IllegalArgumentException rejected) {
+          errors.put("refundOfTransactionId", "Choose the expense being refunded.");
+        }
+      }
+    } else if (kind == TransactionKind.REFUND) {
+      errors.put("refundOfTransactionId", "Choose the expense being refunded.");
+    }
+    if (!errors.isEmpty()) {
+      throw new ValidationFailedException(errors);
+    }
+    // Missing acknowledgements canonicalize to false, matching the idempotency contract.
+    return new BankActivityService.ReplaceRequest(
+        body.expectedVersion(),
+        body.expectedLedgerVersion(),
+        kind,
+        description,
+        body.category(),
+        body.categoryPresent(),
+        refundId,
+        Boolean.TRUE.equals(body.acknowledgeDisclosure()),
+        Boolean.TRUE.equals(body.acknowledgeAllocationRemoval()));
   }
 
   static BankActivityResponse toResponse(BankActivityService.View view) {
