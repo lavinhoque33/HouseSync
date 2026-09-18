@@ -92,6 +92,124 @@ abstract class ConnectedFinanceITSupport {
         key);
   }
 
+  /** Linked connection plus the local IDs a test needs to drive sync and admission. */
+  protected record ConnectedLink(
+      String connectionId,
+      String seed,
+      String accessToken,
+      String checkingMappingId,
+      String savingsMappingId,
+      String checkingAccountId,
+      String savingsAccountId) {
+
+    String remoteCheckingId() {
+      return "fake-remote-checking-" + seed;
+    }
+
+    String remoteSavingsId() {
+      return "fake-remote-savings-" + seed;
+    }
+  }
+
+  /** Links and selects the requested discovered accounts through the real HTTP surface. */
+  protected ConnectedLink linkAndSelect(
+      Agent owner, String householdId, boolean selectChecking, boolean selectSavings)
+      throws Exception {
+    Resp started = startLink(owner, householdId, UUID.randomUUID());
+    assertThat(started.status()).isEqualTo(201);
+    String attemptId = started.json().path("id").asText();
+    String publicToken =
+        com.housesync.finance.connection.plaid.FakePlaidAdapter.publicTokenFor(
+            UUID.fromString(attemptId));
+    Resp completed =
+        completeLink(
+            owner,
+            householdId,
+            attemptId,
+            UUID.randomUUID(),
+            "{\"publicToken\":\"" + publicToken + "\"}");
+    assertThat(completed.status()).isEqualTo(202);
+    String connectionId = completed.json().path("connectionId").asText();
+
+    Resp listed = owner.get("/api/households/" + householdId + "/financial-connections");
+    assertThat(listed.status()).isEqualTo(200);
+    int version = -1;
+    for (JsonNode item : listed.json().path("items")) {
+      if (connectionId.equals(item.path("id").asText())) {
+        version = item.path("version").asInt();
+      }
+    }
+    assertThat(version).isGreaterThanOrEqualTo(0);
+
+    Resp accounts =
+        owner.get(
+            "/api/households/"
+                + householdId
+                + "/financial-connections/"
+                + connectionId
+                + "/accounts");
+    assertThat(accounts.status()).isEqualTo(200);
+    String checkingMapping = null;
+    String savingsMapping = null;
+    for (JsonNode item : accounts.json().path("items")) {
+      if ("CHECKING".equals(item.path("kind").asText())) {
+        checkingMapping = item.path("mappingId").asText();
+      } else if ("SAVINGS".equals(item.path("kind").asText())) {
+        savingsMapping = item.path("mappingId").asText();
+      }
+    }
+    assertThat(checkingMapping).isNotNull();
+    assertThat(savingsMapping).isNotNull();
+
+    StringBuilder ids = new StringBuilder();
+    if (selectChecking) {
+      ids.append('"').append(checkingMapping).append('"');
+    }
+    if (selectSavings) {
+      if (ids.length() > 0) ids.append(',');
+      ids.append('"').append(savingsMapping).append('"');
+    }
+    Resp selected =
+        owner.request(
+            "POST",
+            "/api/households/"
+                + householdId
+                + "/financial-connections/"
+                + connectionId
+                + "/account-selection",
+            "{\"expectedVersion\":" + version + ",\"accountMappingIds\":[" + ids + "]}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(selected.status()).isEqualTo(200);
+    String checkingAccount = null;
+    String savingsAccount = null;
+    for (JsonNode account : selected.json().path("accounts")) {
+      if ("CHECKING".equals(account.path("kind").asText())) {
+        checkingAccount = account.path("id").asText();
+      } else if ("SAVINGS".equals(account.path("kind").asText())) {
+        savingsAccount = account.path("id").asText();
+      }
+    }
+    String seed = publicToken.substring("fake-public-".length());
+    return new ConnectedLink(
+        connectionId,
+        seed,
+        "fake-access-" + seed,
+        checkingMapping,
+        savingsMapping,
+        checkingAccount,
+        savingsAccount);
+  }
+
+  /** Current connection version from the owner-scoped detail endpoint. */
+  protected int liveConnectionVersion(Agent owner, String householdId, String connectionId)
+      throws Exception {
+    Resp response =
+        owner.get("/api/households/" + householdId + "/financial-connections/" + connectionId);
+    assertThat(response.status()).isEqualTo(200);
+    return response.json().path("version").asInt();
+  }
+
   protected static String identityJson(String email) {
     return "{\"email\":\"" + email + "\",\"password\":\"" + PASSWORD + "\"}";
   }

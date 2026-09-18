@@ -33,6 +33,9 @@ public interface ConnectionLinkAttemptRepository
   java.util.List<ConnectionLinkAttemptEntity> findByConnectionIdAndState(
       UUID connectionId, String state);
 
+  java.util.List<ConnectionLinkAttemptEntity> findByConnectionIdAndStateIn(
+      UUID connectionId, java.util.Collection<String> states);
+
   /**
    * Expired attempts that never reached exchange, for the scheduled scrubber. An attempt is due
    * when the earliest of the local attempt expiry and the provider token expiry has passed.

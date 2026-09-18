@@ -31,11 +31,7 @@ public class ConnectedFinanceConfiguration {
   @Bean
   @org.springframework.context.annotation.Primary
   PlaidAdapter plaidAdapter(
-      ConnectedFinanceProperties properties,
-      ObjectMapper mapper,
-      Clock clock,
-      PlaidHttpAdapter http,
-      FakePlaidAdapter fake) {
+      ConnectedFinanceProperties properties, PlaidHttpAdapter http, FakePlaidAdapter fake) {
     if ("fake".equalsIgnoreCase(properties.getProvider())) {
       if (!properties.isFakeAllowed()) {
         throw new IllegalStateException(
@@ -48,8 +44,11 @@ public class ConnectedFinanceConfiguration {
 
   @Bean
   PlaidHttpAdapter plaidHttpAdapter(
-      ConnectedFinanceProperties properties, ObjectMapper mapper, Clock clock) {
-    return new PlaidHttpAdapter(properties, mapper, clock);
+      ConnectedFinanceProperties properties,
+      @org.springframework.beans.factory.annotation.Qualifier("providerJsonMapper")
+          ObjectMapper providerJsonMapper,
+      Clock clock) {
+    return new PlaidHttpAdapter(properties, providerJsonMapper, clock);
   }
 
   @Bean

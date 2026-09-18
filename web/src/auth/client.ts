@@ -20,6 +20,16 @@ import {
   type FinancialConnectionPage,
   type LinkAttempt,
 } from '../finance/connections';
+import {
+  confirmBankActivityBody,
+  dismissBankActivityBody,
+  parseBankActivityDecision,
+  parseBankActivityPage,
+  type BankActivityDecision,
+  type BankActivityDismissReason,
+  type BankActivityPage,
+  type ConfirmBody,
+} from '../finance/bank-activity';
 import { isRegionShapedZone } from '../finance/reporting';
 
 export type { FinancialAccountCurrency } from '../finance/money';
@@ -66,6 +76,13 @@ export type ApiErrorCode =
   | 'ALLOCATION_NOT_FOUND'
   | 'ALLOCATION_CONFLICT'
   | 'FINANCE_BUSY'
+  | 'BANK_ACTIVITY_NOT_FOUND'
+  | 'OBSERVATION_NOT_POSTED'
+  | 'OBSERVATION_ALREADY_CONFIRMED'
+  | 'OBSERVATION_INVALID'
+  | 'OBSERVATION_DISMISSED'
+  | 'OBSERVATION_ADMITTED'
+  | 'MANUAL_SYNC_RATE_LIMITED'
   | 'INTERNAL_ERROR'
   | 'NETWORK_ERROR'
   | 'UNKNOWN_ERROR';
@@ -135,6 +152,13 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'ALLOCATION_NOT_FOUND',
     'ALLOCATION_CONFLICT',
     'FINANCE_BUSY',
+    'BANK_ACTIVITY_NOT_FOUND',
+    'OBSERVATION_NOT_POSTED',
+    'OBSERVATION_ALREADY_CONFIRMED',
+    'OBSERVATION_INVALID',
+    'OBSERVATION_DISMISSED',
+    'OBSERVATION_ADMITTED',
+    'MANUAL_SYNC_RATE_LIMITED',
     'INTERNAL_ERROR',
   ];
   return codes.includes(value as ApiErrorCode)
@@ -178,7 +202,12 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
         key === 'from' ||
         key === 'to' ||
         key === 'money.amount' ||
-        key === 'money.currency') &&
+        key === 'money.currency' ||
+        key === 'acknowledgeDisclosure' ||
+        key === 'reason' ||
+        key === 'state' ||
+        key === 'review' ||
+        key === 'connectionId') &&
       typeof message === 'string'
     ) {
       result[key] = message;
@@ -1912,6 +1941,218 @@ export async function postConnectionDisconnect(
   );
 }
 
+export type {
+  BankActivity,
+  BankActivityDecision,
+  BankActivityDismissReason,
+  BankActivityPage,
+  BankActivityReviewState,
+  BankActivityState,
+  ConfirmBody,
+} from '../finance/bank-activity';
+
+/**
+ * Bank-activity and manual-sync endpoints
+ * (docs/architecture/connected-finance-contract.md, section 7). Reads are
+ * owner-scoped; decisions carry a version plus an Idempotency-Key, and the
+ * confirm body never includes derived account/money/date/source/visibility
+ * fields.
+ */
+
+/**
+ * Manual sync: a coalesced 202 operation behind the per-connection 60-second
+ * interval. 429 means the client is asking too soon; the UI never promises
+ * immediate new bank data.
+ */
+export async function postConnectionSync(
+  householdId: string,
+  connectionId: string,
+  expectedVersion: number,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<ConnectionOperation> {
+  const response = await postWithIdempotencyKey(
+    `${connectionBase(householdId)}/financial-connections/${encodeURIComponent(connectionId)}/sync`,
+    { expectedVersion },
+    idempotencyKey,
+    csrf,
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 202) {
+    const operation = parseConnectionOperation(
+      await readJson<unknown>(response),
+    );
+    if (!operation) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected sync response.',
+      );
+    }
+    return operation;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400
+      ? 'VALIDATION_FAILED'
+      : response.status === 409
+        ? 'RESOURCE_VERSION_CONFLICT'
+        : response.status === 429
+          ? 'MANUAL_SYNC_RATE_LIMITED'
+          : 'UNKNOWN_ERROR',
+    'Bank sync could not be started.',
+  );
+}
+
+export interface BankActivityQuery {
+  limit?: number | undefined;
+  offset?: number | undefined;
+  connectionId?: string | undefined;
+  accountId?: string | undefined;
+  state?: string | undefined;
+  review?: string | undefined;
+}
+
+/** Owner-scoped private inbox page; bounded limit/offset like every finance feed. */
+export async function fetchBankActivity(
+  householdId: string,
+  query: BankActivityQuery = {},
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<BankActivityPage> {
+  const parameters = new URLSearchParams();
+  parameters.set('limit', String(query.limit ?? 100));
+  parameters.set('offset', String(query.offset ?? 0));
+  if (query.connectionId) parameters.set('connectionId', query.connectionId);
+  if (query.accountId) parameters.set('accountId', query.accountId);
+  if (query.state) parameters.set('state', query.state);
+  if (query.review) parameters.set('review', query.review);
+  const response = await apiFetch(
+    `${connectionBase(householdId)}/bank-activity?${parameters.toString()}`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load bank activity.',
+    );
+  }
+  const page = parseBankActivityPage(await readJson<unknown>(response));
+  if (!page) {
+    throw unexpectedConnectionResponse(
+      response.status,
+      'The server returned an unexpected bank activity response.',
+    );
+  }
+  return page;
+}
+
+/** Confirm one posted observation into the ledger; 201 admits, 200 replays. */
+export async function confirmBankActivity(
+  householdId: string,
+  activityId: string,
+  body: ConfirmBody,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<BankActivityDecision> {
+  const response = await postWithIdempotencyKey(
+    `${connectionBase(householdId)}/bank-activity/${encodeURIComponent(activityId)}/confirm`,
+    confirmBankActivityBody(body),
+    idempotencyKey,
+    csrf,
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200 || response.status === 201) {
+    const decision = parseBankActivityDecision(
+      await readJson<unknown>(response),
+    );
+    if (!decision) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected bank activity response.',
+      );
+    }
+    return decision;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Bank activity could not be confirmed.',
+  );
+}
+
+/** Dismiss any unadmitted observation; never a ledger decision. */
+export async function dismissBankActivity(
+  householdId: string,
+  activityId: string,
+  expectedVersion: number,
+  reason: BankActivityDismissReason,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<BankActivityDecision> {
+  const response = await postWithIdempotencyKey(
+    `${connectionBase(householdId)}/bank-activity/${encodeURIComponent(activityId)}/dismiss`,
+    dismissBankActivityBody(expectedVersion, reason),
+    idempotencyKey,
+    csrf,
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const decision = parseBankActivityDecision(
+      await readJson<unknown>(response),
+    );
+    if (!decision) {
+      throw unexpectedConnectionResponse(
+        response.status,
+        'The server returned an unexpected bank activity response.',
+      );
+    }
+    return decision;
+  }
+  if (response.status === 401) {
+    throw await parseErrorResponse(
+      response,
+      'UNAUTHENTICATED',
+      'You are not signed in.',
+    );
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'Bank activity could not be dismissed.',
+  );
+}
+
 export type TransactionKind = 'EXPENSE' | 'INCOME' | 'REFUND' | 'TRANSFER';
 export type TransactionStatus = 'POSTED' | 'VOIDED';
 export type TransactionVisibility = 'PRIVATE' | 'HOUSEHOLD';
@@ -1972,7 +2213,12 @@ export interface Transaction {
   description: string;
   category: string | null;
   visibility: TransactionVisibility;
-  source: 'MANUAL';
+  /**
+   * Bank admission widens the persisted source: CONNECTED entries are admitted
+   * only through bank-activity confirmation, and every correction, sharing,
+   * and allocation action stays available to them.
+   */
+  source: FinancialAccountSource;
   status: TransactionStatus;
   refundOfTransactionId: string | null;
   version: number;
@@ -2088,7 +2334,7 @@ function parseTransaction(value: unknown): Transaction | undefined {
     typeof record.description !== 'string' ||
     (record.category !== null && !isCategoryToken(record.category)) ||
     (record.visibility !== 'PRIVATE' && record.visibility !== 'HOUSEHOLD') ||
-    record.source !== 'MANUAL' ||
+    (record.source !== 'MANUAL' && record.source !== 'CONNECTED') ||
     (record.status !== 'POSTED' && record.status !== 'VOIDED') ||
     typeof record.version !== 'number' ||
     !Number.isInteger(record.version) ||
@@ -2122,7 +2368,7 @@ function parseTransaction(value: unknown): Transaction | undefined {
     description: record.description,
     category: record.category === null ? null : (record.category as string),
     visibility: record.visibility,
-    source: 'MANUAL',
+    source: record.source,
     status: record.status,
     // The guard above proved the refund shape per kind.
     refundOfTransactionId:

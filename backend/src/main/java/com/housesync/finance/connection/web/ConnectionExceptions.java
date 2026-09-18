@@ -27,4 +27,25 @@ public final class ConnectionExceptions {
 
   /** Retryable provider or race outcome; mapped to 503 without provider detail. */
   public static final class ProviderTransientException extends RuntimeException {}
+
+  /** Per-connection manual sync interval exceeded; the client waits and coalesces. */
+  public static final class ManualSyncRateLimitedException extends RuntimeException {}
+
+  /** Foreign, missing, other-owner, or former-member bank-activity resources share one 404. */
+  public static final class BankActivityNotFoundException extends RuntimeException {}
+
+  /** Observation is pending or removed and cannot be confirmed into the ledger. */
+  public static final class ObservationNotPostedException extends RuntimeException {}
+
+  /** The observation already has a current ledger association. */
+  public static final class ObservationAlreadyConfirmedException extends RuntimeException {}
+
+  /** The observation is quarantined as invalid and cannot be confirmed. */
+  public static final class ObservationInvalidException extends RuntimeException {}
+
+  /** The observation was dismissed; a material provider revision must reopen it first. */
+  public static final class ObservationDismissedException extends RuntimeException {}
+
+  /** Dismissal target is already admitted; dismiss only applies to unadmitted observations. */
+  public static final class ObservationAdmittedException extends RuntimeException {}
 }

@@ -90,6 +90,28 @@ describe('transaction typed client', () => {
     });
   });
 
+  it('accepts CONNECTED source entries with all correction fields intact', async () => {
+    stubFetch(() =>
+      jsonResponse({
+        items: [
+          validTransaction({
+            source: 'CONNECTED',
+            category: 'GROCERIES',
+            visibility: 'HOUSEHOLD',
+          }),
+        ],
+        limit: 100,
+        offset: 0,
+        hasMore: false,
+      }),
+    );
+    const page = await fetchTransactions(HOUSEHOLD_ID, 'OWN');
+    expect(page.items[0]?.source).toBe('CONNECTED');
+    expect(page.items[0]?.category).toBe('GROCERIES');
+    expect(page.items[0]?.visibility).toBe('HOUSEHOLD');
+    expect(page.items[0]?.accountId).toBe(ACCOUNT_ID);
+  });
+
   it('rejects an item outside the exact 16-field transaction contract', async () => {
     const malformed: Array<Record<string, unknown>> = [
       // Unsupported kind.

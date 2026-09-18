@@ -41,6 +41,10 @@ public final class ConnectionResponses {
       String state,
       long generation,
       int version,
+      /** Separate sync worker state: IDLE/QUEUED/RUNNING/RETRY_WAIT/FAILED. */
+      String syncState,
+      /** True once the provider reported a completed historical update for this Item. */
+      boolean historyReady,
       Instant lastSuccessfulSyncAt,
       Instant createdAt,
       Instant updatedAt) {}

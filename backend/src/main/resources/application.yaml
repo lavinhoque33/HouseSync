@@ -53,6 +53,10 @@ app:
     webhook-url: ${PLAID_WEBHOOK_URL:}
     encryption-keys: ${CONNECTED_FINANCE_KEYS:}
     attempt-ttl-minutes: 30
+    # Documented application ceilings are 50,000 deltas / 50 MiB; startup validation rejects any
+    # configured value above them, so lowering these for diagnostics never weakens production.
+    sync-max-round-deltas: ${CONNECTED_FINANCE_SYNC_MAX_DELTAS:50000}
+    sync-max-round-bytes: ${CONNECTED_FINANCE_SYNC_MAX_BYTES:52428800}
     revocation-poll-ms: 60000
 
 management:

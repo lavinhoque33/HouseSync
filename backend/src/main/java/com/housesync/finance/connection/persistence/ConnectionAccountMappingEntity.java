@@ -60,6 +60,10 @@ public class ConnectionAccountMappingEntity {
   @Column(name = "updated_at", nullable = false)
   private Instant updatedAt;
 
+  /** True once a committed import round covered this mapping while it was selected. */
+  @Column(name = "history_imported", nullable = false)
+  private boolean historyImported;
+
   protected ConnectionAccountMappingEntity() {}
 
   public ConnectionAccountMappingEntity(
@@ -171,6 +175,28 @@ public class ConnectionAccountMappingEntity {
 
   public void setSelected(boolean selected, Instant now) {
     this.selected = selected;
+    this.updatedAt = now;
+  }
+
+  public boolean isHistoryImported() {
+    return historyImported;
+  }
+
+  /** A committed round covered this mapping; later selection changes preserve deduplication. */
+  public void markHistoryImported(Instant now) {
+    this.historyImported = true;
+    this.updatedAt = now;
+  }
+
+  /**
+   * Provider metadata that contradicts an already-admitted account identity never rewrites the
+   * admitted kind or currency. The mapping is deselected and marked ineligible so conflicting
+   * observations are blocked from admission until the owner resolves the conflict.
+   */
+  public void blockIdentityConflict(String exclusionReason, Instant now) {
+    this.selected = false;
+    this.eligible = false;
+    this.exclusionReason = exclusionReason;
     this.updatedAt = now;
   }
 }

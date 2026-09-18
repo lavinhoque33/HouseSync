@@ -44,14 +44,17 @@ public class FinancialConnectionController {
   private final ConnectionQueryService queries;
   private final ConnectionSelectionService selection;
   private final ConnectionLifecycleService lifecycle;
+  private final com.housesync.finance.connection.application.ConnectionSyncService sync;
 
   public FinancialConnectionController(
       ConnectionQueryService queries,
       ConnectionSelectionService selection,
-      ConnectionLifecycleService lifecycle) {
+      ConnectionLifecycleService lifecycle,
+      com.housesync.finance.connection.application.ConnectionSyncService sync) {
     this.queries = queries;
     this.selection = selection;
     this.lifecycle = lifecycle;
+    this.sync = sync;
   }
 
   @GetMapping
@@ -189,6 +192,30 @@ public class FinancialConnectionController {
             view.expiresAt()));
   }
 
+  /**
+   * Manual sync: a coalesced 202 operation behind the per-connection 60-second interval. The UI
+   * never promises immediate new bank data; the operation GET reports the durable outcome.
+   */
+  @PostMapping(path = "/{connectionId}/sync", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public ResponseEntity<ConnectionOperationResponse> sync(
+      @PathVariable UUID householdId,
+      @PathVariable UUID connectionId,
+      @RequestHeader(name = "Idempotency-Key", required = false) String rawKey,
+      @RequestParam MultiValueMap<String, String> query,
+      @RequestBody(required = false) ExpectedVersionRequest body,
+      Authentication authentication) {
+    ConnectionLinkController.rejectQuery(query);
+    UUID key = ConnectionLinkController.parseIdempotencyKey(rawKey);
+    int version = requireVersion(body);
+    UUID actor = ConnectionLinkController.actorId(authentication);
+    com.housesync.finance.connection.application.ConnectionSyncService.ManualSyncResult result =
+        sync.requestManual(householdId, connectionId, actor, key, version);
+    return ConnectionLinkController.noCache(
+        HttpStatus.ACCEPTED,
+        ConnectionLinkController.toOperation(
+            householdId, queries.operation(householdId, result.operationId(), actor)));
+  }
+
   @PostMapping(path = "/{connectionId}/disconnect", consumes = MediaType.APPLICATION_JSON_VALUE)
   public ResponseEntity<ConnectionOperationResponse> disconnect(
       @PathVariable UUID householdId,
@@ -261,6 +288,8 @@ public class FinancialConnectionController {
         connection.getState(),
         connection.getGeneration(),
         connection.getVersion(),
+        connection.getSyncState(),
+        connection.isHistoryReady(),
         connection.getLastSuccessfulSyncAt(),
         connection.getCreatedAt(),
         connection.getUpdatedAt());

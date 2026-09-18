@@ -94,6 +94,73 @@ public class FinancialTransactionEntity {
       String category,
       UUID refundOfTransactionId,
       Instant createdAt) {
+    this(
+        id,
+        householdId,
+        ownerUserId,
+        accountId,
+        kind,
+        amount,
+        currency,
+        occurredOn,
+        description,
+        visibility,
+        category,
+        refundOfTransactionId,
+        "MANUAL",
+        createdAt);
+  }
+
+  /**
+   * One-time bank-activity admission: the ledger entry's provenance is CONNECTED and it may only be
+   * created by the confirmation service, never by manual POST.
+   */
+  public static FinancialTransactionEntity connected(
+      UUID id,
+      UUID householdId,
+      UUID ownerUserId,
+      UUID accountId,
+      TransactionKind kind,
+      BigDecimal amount,
+      SupportedCurrency currency,
+      LocalDate occurredOn,
+      String description,
+      String visibility,
+      String category,
+      UUID refundOfTransactionId,
+      Instant createdAt) {
+    return new FinancialTransactionEntity(
+        id,
+        householdId,
+        ownerUserId,
+        accountId,
+        kind,
+        amount,
+        currency,
+        occurredOn,
+        description,
+        visibility,
+        category,
+        refundOfTransactionId,
+        "CONNECTED",
+        createdAt);
+  }
+
+  private FinancialTransactionEntity(
+      UUID id,
+      UUID householdId,
+      UUID ownerUserId,
+      UUID accountId,
+      TransactionKind kind,
+      BigDecimal amount,
+      SupportedCurrency currency,
+      LocalDate occurredOn,
+      String description,
+      String visibility,
+      String category,
+      UUID refundOfTransactionId,
+      String source,
+      Instant createdAt) {
     this.id = id;
     this.householdId = householdId;
     this.ownerUserId = ownerUserId;
@@ -104,7 +171,7 @@ public class FinancialTransactionEntity {
     this.occurredOn = occurredOn;
     this.description = description;
     this.category = category;
-    this.source = "MANUAL";
+    this.source = source;
     this.visibility = visibility;
     this.status = TransactionStatus.POSTED;
     this.refundOfTransactionId = refundOfTransactionId;

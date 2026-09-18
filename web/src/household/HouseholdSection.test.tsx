@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react';
 import { StrictMode, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -115,6 +116,11 @@ interface RouteHandlers {
   ) => Response | Promise<Response>;
   financialConnectionsGet?: (
     householdId?: string,
+  ) => Response | Promise<Response>;
+  bankActivityGet?: (householdId?: string) => Response | Promise<Response>;
+  bankActivityPost?: (
+    activityId?: string,
+    action?: string,
   ) => Response | Promise<Response>;
   transactionsGet?: (householdId?: string) => Response | Promise<Response>;
   categoriesGet?: () => Response | Promise<Response>;
@@ -241,6 +247,34 @@ function stubFetch(routes: RouteHandlers) {
           ) ??
           jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
         );
+      }
+      const bankActivityMatch =
+        /^\/api\/households\/([^/]+)\/bank-activity(?:\/([^/?]+))?(?:\/(confirm|dismiss))?(?:\?.*)?$/.exec(
+          url,
+        );
+      if (bankActivityMatch) {
+        const householdId = decodeURIComponent(bankActivityMatch[1] ?? '');
+        const activityId = bankActivityMatch[2];
+        const action = bankActivityMatch[3];
+        if ((init?.method ?? 'GET') === 'GET' && activityId === undefined) {
+          return (
+            routes.bankActivityGet?.(householdId) ??
+            jsonResponse({
+              items: [],
+              limit: 100,
+              offset: 0,
+              hasMore: false,
+              unreviewedCount: 0,
+              changedCount: 0,
+            })
+          );
+        }
+        if (init?.method === 'POST' && action !== undefined) {
+          if (!routes.bankActivityPost) {
+            throw new Error('unexpected POST bank-activity decision');
+          }
+          return routes.bankActivityPost(activityId, action);
+        }
       }
       const transactionsMatch =
         /^\/api\/households\/([^/]+)\/transactions/.exec(url);
@@ -1658,5 +1692,310 @@ describe('financial section authority gating', () => {
     expect(
       screen.getByRole('button', { name: 'Add private account' }),
     ).toBeDisabled();
+  });
+});
+
+describe('bank activity to ledger propagation', () => {
+  const CONNECTION_ID = '22222222-2222-4222-8222-222222222222';
+  const CONNECTED_ACCOUNT_ID = '44444444-4444-4444-8444-444444444444';
+  const MANUAL_ACCOUNT_ID = '10000000-0000-4000-8000-000000000001';
+  const ACTIVITY_ID = '11111111-1111-4111-8111-111111111111';
+  const PENDING_ACTIVITY_ID = '11111111-1111-4111-8111-111111111112';
+  const LEDGER_ID = '55555555-5555-4555-8555-555555555555';
+
+  const manualAccount = {
+    id: MANUAL_ACCOUNT_ID,
+    householdId: HOUSEHOLD_1.id,
+    ownerUserId: USER.id,
+    name: 'Daily spending',
+    kind: 'CHECKING',
+    currency: 'BRL',
+    source: 'MANUAL',
+    visibility: 'PRIVATE',
+    status: 'ACTIVE',
+    version: 0,
+    createdAt: '2026-09-16T12:00:00Z',
+    updatedAt: '2026-09-16T12:00:00Z',
+  };
+  const connectedAccount = {
+    id: CONNECTED_ACCOUNT_ID,
+    householdId: HOUSEHOLD_1.id,
+    ownerUserId: USER.id,
+    name: 'Sandbox checking',
+    kind: 'CHECKING',
+    currency: 'USD',
+    source: 'CONNECTED',
+    visibility: 'PRIVATE',
+    status: 'ACTIVE',
+    version: 0,
+    createdAt: '2026-09-16T12:00:00Z',
+    updatedAt: '2026-09-16T12:00:00Z',
+  };
+  const connection = {
+    id: CONNECTION_ID,
+    householdId: HOUSEHOLD_1.id,
+    provider: 'PLAID',
+    environment: 'SANDBOX',
+    state: 'ACTIVE',
+    generation: 0,
+    version: 1,
+    syncState: 'IDLE',
+    historyReady: true,
+    lastSuccessfulSyncAt: '2026-09-18T11:00:00Z',
+    createdAt: '2026-09-18T10:00:00Z',
+    updatedAt: '2026-09-18T10:00:00Z',
+  };
+  function activity(overrides: Record<string, unknown> = {}) {
+    return {
+      id: ACTIVITY_ID,
+      connectionId: CONNECTION_ID,
+      accountMappingId: '33333333-3333-4333-8333-333333333333',
+      localAccountId: CONNECTED_ACCOUNT_ID,
+      state: 'POSTED',
+      reviewState: 'UNREVIEWED',
+      changeState: null,
+      money: { amount: '-12.34', currency: 'USD' },
+      occurredOn: '2026-09-10',
+      authorizedOn: null,
+      providerDescription: 'Starbucks',
+      descriptionValid: true,
+      pendingPredecessorId: null,
+      invalidReason: null,
+      dismissedReason: null,
+      version: 0,
+      ledgerTransactionId: null,
+      createdAt: '2026-09-18T10:00:00Z',
+      updatedAt: '2026-09-18T10:00:00Z',
+      ...overrides,
+    };
+  }
+  function householdSection(signal: number) {
+    return (
+      <HouseholdSection
+        csrf={CSRF}
+        onCsrfRefreshed={() => {}}
+        onSessionExpired={() => {}}
+        refreshSignal={signal}
+        currentUserId={USER.id}
+      />
+    );
+  }
+
+  it('confirms a posted observation into the visible ledger without losing a manual draft', async () => {
+    let ledgerItems: unknown[] = [];
+    let confirmed = false;
+    const { calls } = stubFetch({
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+      financialAccountsGet: () =>
+        jsonResponse({
+          items: [manualAccount, connectedAccount],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      financialConnectionsGet: () =>
+        jsonResponse({
+          items: [connection],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      transactionsGet: () =>
+        jsonResponse({
+          items: ledgerItems,
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      categoriesGet: () => jsonResponse({ items: CATEGORY_ITEMS }),
+      bankActivityGet: () =>
+        jsonResponse({
+          items: [
+            confirmed
+              ? activity({
+                  reviewState: 'CONFIRMED',
+                  ledgerTransactionId: LEDGER_ID,
+                  version: 1,
+                })
+              : activity(),
+          ],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+          unreviewedCount: confirmed ? 0 : 1,
+          changedCount: 0,
+        }),
+      bankActivityPost: () => {
+        confirmed = true;
+        ledgerItems = [
+          {
+            id: LEDGER_ID,
+            householdId: HOUSEHOLD_1.id,
+            ownerUserId: USER.id,
+            accountId: CONNECTED_ACCOUNT_ID,
+            kind: 'EXPENSE',
+            money: { amount: '-12.34', currency: 'USD' },
+            occurredOn: '2026-09-10',
+            description: 'Starbucks coffee',
+            category: null,
+            visibility: 'PRIVATE',
+            source: 'CONNECTED',
+            status: 'POSTED',
+            refundOfTransactionId: null,
+            version: 0,
+            createdAt: '2026-09-18T10:00:00Z',
+            updatedAt: '2026-09-18T10:00:00Z',
+          },
+        ];
+        return jsonResponse(
+          {
+            activity: activity({
+              reviewState: 'CONFIRMED',
+              ledgerTransactionId: LEDGER_ID,
+              version: 1,
+            }),
+            transactionId: LEDGER_ID,
+            transactionVersion: 0,
+          },
+          201,
+        );
+      },
+    });
+    render(householdSection(0));
+
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
+    // The private inbox and its sync controls are discoverable.
+    expect(await screen.findByText(/Starbucks/)).toBeInTheDocument();
+    expect(
+      await screen.findByRole('list', { name: 'Connected bank sync controls' }),
+    ).toBeInTheDocument();
+
+    // Start a manual-entry draft in the sibling section.
+    fireEvent.change(screen.getByLabelText('Account'), {
+      target: { value: MANUAL_ACCOUNT_ID },
+    });
+    fireEvent.change(screen.getByLabelText('Amount'), {
+      target: { value: '12.34' },
+    });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Draft groceries' },
+    });
+    const ledgerFetchesBefore = calls.filter(({ url }) =>
+      url.includes('/transactions?'),
+    ).length;
+
+    // Confirm the posted observation in the bank-activity inbox.
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /^Confirm bank activity -12.34 USD on 2026-09-10/,
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Add to ledger' }),
+    );
+
+    // The confirmed CONNECTED entry reaches the visible feed without a reload...
+    expect(await screen.findByText('Starbucks coffee')).toBeInTheDocument();
+    // ...while the manual draft survives the sibling ledger refresh.
+    expect(screen.getByLabelText('Description')).toHaveValue('Draft groceries');
+    expect(screen.getByLabelText('Amount')).toHaveValue('12.34');
+    expect(
+      calls.filter(({ url }) => url.includes('/transactions?')).length,
+    ).toBeGreaterThan(ledgerFetchesBefore);
+  });
+
+  it('dismisses a pending observation without refreshing the ledger', async () => {
+    const pendingActivity = activity({
+      id: PENDING_ACTIVITY_ID,
+      state: 'PENDING',
+      occurredOn: '2026-09-11',
+      providerDescription: 'Pending charge',
+    });
+    let dismissed = false;
+    const { calls } = stubFetch({
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+      financialAccountsGet: () =>
+        jsonResponse({
+          items: [manualAccount, connectedAccount],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      financialConnectionsGet: () =>
+        jsonResponse({
+          items: [connection],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      transactionsGet: () =>
+        jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+      categoriesGet: () => jsonResponse({ items: CATEGORY_ITEMS }),
+      bankActivityGet: () =>
+        jsonResponse({
+          items: [
+            dismissed
+              ? {
+                  ...pendingActivity,
+                  reviewState: 'DISMISSED',
+                  dismissedReason: 'NOT_NEEDED',
+                  version: 1,
+                }
+              : pendingActivity,
+          ],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+          unreviewedCount: dismissed ? 0 : 1,
+          changedCount: 0,
+        }),
+      bankActivityPost: () => {
+        dismissed = true;
+        const updated = {
+          ...pendingActivity,
+          reviewState: 'DISMISSED',
+          dismissedReason: 'NOT_NEEDED',
+          version: 1,
+        };
+        return jsonResponse({
+          activity: updated,
+          transactionId: null,
+          transactionVersion: null,
+        });
+      },
+    });
+    render(householdSection(0));
+
+    await screen.findByText('No transactions yet.');
+    await screen.findByText(/Pending charge/);
+    // Wait for the initial sibling loads to settle so the dismiss control is
+    // enabled, re-querying the row each time (the list can re-render).
+    await waitFor(() => {
+      const currentRow = screen.getByText(/Pending charge/).closest('li');
+      expect(
+        within(currentRow as HTMLElement).getByRole('button', {
+          name: /^Dismiss bank activity/,
+        }),
+      ).not.toBeDisabled();
+    });
+    const row = screen.getByText(/Pending charge/).closest('li');
+    if (!row) throw new Error('pending row missing');
+    fireEvent.click(
+      within(row).getByRole('button', { name: /^Dismiss bank activity/ }),
+    );
+    const submitDismiss = await screen.findByRole('button', {
+      name: 'Dismiss item',
+    });
+    expect(submitDismiss).toBeEnabled();
+    fireEvent.click(submitDismiss);
+    await waitFor(() => {
+      expect(calls.some(({ url }) => url.endsWith('/dismiss'))).toBe(true);
+    });
+    expect(await screen.findByText(/retained evidence/)).toBeInTheDocument();
+    // A dismissal is a private inbox decision: the ledger feed is untouched.
+    expect(
+      calls.filter(({ url }) => url.includes('/transactions?')).length,
+    ).toBe(1);
   });
 });

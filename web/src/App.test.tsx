@@ -184,3 +184,21 @@ describe('join route lifetime', () => {
     expect(window.location.href).not.toContain(SECRET);
   });
 });
+
+describe('area badge copy', () => {
+  it('describes private bank sync and review without stale import claims', async () => {
+    stubApp({ current: false });
+    go('/');
+    render(<App />);
+    expect(
+      screen.getByText('Private bank sync & review'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Private bank sync and review/),
+    ).toBeInTheDocument();
+    expect(document.body.textContent ?? '').not.toMatch(
+      /transaction imports arrive|No transaction\s+import|Bank-linking preview/i,
+    );
+    go('/');
+  });
+});

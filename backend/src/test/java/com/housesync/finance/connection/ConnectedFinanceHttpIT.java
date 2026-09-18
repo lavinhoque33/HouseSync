@@ -138,9 +138,13 @@ class ConnectedFinanceHttpIT extends ConnectedFinanceITSupport {
             "state",
             "generation",
             "version",
+            "syncState",
+            "historyReady",
             "lastSuccessfulSyncAt",
             "createdAt",
             "updatedAt");
+    assertThat(connection.path("syncState").asText()).isEqualTo("IDLE");
+    assertThat(connection.path("historyReady").asBoolean()).isFalse();
     assertThat(connection.path("provider").asText()).isEqualTo("PLAID");
     assertThat(connection.path("environment").asText()).isEqualTo("SANDBOX");
     assertThat(connection.path("state").asText()).isEqualTo("ACTIVE");
@@ -730,7 +734,11 @@ class ConnectedFinanceHttpIT extends ConnectedFinanceITSupport {
             "{\"expectedVersion\":0}",
             owner.csrfToken,
             UUID.randomUUID());
-    assertThat(syncMissing.status()).isEqualTo(403);
+    // Sync: an unknown connection is an owner-scoped 404, never a
+    // leaky resource or an unimplemented-route 403.
+    assertThat(syncMissing.status()).isEqualTo(404);
+    assertThat(syncMissing.json().path("code").asText())
+        .isEqualTo("FINANCIAL_CONNECTION_NOT_FOUND");
 
     // Widened-but-bounded checks: CONNECTED and CAD pass, foreign tokens still fail.
     assertThat(

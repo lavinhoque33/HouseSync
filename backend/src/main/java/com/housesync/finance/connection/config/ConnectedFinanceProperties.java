@@ -46,6 +46,18 @@ public class ConnectedFinanceProperties {
    */
   private int attemptTtlMinutes = 30;
 
+  /**
+   * Application round bounds from the contract: at most 50,000 staged deltas and 50 MiB per round.
+   * Operators may lower them for local diagnostics but validation rejects anything above the
+   * documented ceilings, so configuration can never weaken the production bound.
+   */
+  public static final int DOCUMENTED_MAX_ROUND_DELTAS = 50_000;
+
+  public static final long DOCUMENTED_MAX_ROUND_BYTES = 50L * 1024 * 1024;
+
+  private int syncMaxRoundDeltas = DOCUMENTED_MAX_ROUND_DELTAS;
+  private long syncMaxRoundBytes = DOCUMENTED_MAX_ROUND_BYTES;
+
   public boolean isEnabled() {
     return enabled;
   }
@@ -134,6 +146,22 @@ public class ConnectedFinanceProperties {
     this.attemptTtlMinutes = attemptTtlMinutes;
   }
 
+  public int getSyncMaxRoundDeltas() {
+    return syncMaxRoundDeltas;
+  }
+
+  public void setSyncMaxRoundDeltas(int syncMaxRoundDeltas) {
+    this.syncMaxRoundDeltas = syncMaxRoundDeltas;
+  }
+
+  public long getSyncMaxRoundBytes() {
+    return syncMaxRoundBytes;
+  }
+
+  public void setSyncMaxRoundBytes(long syncMaxRoundBytes) {
+    this.syncMaxRoundBytes = syncMaxRoundBytes;
+  }
+
   /** Normalized environment token stored on connections and attempts. */
   public String environmentToken() {
     return "production".equalsIgnoreCase(environment) ? "PRODUCTION" : "SANDBOX";
@@ -183,6 +211,18 @@ public class ConnectedFinanceProperties {
     validateEncryptionKeys(encryptionKeys);
     if (attemptTtlMinutes < 1 || attemptTtlMinutes > 30) {
       throw new IllegalStateException("connected finance attempt TTL must be 1-30 minutes");
+    }
+    if (syncMaxRoundDeltas < 1 || syncMaxRoundDeltas > DOCUMENTED_MAX_ROUND_DELTAS) {
+      throw new IllegalStateException(
+          "connected finance round delta bound must be 1-"
+              + DOCUMENTED_MAX_ROUND_DELTAS
+              + " (the documented application ceiling)");
+    }
+    if (syncMaxRoundBytes < 1 || syncMaxRoundBytes > DOCUMENTED_MAX_ROUND_BYTES) {
+      throw new IllegalStateException(
+          "connected finance round byte bound must be 1-"
+              + DOCUMENTED_MAX_ROUND_BYTES
+              + " (the documented application ceiling)");
     }
   }
 

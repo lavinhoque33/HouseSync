@@ -55,6 +55,8 @@ function connection(overrides: Record<string, unknown> = {}) {
     state: 'ACTIVE',
     generation: 0,
     version: 2,
+    syncState: 'IDLE',
+    historyReady: false,
     lastSuccessfulSyncAt: null,
     createdAt: '2026-09-17T00:00:00Z',
     updatedAt: '2026-09-17T00:00:00Z',

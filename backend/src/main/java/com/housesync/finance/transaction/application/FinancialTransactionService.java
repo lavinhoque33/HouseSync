@@ -202,6 +202,114 @@ public class FinancialTransactionService {
     return new CreateResult(toResponse(transaction), false);
   }
 
+  /** Normalized admission input for one confirmed bank observation. */
+  public record ConnectedAdmission(
+      UUID accountId,
+      TransactionKind kind,
+      BigDecimal amount,
+      SupportedCurrency currency,
+      LocalDate occurredOn,
+      String description,
+      String rawCategory,
+      boolean categoryPresent,
+      UUID refundOfTransactionId,
+      boolean acknowledgeDisclosure) {}
+
+  /**
+   * One-time CONNECTED ledger admission behind bank-activity confirmation. Runs inside the caller's
+   * transaction after the household/connection locks are already held, then takes the account lock
+   * followed by the refund source and its live refund rows in the documented order. A CONNECTED
+   * refund must reference a posted CONNECTED expense in the exact same local account, household,
+   * owner, and currency; sharing a HOUSEHOLD source requires an explicit disclosure
+   * acknowledgement. The caller owns the association insert and observation state change in the
+   * same transaction.
+   */
+  @Transactional
+  public FinancialTransactionEntity admitConnected(
+      UUID householdId, UUID actorId, ConnectedAdmission admission) {
+    households.lockForFinance(householdId, actorId);
+    FinancialAccountEntity account =
+        accounts
+            .findOwnedForUpdate(householdId, admission.accountId(), actorId)
+            .orElseThrow(FinancialAccountNotFoundException::new);
+    if (account.getStatus() == FinancialAccountStatus.ARCHIVED) {
+      throw new AccountArchivedException();
+    }
+    if (!"CONNECTED".equals(account.getSource())) {
+      throw new ValidationFailedException(Map.of("accountId", "Choose a connected account."));
+    }
+    if (account.getCurrency() != admission.currency()) {
+      throw new ValidationFailedException(
+          Map.of("money.currency", "The bank account currency no longer matches."));
+    }
+    FinancialTransactionEntity source = null;
+    if (admission.kind() == TransactionKind.REFUND) {
+      source = loadConnectedRefundSource(householdId, actorId, admission);
+    }
+    Instant now = now();
+    String visibility =
+        admission.kind() == TransactionKind.REFUND ? source.getVisibility() : PRIVATE_VISIBILITY;
+    String category =
+        admission.kind() == TransactionKind.REFUND ? source.getCategory() : admission.rawCategory();
+    FinancialTransactionEntity transaction =
+        FinancialTransactionEntity.connected(
+            UUID.randomUUID(),
+            householdId,
+            actorId,
+            account.getId(),
+            admission.kind(),
+            admission.amount(),
+            admission.currency(),
+            admission.occurredOn(),
+            admission.description(),
+            visibility,
+            category,
+            source == null ? null : source.getId(),
+            now);
+    transactions.save(transaction);
+    if (source != null) {
+      // A state-changing refund admission moves its source expense version once, exactly like a
+      // manual refund create.
+      bumpRefundSource(source, now);
+    }
+    transactions.flush();
+    return transaction;
+  }
+
+  private FinancialTransactionEntity loadConnectedRefundSource(
+      UUID householdId, UUID actorId, ConnectedAdmission admission) {
+    if (admission.refundOfTransactionId() == null) {
+      throw new ValidationFailedException(
+          Map.of("refundOfTransactionId", "Choose the connected expense being refunded."));
+    }
+    FinancialTransactionEntity source =
+        transactions
+            .findOwnedForUpdate(householdId, admission.refundOfTransactionId(), actorId)
+            .orElseThrow(RefundConflictException::new);
+    if (source.getKind() != TransactionKind.EXPENSE
+        || source.getStatus() != TransactionStatus.POSTED
+        || !"CONNECTED".equals(source.getSource())
+        || !source.getAccountId().equals(admission.accountId())
+        || source.getCurrency() != admission.currency()) {
+      throw new RefundConflictException();
+    }
+    if (admission.occurredOn().isBefore(source.getOccurredOn())) {
+      throw new RefundConflictException();
+    }
+    if ("HOUSEHOLD".equals(source.getVisibility()) && !admission.acknowledgeDisclosure()) {
+      throw new ValidationFailedException(
+          Map.of(
+              "acknowledgeDisclosure", "Confirm that this refund is shared with the household."));
+    }
+    if (admission.categoryPresent()
+        && !Objects.equals(admission.rawCategory(), source.getCategory())) {
+      throw new ValidationFailedException(
+          Map.of("category", "Refund category must match its expense."));
+    }
+    checkRefundCap(source, admission.amount(), BigDecimal.ZERO);
+    return source;
+  }
+
   @Transactional(readOnly = true)
   public TransactionCategoryListResponse listCategories(UUID householdId, UUID actorId) {
     // A bounded fixed list, not a paginated collection; only the closed enum feeds it.

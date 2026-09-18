@@ -18,10 +18,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.housesync.finance.account.application.FinancialAccountService;
+import com.housesync.finance.activity.application.BankActivityService;
 import com.housesync.finance.connection.application.ConnectionLifecycleService;
 import com.housesync.finance.connection.application.ConnectionLinkService;
 import com.housesync.finance.connection.application.ConnectionQueryService;
 import com.housesync.finance.connection.application.ConnectionSelectionService;
+import com.housesync.finance.connection.application.ConnectionSyncService;
+import com.housesync.finance.connection.webhook.WebhookIngressService;
 import com.housesync.finance.report.application.FinanceReportService;
 import com.housesync.finance.transaction.application.FinancialAllocationService;
 import com.housesync.finance.transaction.application.FinancialTransactionService;
@@ -79,6 +82,13 @@ class SecurityConfigurationTest {
   @MockitoBean private ConnectionQueryService connectionQueries;
   @MockitoBean private ConnectionSelectionService connectionSelection;
   @MockitoBean private ConnectionLifecycleService connectionLifecycle;
+  @MockitoBean private ConnectionSyncService connectionSync;
+
+  @MockitoBean
+  private com.housesync.finance.connection.application.ConnectionSyncDemandRegistrar syncDemand;
+
+  @MockitoBean private BankActivityService bankActivity;
+  @MockitoBean private WebhookIngressService webhookIngress;
 
   @ParameterizedTest
   @ValueSource(
@@ -145,6 +155,15 @@ class SecurityConfigurationTest {
         + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/reconnect",
     "POST,"
         + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/disconnect",
+    "POST,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/sync",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/bank-activity",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/bank-activity/123e4567-e89b-12d3-a456-426614174001",
+    "POST,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/bank-activity/123e4567-e89b-12d3-a456-426614174001/confirm",
+    "POST,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/bank-activity/123e4567-e89b-12d3-a456-426614174001/dismiss",
     "POST, /actuator/health",
     "PUT, /actuator/health",
     "PATCH, /actuator/health",
@@ -240,7 +259,16 @@ class SecurityConfigurationTest {
         + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/reconnect",
     "GET,"
         + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/disconnect",
-    "POST, /api/provider-webhooks/plaid",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/financial-connections/123e4567-e89b-12d3-a456-426614174001/sync",
+    "PUT, /api/households/123e4567-e89b-12d3-a456-426614174000/bank-activity",
+    "DELETE, /api/households/123e4567-e89b-12d3-a456-426614174000/bank-activity",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/bank-activity",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/bank-activity/123e4567-e89b-12d3-a456-426614174001/confirm",
+    "GET,"
+        + " /api/households/123e4567-e89b-12d3-a456-426614174000/bank-activity/123e4567-e89b-12d3-a456-426614174001/dismiss",
+    "GET," + " /api/provider-webhooks/plaid",
     "GET, /api/households/a/b",
   })
   void authenticatedRequestsToUnimplementedRoutesAreForbidden(String method, String path)
@@ -252,6 +280,19 @@ class SecurityConfigurationTest {
         .andExpect(status().isForbidden())
         .andExpect(jsonPath("$.code").value("FORBIDDEN"))
         .andExpect(jsonPath("$.correlationId").exists());
+  }
+
+  @Test
+  void providerWebhookRouteIsPublicCsrfExemptAndSignatureGuarded() throws Exception {
+    when(webhookIngress.enabled()).thenReturn(true);
+    // No session and no CSRF token reach the exact route; without a valid signature it is a
+    // generic 401 from verification, proving authorization is not session based.
+    mvc.perform(
+            post("/api/provider-webhooks/plaid")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{}"))
+        .andExpect(status().isUnauthorized())
+        .andExpect(jsonPath("$.code").value("UNAUTHENTICATED"));
   }
 
   @ParameterizedTest

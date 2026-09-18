@@ -10,18 +10,25 @@ import com.housesync.finance.connection.plaid.PlaidHttpAdapter;
 import com.housesync.finance.connection.plaid.ProviderErrorClass;
 import com.housesync.finance.connection.plaid.RemoteAccount;
 import com.sun.net.httpserver.HttpServer;
+import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.interfaces.ECPublicKey;
+import java.security.spec.ECGenParameterSpec;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.json.JsonMapper;
 
 class PlaidHttpAdapterTest {
 
@@ -55,7 +62,9 @@ class PlaidHttpAdapterTest {
     properties.setBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
     adapter =
         new PlaidHttpAdapter(
-            properties, new ObjectMapper(), Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+            properties,
+            JsonMapper.builder().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS).build(),
+            Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
   }
 
   @AfterEach
@@ -257,5 +266,118 @@ class PlaidHttpAdapterTest {
     adapter.removeItem("access-1");
     assertThat(paths).containsExactly("/item/remove");
     assertThat(bodies.get(0)).contains("\"access_token\":\"access-1\"");
+  }
+
+  @Test
+  void transactionSyncParsesExactDecimalsSignsAndPages() {
+    payload =
+        "{\"added\":[{\"account_id\":\"a1\",\"transaction_id\":\"t1\",\"pending\":false,"
+            + "\"iso_currency_code\":\"USD\",\"amount\":12.3400,\"date\":\"2026-09-01\","
+            + "\"name\":\"Coffee\",\"merchant_name\":null,\"pending_transaction_id\":null}],"
+            + "\"modified\":[{\"account_id\":\"a1\",\"transaction_id\":\"t2\",\"pending\":false,"
+            + "\"iso_currency_code\":\"CAD\",\"amount\":-250.0000,\"date\":\"2026-09-02\","
+            + "\"name\":\"Payroll\"}],"
+            + "\"removed\":[{\"transaction_id\":\"t0\"}],"
+            + "\"next_cursor\":\"cursor-2\",\"has_more\":true,"
+            + "\"transactions_update_status\":\"HISTORICAL_UPDATE_COMPLETE\"}";
+    PlaidAdapter.SyncPage page = adapter.fetchTransactionChanges("access-1", null);
+
+    assertThat(paths).containsExactly("/transactions/sync");
+    assertThat(bodies.get(0)).contains("\"count\":100").doesNotContain("\"cursor\"");
+    assertThat(page.upserts()).hasSize(2);
+    PlaidAdapter.ProviderTransaction debit = page.upserts().get(0);
+    // The exact provider token survives: 12.3400 is not 12.34 or a binary float.
+    assertThat(debit.amount().toPlainString()).isEqualTo("12.3400");
+    assertThat(debit.postedOn()).isEqualTo(java.time.LocalDate.of(2026, 9, 1));
+    assertThat(debit.officialCurrency()).isEqualTo("USD");
+    assertThat(page.upserts().get(1).amount().toPlainString()).isEqualTo("-250.0000");
+    assertThat(page.removedRemoteTransactionIds()).containsExactly("t0");
+    assertThat(page.nextCursor()).isEqualTo("cursor-2");
+    assertThat(page.hasMore()).isTrue();
+    assertThat(page.historyReady()).isTrue();
+  }
+
+  @Test
+  void transactionSyncSendsCursorAndRequiresEnvelopeFacts() {
+    payload =
+        "{\"added\":[],\"modified\":[],\"removed\":[],\"next_cursor\":\"c3\",\"has_more\":false}";
+    adapter.fetchTransactionChanges("access-1", "cursor-1");
+    assertThat(bodies.get(0)).contains("\"cursor\":\"cursor-1\"");
+
+    payload = "{\"added\":[],\"modified\":[],\"removed\":[]}";
+    assertThatThrownBy(() -> adapter.fetchTransactionChanges("access-1", null))
+        .isInstanceOf(PlaidAdapterException.class)
+        .satisfies(
+            failure ->
+                assertThat(((PlaidAdapterException) failure).getErrorClass())
+                    .isEqualTo(ProviderErrorClass.INVALID_DATA));
+
+    payload =
+        "{\"added\":[{\"transaction_id\":\"t1\",\"pending\":false,\"amount\":1.0,"
+            + "\"date\":\"2026-09-01\"}],\"modified\":[],\"removed\":[],"
+            + "\"next_cursor\":\"c4\",\"has_more\":false}";
+    assertThatThrownBy(() -> adapter.fetchTransactionChanges("access-1", null))
+        .isInstanceOf(PlaidAdapterException.class);
+
+    payload =
+        "{\"added\":[{\"account_id\":\"a1\",\"pending\":false,\"amount\":1.0,"
+            + "\"date\":\"2026-09-01\"}],\"modified\":[],\"removed\":[],"
+            + "\"next_cursor\":\"c5\",\"has_more\":false}";
+    assertThatThrownBy(() -> adapter.fetchTransactionChanges("access-1", null))
+        .isInstanceOf(PlaidAdapterException.class);
+
+    payload =
+        "{\"added\":[{\"account_id\":\"a1\",\"transaction_id\":\"t1\",\"pending\":false,"
+            + "\"amount\":\"1.00\",\"date\":\"2026-09-01\"}],\"modified\":[],\"removed\":[],"
+            + "\"next_cursor\":\"c6\",\"has_more\":false}";
+    assertThatThrownBy(() -> adapter.fetchTransactionChanges("access-1", null))
+        .isInstanceOf(PlaidAdapterException.class);
+  }
+
+  @Test
+  void webhookVerificationKeyParsesP256JwkThroughFixedHost() throws Exception {
+    KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
+    generator.initialize(new ECGenParameterSpec("secp256r1"));
+    KeyPair pair = generator.generateKeyPair();
+    ECPublicKey publicKey = (ECPublicKey) pair.getPublic();
+    payload =
+        "{\"key\":{\"kty\":\"EC\",\"crv\":\"P-256\",\"alg\":\"ES256\",\"kid\":\"kid-1\",\"use\":\"sig\","
+            + "\"x\":\""
+            + base64Url(coordinate(publicKey.getW().getAffineX()))
+            + "\",\"y\":\""
+            + base64Url(coordinate(publicKey.getW().getAffineY()))
+            + "\",\"expired_at\":\"2030-01-01T00:00:00Z\"}}";
+    PlaidAdapter.VerificationKey key = adapter.fetchVerificationKey("kid-1");
+
+    assertThat(paths).containsExactly("/webhook_verification_key/get");
+    assertThat(key.keyId()).isEqualTo("kid-1");
+    assertThat(key.publicKey()).isInstanceOf(ECPublicKey.class);
+    assertThat(key.expiresAt()).isEqualTo(Instant.parse("2030-01-01T00:00:00Z"));
+
+    payload = "{\"key\":{\"kty\":\"RSA\",\"kid\":\"kid-2\",\"n\":\"abc\",\"e\":\"AQAB\"}}";
+    assertThatThrownBy(() -> adapter.fetchVerificationKey("kid-2"))
+        .isInstanceOf(PlaidAdapterException.class)
+        .satisfies(
+            failure ->
+                assertThat(((PlaidAdapterException) failure).getErrorClass())
+                    .isEqualTo(ProviderErrorClass.INVALID_DATA));
+  }
+
+  private static byte[] coordinate(BigInteger value) {
+    byte[] raw = value.toByteArray();
+    if (raw.length == 32) {
+      return raw;
+    }
+    byte[] padded = new byte[32];
+    if (raw.length > 32) {
+      System.arraycopy(raw, raw.length - 32, padded, 0, 32);
+    } else {
+      System.arraycopy(raw, 0, padded, 32 - raw.length, raw.length);
+    }
+    return padded;
+  }
+
+  private static String base64Url(byte[] value) {
+    return Base64.getUrlEncoder().withoutPadding().encodeToString(value);
   }
 }

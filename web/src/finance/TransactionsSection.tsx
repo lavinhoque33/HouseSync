@@ -113,6 +113,12 @@ interface TransactionsSectionProps {
    * or discarding the in-progress entry draft.
    */
   accountsRefreshSignal?: number | undefined;
+  /**
+   * Bumped by the parent after a confirmed bank-activity admission commits,
+   * so the visible feed and account metadata converge without remounting
+   * this section or discarding form/detail drafts. Dismissals never bump it.
+   */
+  ledgerRefreshSignal?: number | undefined;
 }
 
 const KIND_OPTIONS: Array<{
@@ -261,6 +267,7 @@ export function TransactionsSection({
   currentUserId,
   nowProvider,
   accountsRefreshSignal = 0,
+  ledgerRefreshSignal = 0,
 }: TransactionsSectionProps) {
   function clockNow(): Date {
     return nowProvider ? nowProvider() : new Date();
@@ -400,6 +407,14 @@ export function TransactionsSection({
   const pendingAccountSignalRef = useRef(false);
   const accountRefreshSeqRef = useRef(0);
   const activeAccountRefreshRef = useRef<AbortController | null>(null);
+
+  // Dedicated ledger signal from a sibling bank-activity confirmation. It is
+  // deliberately separate from account-only semantics: a confirmation changes
+  // the visible ledger and household spending but no account identity. A
+  // signal that arrives before the initial load settles is parked and served
+  // afterwards, so a commit can never be lost to a racing first read.
+  const servedLedgerSignalRef = useRef(ledgerRefreshSignal);
+  const pendingLedgerSignalRef = useRef(false);
   useEffect(() => {
     reportingZoneRef.current = reportingZone;
   }, [reportingZone]);
@@ -737,6 +752,57 @@ export function TransactionsSection({
     // signal decide whether a fetch is owed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accounts]);
+
+  /**
+   * Serves the dedicated ledger signal with a metadata-inclusive reload so a
+   * confirmed CONNECTED entry and a possibly stale selector converge while
+   * every form and detail draft stays in place. A signal arriving before the
+   * initial load settles is parked, never marked served.
+   */
+  function serveLedgerSignal(signal: number) {
+    // Deferred past the current task so the signal effect never performs a
+    // synchronous cascading state update; the parked/served refs still settle
+    // before any later signal can be observed.
+    void (async () => {
+      await Promise.resolve();
+      const views = loadedViews();
+      if (views.length === 0) {
+        pendingLedgerSignalRef.current = true;
+        return;
+      }
+      pendingLedgerSignalRef.current = false;
+      servedLedgerSignalRef.current = signal;
+      reloadViews(views, true, true);
+      // A confirmed entry can move household spending exactly like a manual
+      // mutation, so the dashboard refetches the shown period too.
+      setReportingRefresh((value) => value + 1);
+    })();
+  }
+
+  useEffect(() => {
+    if (servedLedgerSignalRef.current === ledgerRefreshSignal) return;
+    if (accounts === null || loadedViews().length === 0) {
+      pendingLedgerSignalRef.current = true;
+      return;
+    }
+    serveLedgerSignal(ledgerRefreshSignal);
+    // The signal alone drives this effect; other state is read only to park a
+    // pre-load signal for the settling effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ledgerRefreshSignal]);
+
+  useEffect(() => {
+    if (!pendingLedgerSignalRef.current) return;
+    if (accounts === null || loadedViews().length === 0) return;
+    if (servedLedgerSignalRef.current === ledgerRefreshSignal) {
+      pendingLedgerSignalRef.current = false;
+      return;
+    }
+    serveLedgerSignal(ledgerRefreshSignal);
+    // Initial-load settling is the trigger; the parked flag decides whether a
+    // fetch is owed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts, ownTransactions, householdTransactions]);
 
   useEffect(() => {
     if (notice) noticeRef.current?.focus();
@@ -2502,9 +2568,9 @@ export function TransactionsSection({
   }
 
   const activeAccounts = (accounts ?? []).filter(
-    // Manual entry stays MANUAL-only: CONNECTED accounts are
-    // admitted through account selection and can only receive entries
-    // through bank confirmation later.
+    // Manual entry stays MANUAL-only: CONNECTED accounts receive entries
+    // exclusively through bank-activity confirmation, so they are never
+    // offered by the manual create form.
     (account) => account.status === 'ACTIVE' && account.source === 'MANUAL',
   );
   const accountNameById = new Map<string, string>();
@@ -2554,7 +2620,7 @@ export function TransactionsSection({
     >
       <div className="finance-accounts-heading">
         <div>
-          <p className="eyebrow">Manual entries</p>
+          <p className="eyebrow">Manual entry</p>
           <h4 id={`finance-transactions-${household.id}`}>Transactions</h4>
         </div>
         <span className="privacy-chip">Entries private by default</span>

@@ -136,6 +136,7 @@ public class SecurityConfiguration {
                         "/api/households/*/connection-link-attempts/*/complete",
                         "/api/households/*/financial-connections/*/account-selection",
                         "/api/households/*/financial-connections/*/reconnect",
+                        "/api/households/*/financial-connections/*/sync",
                         "/api/households/*/financial-connections/*/disconnect")
                     .authenticated()
                     .requestMatchers(
@@ -143,8 +144,19 @@ public class SecurityConfiguration {
                         "/api/households/*/connection-operations/*",
                         "/api/households/*/financial-connections",
                         "/api/households/*/financial-connections/*",
-                        "/api/households/*/financial-connections/*/accounts")
+                        "/api/households/*/financial-connections/*/accounts",
+                        "/api/households/*/bank-activity",
+                        "/api/households/*/bank-activity/*")
                     .authenticated()
+                    .requestMatchers(
+                        HttpMethod.POST,
+                        "/api/households/*/bank-activity/*/confirm",
+                        "/api/households/*/bank-activity/*/dismiss")
+                    .authenticated()
+                    // The only session/CSRF-exempt provider endpoint; verification is signature
+                    // based and the exact route is also bounded by the admission filter.
+                    .requestMatchers(HttpMethod.POST, "/api/provider-webhooks/plaid")
+                    .permitAll()
                     .anyRequest()
                     .denyAll())
         .sessionManagement(
@@ -158,6 +170,7 @@ public class SecurityConfiguration {
         .csrf(
             csrf ->
                 csrf.csrfTokenRepository(csrfTokens)
+                    .ignoringRequestMatchers("/api/provider-webhooks/plaid")
                     .csrfTokenRequestHandler(new XorCsrfTokenRequestAttributeHandler()))
         .requestCache(AbstractHttpConfigurer::disable)
         .formLogin(AbstractHttpConfigurer::disable)

@@ -55,6 +55,8 @@ function connection(overrides: Record<string, unknown> = {}) {
     state: 'ACTIVE',
     generation: 0,
     version: 0,
+    syncState: 'IDLE',
+    historyReady: false,
     lastSuccessfulSyncAt: null,
     createdAt: '2026-09-17T00:00:00Z',
     updatedAt: '2026-09-17T00:00:00Z',
@@ -110,6 +112,21 @@ describe('operation parser', () => {
     }
   });
 
+  it('parses sync worker state and history readiness additively', () => {
+    const parsed = parseFinancialConnection(
+      connection({ syncState: 'RETRY_WAIT', historyReady: false }),
+    );
+    expect(parsed?.syncState).toBe('RETRY_WAIT');
+    expect(parsed?.historyReady).toBe(false);
+
+    expect(
+      parseFinancialConnection(connection({ syncState: 'PARKED' })),
+    ).toBeUndefined();
+    expect(
+      parseFinancialConnection(connection({ historyReady: 'yes' })),
+    ).toBeUndefined();
+  });
+
   it('keeps opaque safe error codes without interpreting them', () => {
     expect(
       parseConnectionOperation(
@@ -118,9 +135,16 @@ describe('operation parser', () => {
     ).toBe('EXCHANGE_UNKNOWN');
   });
 
+  it('accepts the SYNC operation type', () => {
+    expect(
+      parseConnectionOperation(operation({ operationType: 'SYNC' }))
+        ?.operationType,
+    ).toBe('SYNC');
+  });
+
   it('rejects unknown types, states, and non-local status URLs', () => {
     expect(
-      parseConnectionOperation(operation({ operationType: 'SYNC' })),
+      parseConnectionOperation(operation({ operationType: 'REPLACE' })),
     ).toBeUndefined();
     expect(
       parseConnectionOperation(operation({ state: 'RUNNING' })),

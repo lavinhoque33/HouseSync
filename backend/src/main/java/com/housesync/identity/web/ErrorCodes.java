@@ -30,6 +30,13 @@ public final class ErrorCodes {
   public static final String RESOURCE_VERSION_CONFLICT = "RESOURCE_VERSION_CONFLICT";
   public static final String RESOURCE_VERSION_EXHAUSTED = "RESOURCE_VERSION_EXHAUSTED";
   public static final String FINANCE_BUSY = "FINANCE_BUSY";
+  public static final String BANK_ACTIVITY_NOT_FOUND = "BANK_ACTIVITY_NOT_FOUND";
+  public static final String OBSERVATION_NOT_POSTED = "OBSERVATION_NOT_POSTED";
+  public static final String OBSERVATION_ALREADY_CONFIRMED = "OBSERVATION_ALREADY_CONFIRMED";
+  public static final String OBSERVATION_INVALID = "OBSERVATION_INVALID";
+  public static final String OBSERVATION_DISMISSED = "OBSERVATION_DISMISSED";
+  public static final String OBSERVATION_ADMITTED = "OBSERVATION_ADMITTED";
+  public static final String MANUAL_SYNC_RATE_LIMITED = "MANUAL_SYNC_RATE_LIMITED";
   public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 
   private ErrorCodes() {}

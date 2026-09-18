@@ -270,6 +270,7 @@ function renderSection(
     household?: Household;
     nowProvider?: () => Date;
     accountsRefreshSignal?: number;
+    ledgerRefreshSignal?: number;
   } = {},
 ) {
   const calls = stubFetch(routes);
@@ -290,6 +291,7 @@ function renderSection(
       authorityConfirmed={authorityConfirmed}
       nowProvider={nowProvider}
       accountsRefreshSignal={options.accountsRefreshSignal ?? 0}
+      ledgerRefreshSignal={options.ledgerRefreshSignal ?? 0}
     />,
   );
   return {
@@ -298,6 +300,21 @@ function renderSection(
     onCsrfRefreshed,
     onSessionExpired,
     onHouseholdAccessChanged,
+    rerenderWithLedgerSignal: (signal: number) =>
+      rendered.rerender(
+        <TransactionsSection
+          household={household}
+          currentUserId={ACTOR_ID}
+          csrf={CSRF}
+          onCsrfRefreshed={onCsrfRefreshed}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdAccessChanged}
+          authorityConfirmed={authorityConfirmed}
+          nowProvider={nowProvider}
+          accountsRefreshSignal={options.accountsRefreshSignal ?? 0}
+          ledgerRefreshSignal={signal}
+        />,
+      ),
     rerenderWithAccountSignal: (signal: number) =>
       rendered.rerender(
         <TransactionsSection
@@ -4453,5 +4470,79 @@ describe('reporting zone entry defaults', () => {
     ).toBeInTheDocument();
     // The edited draft survives the zone change instead of being recomputed.
     expect(entryDate().value).toBe('2026-08-15');
+  });
+});
+
+describe('sibling ledger refresh signal', () => {
+  it('refetches the feed on a confirmation signal without discarding the manual draft', async () => {
+    let pageItems: Transaction[] = [];
+    const { calls, rerenderWithLedgerSignal } = renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () => transactionPage(pageItems),
+    });
+    await screen.findByText('No transactions yet.');
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Typed draft text' },
+    });
+
+    // A sibling bank-activity confirmation commits a CONNECTED entry.
+    pageItems = [
+      transaction({
+        source: 'CONNECTED',
+        description: 'Confirmed coffee',
+        money: { amount: '-4.50', currency: 'BRL' },
+      }),
+    ];
+    rerenderWithLedgerSignal(1);
+
+    expect(await screen.findByText('Confirmed coffee')).toBeInTheDocument();
+    expect(screen.getByLabelText('Description')).toHaveValue(
+      'Typed draft text',
+    );
+    // The signal caused a real metadata-inclusive feed refetch: the initial
+    // OWN load plus one more OWN load and one more accounts read.
+    const feedFetches = calls.filter(({ url }) =>
+      url.includes('/transactions?'),
+    );
+    expect(feedFetches.length).toBeGreaterThanOrEqual(2);
+    expect(
+      calls.filter(({ url }) => url.includes('/financial-accounts?')).length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it('serves a ledger signal that arrives before the initial load settles', async () => {
+    const gateControl: { release: (() => void) | null } = { release: null };
+    const initialGate = new Promise<void>((resolve) => {
+      gateControl.release = () => resolve();
+    });
+    let firstFeedLoad = true;
+    let pageItems: Transaction[] = [];
+    const { calls, rerenderWithLedgerSignal } = renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () => {
+        if (firstFeedLoad) {
+          firstFeedLoad = false;
+          return initialGate.then(() => transactionPage(pageItems));
+        }
+        return transactionPage(pageItems);
+      },
+    });
+
+    // The signal arrives while the initial feed read is still in flight.
+    rerenderWithLedgerSignal(1);
+    pageItems = [
+      transaction({
+        source: 'CONNECTED',
+        description: 'Signal arrival',
+        money: { amount: '-9.99', currency: 'BRL' },
+      }),
+    ];
+    gateControl.release?.();
+
+    expect(await screen.findByText('Signal arrival')).toBeInTheDocument();
+    // The parked signal was served after the initial load settled.
+    expect(
+      calls.filter(({ url }) => url.includes('/transactions?')).length,
+    ).toBeGreaterThanOrEqual(2);
   });
 });

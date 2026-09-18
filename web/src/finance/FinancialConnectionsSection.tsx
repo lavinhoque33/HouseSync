@@ -59,6 +59,14 @@ interface FinancialConnectionsSectionProps {
    * Link/reconnect/disconnect never call this: they change no account list.
    */
   onAccountListCommitted?: (() => void) | undefined;
+  /**
+   * Called after a definitive committed connection lifecycle or selection
+   * outcome, so the sibling bank-activity inbox refetches its connection list
+   * and observations without remounting or discarding its drafts. Only
+   * SUCCEEDED durable operations and committed selections fire it; ambiguous
+   * or failed outcomes do not.
+   */
+  onBankActivityChanged?: (() => void) | undefined;
 }
 
 /**
@@ -140,6 +148,7 @@ export function FinancialConnectionsSection({
   onHouseholdAccessChanged,
   authorityConfirmed,
   onAccountListCommitted,
+  onBankActivityChanged,
 }: FinancialConnectionsSectionProps) {
   const [connections, setConnections] = useState<FinancialConnection[] | null>(
     null,
@@ -954,6 +963,10 @@ export function FinancialConnectionsSection({
         text: successText,
         focus: focusNotice,
       });
+      // The definitive commit also changes what the sibling bank-activity
+      // inbox can show (new connection, reconnect, or confirmed disconnect);
+      // its signal is fired only for this SUCCEEDED outcome.
+      onBankActivityChanged?.();
       // The durable outcome stands on its own: never repeat the operation.
       // But the list still needs its confirming read — when that fetch
       // fails, keep the honest local rows and offer a visible refresh path
@@ -1167,6 +1180,9 @@ export function FinancialConnectionsSection({
         focus: true,
       });
       onAccountListCommitted?.();
+      // A committed selection changes the admitted account set the inbox can
+      // attribute observations to, so the sibling inbox refetches too.
+      onBankActivityChanged?.();
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
       const apiError = toApiError(error, 'Could not reach the server.');
@@ -1601,8 +1617,9 @@ export function FinancialConnectionsSection({
       </div>
       <p className="finance-helper">
         Only you can see these connections, including other household owners.
-        Linking chooses which accounts to admit. Transaction imports are not
-        part of this step, and no balance is inferred.
+        Linking chooses which accounts to admit. Synced activity arrives in your
+        private bank-activity inbox; nothing reaches the ledger until you
+        confirm it, and no balance is inferred.
       </p>
 
       {!authorityConfirmed && (

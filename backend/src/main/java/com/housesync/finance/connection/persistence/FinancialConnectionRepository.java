@@ -55,4 +55,19 @@ public interface FinancialConnectionRepository
 
   Optional<FinancialConnectionEntity> findByProviderAndEnvironmentAndRemoteItemDigest(
       String provider, String environment, String remoteItemDigest);
+
+  /**
+   * Digest lookup that acquires the row lock in the same statement. Using this instead of a plain
+   * read followed by {@link #findByIdForUpdate} guarantees the entity is hydrated from the locked
+   * row rather than from a stale managed instance loaded before the lock.
+   */
+  @Lock(LockModeType.PESSIMISTIC_WRITE)
+  @Query(
+      "SELECT c FROM FinancialConnectionEntity c"
+          + " WHERE c.provider = :provider AND c.environment = :environment"
+          + " AND c.remoteItemDigest = :remoteItemDigest")
+  Optional<FinancialConnectionEntity> findDigestForUpdate(
+      @Param("provider") String provider,
+      @Param("environment") String environment,
+      @Param("remoteItemDigest") String remoteItemDigest);
 }

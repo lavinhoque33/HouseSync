@@ -98,8 +98,26 @@ class DatabaseStartupIT {
             "connection_link_attempts",
             "connection_operations",
             "connection_operation_idempotency_keys",
-            "connection_revocation_work");
-    assertThat(flyway.info().applied()).hasSize(12);
+            "connection_revocation_work",
+            "connection_sync_work",
+            "connection_sync_rounds",
+            "connection_sync_round_deltas",
+            "connection_observations",
+            "connection_ledger_associations",
+            "provider_webhook_events");
+    // Provenance uses composite references so an association cannot mix household, owner,
+    // account, or currency between the observation and its ledger entry.
+    assertThat(
+            jdbc.queryForList(
+                "SELECT constraint_name FROM information_schema.table_constraints"
+                    + " WHERE table_name = 'connection_ledger_associations'"
+                    + " AND constraint_type = 'FOREIGN KEY'",
+                String.class))
+        .contains(
+            "connection_ledger_associations_observation_reference",
+            "connection_ledger_associations_account_reference",
+            "connection_ledger_associations_transaction_reference");
+    assertThat(flyway.info().applied()).hasSize(13);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
     assertThat(

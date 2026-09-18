@@ -71,6 +71,16 @@ class PlaidAdapterMappingTest {
     }
 
     @Override
+    public SyncPage fetchTransactionChanges(String accessToken, String cursor) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public VerificationKey fetchVerificationKey(String keyId) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
     public void removeItem(String accessToken) {
       throw new UnsupportedOperationException();
     }

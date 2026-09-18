@@ -73,7 +73,7 @@ export function App() {
           </svg>
           HouseSync
         </span>
-        <span className="area-badge">Private bank linking</span>
+        <span className="area-badge">Private bank sync &amp; review</span>
       </header>
 
       <main id="main-content">
@@ -89,13 +89,17 @@ export function App() {
         <section className="foundation" aria-labelledby="foundation-title">
           <div className="foundation-copy">
             <p className="eyebrow">Where we are</p>
-            <h2 id="foundation-title">Manual finance, plus private linking.</h2>
+            <h2 id="foundation-title">
+              Manual finance, plus private bank sync.
+            </h2>
             <p>
               Accounts, sign-in, and household collaboration are available.
               Private manual accounts and transactions now include categories,
               selected household sharing, exact splits, member balances, and
               per-currency spending summaries. Bank linking admits the accounts
-              you choose; transaction imports arrive in a later step.
+              you choose, and synced activity lands in your private inbox; only
+              the entries you confirm reach the confirmed ledger, and no balance
+              is inferred.
             </p>
           </div>
           <HealthStatus />
@@ -113,8 +117,8 @@ export function App() {
       <footer className="site-footer">
         <p>HouseSync · Built for the household, mindful of the individual.</p>
         <p>
-          Bank-linking preview — choose which accounts to admit. No transaction
-          import or inferred balance yet.
+          Private bank sync and review — imported activity stays owner-private
+          until you confirm it. Balances are never inferred.
         </p>
       </footer>
     </div>

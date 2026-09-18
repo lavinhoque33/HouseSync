@@ -32,7 +32,7 @@ export interface LinkAttempt {
   expiresAt: string;
 }
 
-export type ConnectionOperationType = 'LINK_COMPLETE' | 'DISCONNECT';
+export type ConnectionOperationType = 'LINK_COMPLETE' | 'DISCONNECT' | 'SYNC';
 
 export type ConnectionOperationState =
   'PENDING' | 'SUCCEEDED' | 'FAILED' | 'OUTCOME_UNKNOWN';
@@ -89,6 +89,10 @@ export type FinancialConnectionState =
   | 'DISCONNECTED'
   | 'ERROR';
 
+/** Separate sync worker state; background progress is never a lifecycle mutation. */
+export type FinancialConnectionSyncState =
+  'IDLE' | 'QUEUED' | 'RUNNING' | 'RETRY_WAIT' | 'FAILED';
+
 export interface FinancialConnection {
   id: string;
   householdId: string;
@@ -97,6 +101,9 @@ export interface FinancialConnection {
   state: FinancialConnectionState;
   generation: number;
   version: number;
+  syncState: FinancialConnectionSyncState;
+  /** False until the provider reported a completed historical update. */
+  historyReady: boolean;
   lastSuccessfulSyncAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -186,7 +193,9 @@ function isLinkFlow(value: unknown): value is LinkFlow {
 }
 
 function isOperationType(value: unknown): value is ConnectionOperationType {
-  return value === 'LINK_COMPLETE' || value === 'DISCONNECT';
+  return (
+    value === 'LINK_COMPLETE' || value === 'DISCONNECT' || value === 'SYNC'
+  );
 }
 
 function isOperationState(value: unknown): value is ConnectionOperationState {
@@ -207,6 +216,18 @@ function isConnectionState(value: unknown): value is FinancialConnectionState {
     value === 'DISCONNECTING' ||
     value === 'DISCONNECTED' ||
     value === 'ERROR'
+  );
+}
+
+function isConnectionSyncState(
+  value: unknown,
+): value is FinancialConnectionSyncState {
+  return (
+    value === 'IDLE' ||
+    value === 'QUEUED' ||
+    value === 'RUNNING' ||
+    value === 'RETRY_WAIT' ||
+    value === 'FAILED'
   );
 }
 
@@ -282,6 +303,8 @@ export function parseFinancialConnection(
     !Number.isInteger(value.generation) ||
     value.generation < 0 ||
     !isVersionNumber(value.version) ||
+    !isConnectionSyncState(value.syncState) ||
+    typeof value.historyReady !== 'boolean' ||
     (value.lastSuccessfulSyncAt !== null &&
       !isInstantString(value.lastSuccessfulSyncAt)) ||
     !isInstantString(value.createdAt) ||
@@ -297,6 +320,8 @@ export function parseFinancialConnection(
     state: value.state,
     generation: value.generation,
     version: value.version,
+    syncState: value.syncState,
+    historyReady: value.historyReady,
     lastSuccessfulSyncAt: value.lastSuccessfulSyncAt,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,

@@ -90,7 +90,7 @@ public class ConnectionLinkController {
     return noCache(HttpStatus.ACCEPTED, toOperation(householdId, operation));
   }
 
-  static ConnectionOperationResponse toOperation(
+  public static ConnectionOperationResponse toOperation(
       UUID householdId, ConnectionOperationEntity operation) {
     return new ConnectionOperationResponse(
         operation.getId(),
@@ -103,11 +103,12 @@ public class ConnectionLinkController {
         operation.getUpdatedAt());
   }
 
-  static void rejectQuery(MultiValueMap<String, String> query) {
+  public static void rejectQuery(MultiValueMap<String, String> query) {
     rejectQuery(query, Set.of());
   }
 
-  static void rejectQuery(MultiValueMap<String, String> query, Set<String> allowedParameters) {
+  public static void rejectQuery(
+      MultiValueMap<String, String> query, Set<String> allowedParameters) {
     for (Map.Entry<String, List<String>> entry : query.entrySet()) {
       if (!allowedParameters.contains(entry.getKey()) || entry.getValue().size() != 1) {
         throw new ValidationFailedException(Map.of());
@@ -115,7 +116,7 @@ public class ConnectionLinkController {
     }
   }
 
-  static UUID parseIdempotencyKey(String rawKey) {
+  public static UUID parseIdempotencyKey(String rawKey) {
     if (rawKey != null) {
       try {
         UUID parsed = UUID.fromString(rawKey);
@@ -127,7 +128,7 @@ public class ConnectionLinkController {
     throw new ValidationFailedException(Map.of("idempotencyKey", "Provide a valid request key."));
   }
 
-  static UUID actorId(Authentication authentication) {
+  public static UUID actorId(Authentication authentication) {
     if (authentication == null
         || !authentication.isAuthenticated()
         || !(authentication.getPrincipal() instanceof HouseSyncUserDetails principal)) {
@@ -136,7 +137,7 @@ public class ConnectionLinkController {
     return principal.getId();
   }
 
-  static <T> ResponseEntity<T> noCache(HttpStatus status, T body) {
+  public static <T> ResponseEntity<T> noCache(HttpStatus status, T body) {
     return ResponseEntity.status(status)
         .cacheControl(CacheControl.noStore())
         .contentType(MediaType.APPLICATION_JSON)

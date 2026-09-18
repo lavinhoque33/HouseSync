@@ -91,11 +91,47 @@ class ConnectedFinancePropertiesTest {
     assertThat(properties.resolvedBaseUrl()).isEqualTo("https://production.plaid.com");
   }
 
+  @Test
+  void roundBoundsDefaultToDocumentedCeilingsAndRejectWeakerConfiguration() {
+    ConnectedFinanceProperties defaults = enabled("fake", true);
+    assertThat(defaults.getSyncMaxRoundDeltas())
+        .isEqualTo(ConnectedFinanceProperties.DOCUMENTED_MAX_ROUND_DELTAS);
+    assertThat(defaults.getSyncMaxRoundBytes())
+        .isEqualTo(ConnectedFinanceProperties.DOCUMENTED_MAX_ROUND_BYTES);
+    assertThatCode(defaults::validateFailClosed).doesNotThrowAnyException();
+
+    // Lowering the bound for diagnostics is allowed; anything above the documented ceiling, or
+    // non-positive, fails closed so production can never be weakened by configuration.
+    ConnectedFinanceProperties lowered = enabled("fake", true);
+    lowered.setSyncMaxRoundDeltas(2);
+    lowered.setSyncMaxRoundBytes(4096);
+    assertThatCode(lowered::validateFailClosed).doesNotThrowAnyException();
+
+    ConnectedFinanceProperties raisedDeltas = enabled("fake", true);
+    raisedDeltas.setSyncMaxRoundDeltas(ConnectedFinanceProperties.DOCUMENTED_MAX_ROUND_DELTAS + 1);
+    assertThatThrownBy(raisedDeltas::validateFailClosed).isInstanceOf(IllegalStateException.class);
+
+    ConnectedFinanceProperties raisedBytes = enabled("fake", true);
+    raisedBytes.setSyncMaxRoundBytes(ConnectedFinanceProperties.DOCUMENTED_MAX_ROUND_BYTES + 1);
+    assertThatThrownBy(raisedBytes::validateFailClosed).isInstanceOf(IllegalStateException.class);
+
+    ConnectedFinanceProperties zeroDeltas = enabled("fake", true);
+    zeroDeltas.setSyncMaxRoundDeltas(0);
+    assertThatThrownBy(zeroDeltas::validateFailClosed).isInstanceOf(IllegalStateException.class);
+
+    ConnectedFinanceProperties zeroBytes = enabled("fake", true);
+    zeroBytes.setSyncMaxRoundBytes(0);
+    assertThatThrownBy(zeroBytes::validateFailClosed).isInstanceOf(IllegalStateException.class);
+  }
+
   private static ConnectedFinanceProperties enabled(String provider, boolean fakeAllowed) {
     ConnectedFinanceProperties properties = new ConnectedFinanceProperties();
     properties.setEnabled(true);
     properties.setProvider(provider);
     properties.setFakeAllowed(fakeAllowed);
+    if ("fake".equals(provider)) {
+      properties.setEncryptionKeys(KEYS);
+    }
     return properties;
   }
 

@@ -1,6 +1,8 @@
 package com.housesync.finance.connection.plaid;
 
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 
@@ -36,12 +38,55 @@ public interface PlaidAdapter {
   /** Reads remote account metadata for admission decisions; never a browser-supplied list. */
   List<RemoteAccount> fetchAccounts(String accessToken);
 
+  /**
+   * Reads one page of added/modified/removed transactions from the committed opaque cursor. The
+   * adapter returns exact application values ({@link BigDecimal} amounts parsed from provider
+   * decimal tokens) plus the next cursor, has-more flag, and history-readiness flag. Callers stage
+   * or discard whole pages; the adapter never writes local state.
+   */
+  SyncPage fetchTransactionChanges(String accessToken, String cursor);
+
+  /**
+   * Fetches one Plaid verification JWK through the fixed allowlisted host. Only the key material is
+   * returned; the key URL in a JWT header is never trusted or fetched.
+   */
+  VerificationKey fetchVerificationKey(String keyId);
+
   /** Confirms remote Item removal; ambiguous outcomes throw {@link AmbiguousRemovalException}. */
   void removeItem(String accessToken);
 
   record LinkToken(String linkToken, Instant expiresAt) {}
 
   record ExchangeResult(String remoteItemId, String accessToken) {}
+
+  /**
+   * One provider transaction revision. Amounts are exact provider-signed decimals (positive means
+   * money leaving the account holder under Plaid's convention); normalization inverts the sign and
+   * validates everything else. Missing optional fields stay null and are quarantined or tolerated
+   * by the normalizer, never defaulted.
+   */
+  record ProviderTransaction(
+      String remoteAccountId,
+      String remoteTransactionId,
+      String pendingPredecessorId,
+      boolean pending,
+      String officialCurrency,
+      String unofficialCurrency,
+      BigDecimal amount,
+      LocalDate postedOn,
+      LocalDate authorizedOn,
+      String description,
+      String merchantName) {}
+
+  /** One fetched sync page. {@code nextCursor} is required by the provider on every page. */
+  record SyncPage(
+      List<ProviderTransaction> upserts,
+      List<String> removedRemoteTransactionIds,
+      String nextCursor,
+      boolean hasMore,
+      boolean historyReady) {}
+
+  record VerificationKey(String keyId, java.security.PublicKey publicKey, Instant expiresAt) {}
 
   /** The remote call may have succeeded while its response was lost; never blindly retried. */
   final class AmbiguousRemovalException extends RuntimeException {

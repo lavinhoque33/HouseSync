@@ -10,6 +10,7 @@ import {
 import { validateHouseholdName } from '../auth/validation';
 import { InvitationSection } from '../invitation/InvitationSection';
 import { FinancialAccountsSection } from '../finance/FinancialAccountsSection';
+import { BankActivitySection } from '../finance/BankActivitySection';
 import { FinancialConnectionsSection } from '../finance/FinancialConnectionsSection';
 import { TransactionsSection } from '../finance/TransactionsSection';
 import { MembersSection } from './MembersSection';
@@ -103,6 +104,16 @@ export function HouseholdSection({
   // TransactionsSection refetches account metadata, each without remounting
   // or discarding its entry draft.
   const [accountSignals, setAccountSignals] = useState<Record<string, number>>(
+    {},
+  );
+  // Per-household sibling signals. Bank-activity refreshes are driven by
+  // definitive connection lifecycle/selection commits; ledger refreshes are
+  // driven only by a successful bank-activity confirmation. Keeping them
+  // separate means a dismiss never disturbs the transaction feed.
+  const [bankActivitySignals, setBankActivitySignals] = useState<
+    Record<string, number>
+  >({});
+  const [ledgerSignals, setLedgerSignals] = useState<Record<string, number>>(
     {},
   );
 
@@ -278,6 +289,20 @@ export function HouseholdSection({
 
   function handleAccountListCommitted(householdId: string) {
     setAccountSignals((current) => ({
+      ...current,
+      [householdId]: (current[householdId] ?? 0) + 1,
+    }));
+  }
+
+  function handleBankActivityChanged(householdId: string) {
+    setBankActivitySignals((current) => ({
+      ...current,
+      [householdId]: (current[householdId] ?? 0) + 1,
+    }));
+  }
+
+  function handleLedgerChanged(householdId: string) {
+    setLedgerSignals((current) => ({
       ...current,
       [householdId]: (current[householdId] ?? 0) + 1,
     }));
@@ -523,6 +548,7 @@ export function HouseholdSection({
                 onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
                 authorityConfirmed={!stale && !loading && listError === null}
                 accountsRefreshSignal={accountSignals[household.id] ?? 0}
+                ledgerRefreshSignal={ledgerSignals[household.id] ?? 0}
               />
               <FinancialConnectionsSection
                 key={`${household.id}-connections`}
@@ -535,6 +561,20 @@ export function HouseholdSection({
                 onAccountListCommitted={() =>
                   handleAccountListCommitted(household.id)
                 }
+                onBankActivityChanged={() =>
+                  handleBankActivityChanged(household.id)
+                }
+              />
+              <BankActivitySection
+                key={`${household.id}-bank-activity`}
+                household={household}
+                csrf={csrf}
+                onCsrfRefreshed={onCsrfRefreshed}
+                onSessionExpired={onSessionExpired}
+                onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+                authorityConfirmed={!stale && !loading && listError === null}
+                refreshSignal={bankActivitySignals[household.id] ?? 0}
+                onLedgerChanged={() => handleLedgerChanged(household.id)}
               />
               <MembersSection
                 household={household}

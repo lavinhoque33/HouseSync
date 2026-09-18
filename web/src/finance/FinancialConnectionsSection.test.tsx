@@ -36,6 +36,8 @@ function connection(overrides: Record<string, unknown> = {}) {
     state: 'ACTIVE',
     generation: 0,
     version: 2,
+    syncState: 'IDLE',
+    historyReady: false,
     lastSuccessfulSyncAt: null,
     createdAt: '2026-09-17T00:00:00Z',
     updatedAt: '2026-09-17T00:00:00Z',
@@ -255,6 +257,7 @@ function renderSection(routes: Routes = {}) {
   const onSessionExpired = vi.fn();
   const onHouseholdAccessChanged = vi.fn();
   const onAccountListCommitted = vi.fn();
+  const onBankActivityChanged = vi.fn();
   render(
     <FinancialConnectionsSection
       household={HOUSEHOLD}
@@ -264,6 +267,7 @@ function renderSection(routes: Routes = {}) {
       onHouseholdAccessChanged={onHouseholdAccessChanged}
       authorityConfirmed
       onAccountListCommitted={onAccountListCommitted}
+      onBankActivityChanged={onBankActivityChanged}
     />,
   );
   return {
@@ -272,6 +276,7 @@ function renderSection(routes: Routes = {}) {
     onSessionExpired,
     onHouseholdAccessChanged,
     onAccountListCommitted,
+    onBankActivityChanged,
   };
 }
 
@@ -292,18 +297,23 @@ function csrfOf(call: Call | undefined): string | undefined {
 }
 
 describe('connection list', () => {
-  it('shows the private empty state without transaction-sync claims', async () => {
+  it('shows the private empty state with accurate Sync B inbox copy', async () => {
     renderSection({
       connectionsGet: () =>
         jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
     });
     await screen.findByText(/No bank connections yet/);
     expect(
-      screen.getByText(/Transaction imports are not part of this step/),
+      screen.getByText(
+        /Synced activity arrives in\s+your private bank-activity inbox/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/nothing reaches the ledger until you\s+confirm it/),
     ).toBeInTheDocument();
     expect(screen.getByText(/no balance is inferred/i)).toBeInTheDocument();
     expect(document.body.textContent ?? '').not.toMatch(
-      /synchroniz|transaction sync|auto-import|refresh balance/i,
+      /auto-import|refresh balance|statement import/i,
     );
   });
 
@@ -559,7 +569,8 @@ describe('account selection', () => {
   }
 
   it('discovers, drafts, and saves the explicit selection', async () => {
-    const { calls, onAccountListCommitted } = renderSection(selectionRoutes());
+    const { calls, onAccountListCommitted, onBankActivityChanged } =
+      renderSection(selectionRoutes());
     await screen.findByText('Test bank connection');
     fireEvent.click(screen.getByRole('button', { name: 'Choose accounts' }));
     await screen.findByText('Everyday Chequing');
@@ -571,6 +582,8 @@ describe('account selection', () => {
     );
     await screen.findByText(/Admitting 1 account/);
     expect(onAccountListCommitted).toHaveBeenCalledTimes(1);
+    // A committed selection also refreshes the sibling bank-activity inbox.
+    expect(onBankActivityChanged).toHaveBeenCalledTimes(1);
 
     const selects = postsTo(calls, '/account-selection');
     expect(selects).toHaveLength(1);

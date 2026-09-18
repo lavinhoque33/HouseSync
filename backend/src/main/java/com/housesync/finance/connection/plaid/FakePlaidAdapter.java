@@ -43,9 +43,99 @@ public class FakePlaidAdapter implements PlaidAdapter {
   private final AtomicLong removalRetryAfterSeconds = new AtomicLong(-1);
   private final AtomicReference<java.util.concurrent.CountDownLatch> removalGate =
       new AtomicReference<>(null);
+  private final java.util.concurrent.ConcurrentHashMap<
+          String, java.util.concurrent.ConcurrentLinkedQueue<PlaidAdapter.SyncPage>>
+      syncPages = new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentHashMap<String, AtomicReference<ProviderErrorClass>>
+      nextSyncFailure = new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentHashMap<String, AtomicReference<Boolean>>
+      runtimeSyncFailures = new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentHashMap<String, ProviderErrorClass>
+      scheduledSyncFailures = new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentHashMap<String, List<String>> syncCursorLog =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentHashMap<String, AtomicLong> syncCallCounts =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentHashMap<String, PlaidAdapter.VerificationKey>
+      verificationKeys = new java.util.concurrent.ConcurrentHashMap<>();
+  private final AtomicReference<ProviderErrorClass> keyFetchFailure = new AtomicReference<>(null);
+  private final java.util.concurrent.ConcurrentHashMap<String, AtomicLong> keyFetchCounts =
+      new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.concurrent.ConcurrentLinkedQueue<java.util.concurrent.CountDownLatch>
+      syncGates = new java.util.concurrent.ConcurrentLinkedQueue<>();
 
   public FakePlaidAdapter(Clock clock) {
     this.clock = clock;
+  }
+
+  /** Test-only queued sync pages, consumed in order; an empty queue yields an empty page. */
+  public void enqueueSyncPage(String accessToken, PlaidAdapter.SyncPage page) {
+    syncPages
+        .computeIfAbsent(accessToken, ignored -> new java.util.concurrent.ConcurrentLinkedQueue<>())
+        .add(page);
+  }
+
+  /** Test-only one-shot sync failure; consumed by the next fetch call. */
+  public void failNextSync(String accessToken, ProviderErrorClass errorClass) {
+    nextSyncFailure
+        .computeIfAbsent(accessToken, ignored -> new AtomicReference<>())
+        .set(errorClass);
+  }
+
+  /**
+   * Test-only one-shot unchecked sync failure (not a normalized provider error). Proves that an
+   * unexpected worker fault never bypasses lease-fence authority checks.
+   */
+  public void failNextSyncWithRuntimeException(String accessToken) {
+    runtimeSyncFailures
+        .computeIfAbsent(accessToken, ignored -> new AtomicReference<>(Boolean.FALSE))
+        .set(Boolean.TRUE);
+  }
+
+  /** Test-only failure scheduled for the Nth fetch call (1-based) of the access token. */
+  public void failSyncOnCall(String accessToken, long callNumber, ProviderErrorClass errorClass) {
+    scheduledSyncFailures.put(accessToken + "#" + callNumber, errorClass);
+  }
+
+  /** Test-only queue reset so a simulated provider replay starts from a clean page list. */
+  public void clearSyncPages(String accessToken) {
+    java.util.concurrent.ConcurrentLinkedQueue<SyncPage> queue = syncPages.get(accessToken);
+    if (queue != null) {
+      queue.clear();
+    }
+  }
+
+  /** Cursors passed to each fetch call in order; the empty string stands for the initial cursor. */
+  public List<String> syncCursors(String accessToken) {
+    List<String> log = syncCursorLog.get(accessToken);
+    return log == null ? List.of() : List.copyOf(log);
+  }
+
+  /** Test-only verification JWK registration keyed by kid. */
+  public void registerVerificationKey(PlaidAdapter.VerificationKey key) {
+    verificationKeys.put(key.keyId(), key);
+  }
+
+  /** Test-only key-infrastructure outage; reset with {@code null}. */
+  public void setKeyFetchFailure(ProviderErrorClass errorClass) {
+    keyFetchFailure.set(errorClass);
+  }
+
+  /**
+   * Test-only sync gate: each queued latch blocks exactly one fetch until released (FIFO), which
+   * enables deterministic multi-worker interleaving for fence and demand tests.
+   */
+  public void setSyncGate(java.util.concurrent.CountDownLatch gate) {
+    if (gate == null) {
+      syncGates.clear();
+      return;
+    }
+    syncGates.add(gate);
+  }
+
+  public long syncCallCount(String accessToken) {
+    AtomicLong counter = syncCallCounts.get(accessToken);
+    return counter == null ? 0 : counter.get();
   }
 
   /** Test-only fault injection; tests must reset to {@link FaultMode#NONE} afterwards. */
@@ -166,6 +256,81 @@ public class FakePlaidAdapter implements PlaidAdapter {
   /** Public-token seed the fake exchange accepts for an attempt. */
   public static String publicTokenFor(UUID attemptId) {
     return "fake-public-" + hex(attemptId, "link");
+  }
+
+  @Override
+  public SyncPage fetchTransactionChanges(String accessToken, String cursor) {
+    if (accessToken == null || !accessToken.startsWith("fake-access-")) {
+      throw new PlaidAdapterException(ProviderErrorClass.PERMANENT);
+    }
+    java.util.concurrent.CountDownLatch gate = syncGates.poll();
+    if (gate != null) {
+      try {
+        if (!gate.await(60, java.util.concurrent.TimeUnit.SECONDS)) {
+          throw new PlaidAdapterException(ProviderErrorClass.TRANSIENT);
+        }
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        throw new PlaidAdapterException(ProviderErrorClass.TRANSIENT);
+      }
+    }
+    AtomicReference<ProviderErrorClass> failure = nextSyncFailure.get(accessToken);
+    if (failure != null) {
+      ProviderErrorClass injected = failure.getAndSet(null);
+      if (injected != null) {
+        throw new PlaidAdapterException(injected);
+      }
+    }
+    AtomicReference<Boolean> runtimeFailure = runtimeSyncFailures.get(accessToken);
+    if (runtimeFailure != null && Boolean.TRUE.equals(runtimeFailure.getAndSet(Boolean.FALSE))) {
+      throw new IllegalStateException("fake provider runtime failure");
+    }
+    long calls =
+        syncCallCounts.computeIfAbsent(accessToken, ignored -> new AtomicLong()).incrementAndGet();
+    syncCursorLog
+        .computeIfAbsent(
+            accessToken,
+            ignored -> java.util.Collections.synchronizedList(new java.util.ArrayList<>()))
+        .add(cursor == null ? "" : cursor);
+    ProviderErrorClass scheduled = scheduledSyncFailures.remove(accessToken + "#" + calls);
+    if (scheduled != null) {
+      throw new PlaidAdapterException(scheduled);
+    }
+    java.util.concurrent.ConcurrentLinkedQueue<SyncPage> queue = syncPages.get(accessToken);
+    if (queue != null) {
+      SyncPage page = queue.poll();
+      if (page != null) {
+        return page;
+      }
+    }
+    String next =
+        "fake-cursor-" + ConnectionCrypto.sha256Hex(accessToken).substring(0, 12) + "-" + calls;
+    return new SyncPage(List.of(), List.of(), next, false, true);
+  }
+
+  @Override
+  public VerificationKey fetchVerificationKey(String keyId) {
+    keyFetchCounts.computeIfAbsent(keyId, ignored -> new AtomicLong()).incrementAndGet();
+    ProviderErrorClass failure = keyFetchFailure.get();
+    if (failure != null) {
+      throw new PlaidAdapterException(failure);
+    }
+    VerificationKey key = verificationKeys.get(keyId);
+    if (key == null) {
+      throw new PlaidAdapterException(ProviderErrorClass.PERMANENT);
+    }
+    return key;
+  }
+
+  /** Test-only fetch counter for key-cache assertions. */
+  public long keyFetchCount(String keyId) {
+    AtomicLong counter = keyFetchCounts.get(keyId);
+    return counter == null ? 0 : counter.get();
+  }
+
+  /** Test-only key removal to prove cached verification keys survive a provider outage. */
+  public void clearVerificationKeys() {
+    verificationKeys.clear();
   }
 
   private static String hex(UUID attemptId, String purpose) {

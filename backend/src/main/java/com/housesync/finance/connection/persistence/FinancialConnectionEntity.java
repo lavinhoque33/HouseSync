@@ -55,6 +55,14 @@ public class FinancialConnectionEntity {
   @Column(name = "last_successful_sync_at")
   private Instant lastSuccessfulSyncAt;
 
+  /** Separate sync state; background progress never bumps the optimistic lifecycle version. */
+  @Column(name = "sync_state", nullable = false, length = 16)
+  private String syncState = "IDLE";
+
+  /** True once the provider reported a completed historical update for this Item. */
+  @Column(name = "history_ready", nullable = false)
+  private boolean historyReady = false;
+
   @Column(name = "created_at", nullable = false)
   private Instant createdAt;
 
@@ -140,6 +148,45 @@ public class FinancialConnectionEntity {
     return lastSuccessfulSyncAt;
   }
 
+  public String getSyncState() {
+    return syncState;
+  }
+
+  public boolean isHistoryReady() {
+    return historyReady;
+  }
+
+  /** Background sync progress: deliberately outside the lifecycle optimistic version. */
+  public void markSyncState(String nextSyncState, Instant now) {
+    this.syncState = nextSyncState;
+    this.updatedAt = now;
+  }
+
+  /**
+   * Atomic round commit: final cursor, success timestamp, readiness, and idle sync state all move
+   * together with the staged observation changes in one transaction.
+   */
+  public void commitSync(String cursor, boolean ready, Instant now) {
+    this.cursor = cursor;
+    this.lastSuccessfulSyncAt = now;
+    this.historyReady = this.historyReady || ready;
+    this.syncState = "IDLE";
+    this.updatedAt = now;
+  }
+
+  /**
+   * Selection change that adds an account whose history was never imported: the Item-wide cursor is
+   * reset so the provider replays from the beginning for every still-selected mapping. This fences
+   * generation so in-flight workers cannot commit partial pre-reset data.
+   */
+  public void resetSyncProgress(Instant now) {
+    this.generation += 1;
+    this.cursor = null;
+    this.historyReady = false;
+    this.syncState = "IDLE";
+    bumpVersion(now);
+  }
+
   public Instant getCreatedAt() {
     return createdAt;
   }
@@ -178,6 +225,8 @@ public class FinancialConnectionEntity {
     this.encryptedCredential = null;
     this.credentialKeyId = null;
     this.cursor = null;
+    this.historyReady = false;
+    this.syncState = "IDLE";
     this.state = "DISCONNECTED";
     bumpVersion(now);
   }

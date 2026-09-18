@@ -45,6 +45,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 public class ConnectionSelectionService extends ConnectedFinanceBase {
 
   private final FinancialAccountRepository accounts;
+  private final ConnectionSyncDemandRegistrar demands;
 
   public ConnectionSelectionService(
       ConnectedFinanceProperties properties,
@@ -59,7 +60,8 @@ public class ConnectionSelectionService extends ConnectedFinanceBase {
       PlaidAdapter adapter,
       Clock clock,
       PlatformTransactionManager transactionManager,
-      FinancialAccountRepository accounts) {
+      FinancialAccountRepository accounts,
+      ConnectionSyncDemandRegistrar demands) {
     super(
         properties,
         connections,
@@ -74,6 +76,7 @@ public class ConnectionSelectionService extends ConnectedFinanceBase {
         clock,
         transactionManager);
     this.accounts = accounts;
+    this.demands = demands;
   }
 
   public SelectionResult select(
@@ -148,6 +151,8 @@ public class ConnectionSelectionService extends ConnectedFinanceBase {
           }
           Instant now = now();
           boolean changed = false;
+          boolean selectionAdded = false;
+          boolean resetHistory = false;
           for (ConnectionAccountMappingEntity mapping : owned) {
             boolean want = requested.contains(mapping.getId());
             if (want && mapping.getLocalAccountId() == null) {
@@ -169,21 +174,38 @@ public class ConnectionSelectionService extends ConnectedFinanceBase {
               accounts.save(admitted);
               mapping.admit(admitted.getId(), now);
               changed = true;
+              selectionAdded = true;
+              if (!mapping.isHistoryImported() && connection.getCursor() != null) {
+                resetHistory = true;
+              }
             } else if (want && !mapping.isSelected()) {
               mapping.setSelected(true, now);
               changed = true;
+              selectionAdded = true;
+              if (!mapping.isHistoryImported() && connection.getCursor() != null) {
+                resetHistory = true;
+              }
             } else if (!want && mapping.isSelected()) {
               // Deselection blocks admission while retaining history and account identity.
               mapping.setSelected(false, now);
               changed = true;
             }
           }
-          if (changed) {
+          if (resetHistory) {
+            // Adding an account whose history was never imported resets the Item-wide cursor so
+            // the provider replays from the beginning; existing associations and deduplication
+            // survive because observation identities are stable.
+            connection.resetSyncProgress(now);
+            demands.demand(connectionId, now);
+          } else if (changed) {
             if (connection.getVersion() == Integer.MAX_VALUE) {
               throw new com.housesync.finance.account.web.FinancialAccountExceptions
                   .ResourceVersionExhaustedException();
             }
             connection.transition(connection.getState(), now);
+          }
+          if (selectionAdded) {
+            demands.demand(connectionId, now);
           }
           try {
             reserve(

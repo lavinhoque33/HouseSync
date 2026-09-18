@@ -4,13 +4,22 @@ import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAcc
 import com.housesync.finance.account.web.FinancialAccountExceptions.IdempotencyConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionExhaustedException;
+import com.housesync.finance.connection.web.ConnectionExceptions.BankActivityNotFoundException;
 import com.housesync.finance.connection.web.ConnectionExceptions.ConnectedFinanceDisabledException;
 import com.housesync.finance.connection.web.ConnectionExceptions.ConnectionDisconnectedException;
 import com.housesync.finance.connection.web.ConnectionExceptions.ConnectionIdempotencyConflictException;
 import com.housesync.finance.connection.web.ConnectionExceptions.ConnectionNotFoundException;
 import com.housesync.finance.connection.web.ConnectionExceptions.ConnectionNotReadyException;
 import com.housesync.finance.connection.web.ConnectionExceptions.LinkAttemptExpiredException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ManualSyncRateLimitedException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ObservationAdmittedException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ObservationAlreadyConfirmedException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ObservationDismissedException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ObservationInvalidException;
+import com.housesync.finance.connection.web.ConnectionExceptions.ObservationNotPostedException;
 import com.housesync.finance.connection.web.ConnectionExceptions.ProviderTransientException;
+import com.housesync.finance.connection.webhook.PlaidWebhookVerifier.WebhookUnavailableException;
+import com.housesync.finance.connection.webhook.PlaidWebhookVerifier.WebhookVerificationException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsForbiddenException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionConflictException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionExhaustedException;
@@ -371,6 +380,97 @@ public class FinancialAccountExceptionHandler {
         HttpStatus.SERVICE_UNAVAILABLE,
         ErrorCodes.FINANCE_BUSY,
         "The provider is temporarily unavailable. Refresh before retrying.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ManualSyncRateLimitedException.class)
+  public ResponseEntity<ApiError> manualSyncRateLimited(ManualSyncRateLimitedException failure) {
+    return error(
+        HttpStatus.TOO_MANY_REQUESTS,
+        ErrorCodes.MANUAL_SYNC_RATE_LIMITED,
+        "A sync ran moments ago. Try again shortly.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(BankActivityNotFoundException.class)
+  public ResponseEntity<ApiError> bankActivityNotFound(BankActivityNotFoundException failure) {
+    return error(
+        HttpStatus.NOT_FOUND,
+        ErrorCodes.BANK_ACTIVITY_NOT_FOUND,
+        "Bank activity was not found.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ObservationNotPostedException.class)
+  public ResponseEntity<ApiError> observationNotPosted(ObservationNotPostedException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.OBSERVATION_NOT_POSTED,
+        "Only posted bank activity can be confirmed.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ObservationAlreadyConfirmedException.class)
+  public ResponseEntity<ApiError> observationAlreadyConfirmed(
+      ObservationAlreadyConfirmedException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.OBSERVATION_ALREADY_CONFIRMED,
+        "That bank activity was already added to the ledger.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ObservationInvalidException.class)
+  public ResponseEntity<ApiError> observationInvalid(ObservationInvalidException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.OBSERVATION_INVALID,
+        "That bank activity has invalid provider details and needs review.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ObservationDismissedException.class)
+  public ResponseEntity<ApiError> observationDismissed(ObservationDismissedException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.OBSERVATION_DISMISSED,
+        "That bank activity was dismissed.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(ObservationAdmittedException.class)
+  public ResponseEntity<ApiError> observationAdmitted(ObservationAdmittedException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.OBSERVATION_ADMITTED,
+        "That bank activity is already in the ledger.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(WebhookVerificationException.class)
+  public ResponseEntity<ApiError> webhookVerification(WebhookVerificationException failure) {
+    return error(
+        HttpStatus.UNAUTHORIZED,
+        ErrorCodes.UNAUTHENTICATED,
+        "Request could not be verified.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(WebhookUnavailableException.class)
+  public ResponseEntity<ApiError> webhookUnavailable(WebhookUnavailableException failure) {
+    return error(
+        HttpStatus.SERVICE_UNAVAILABLE,
+        ErrorCodes.FINANCE_BUSY,
+        "Webhook admission is temporarily unavailable.",
         null,
         failure);
   }

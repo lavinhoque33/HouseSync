@@ -47,6 +47,8 @@ import org.springframework.transaction.PlatformTransactionManager;
 @Service
 public class ConnectionLinkService extends ConnectedFinanceBase {
 
+  private final ConnectionSyncDemandRegistrar demands;
+
   public ConnectionLinkService(
       ConnectedFinanceProperties properties,
       FinancialConnectionRepository connections,
@@ -59,7 +61,8 @@ public class ConnectionLinkService extends ConnectedFinanceBase {
       ConnectionCrypto crypto,
       PlaidAdapter adapter,
       Clock clock,
-      PlatformTransactionManager transactionManager) {
+      PlatformTransactionManager transactionManager,
+      ConnectionSyncDemandRegistrar demands) {
     super(
         properties,
         connections,
@@ -73,6 +76,7 @@ public class ConnectionLinkService extends ConnectedFinanceBase {
         adapter,
         clock,
         transactionManager);
+    this.demands = demands;
   }
 
   /** Starts a new-link attempt: reserves intent, then attaches the provider Link token. */
@@ -460,6 +464,8 @@ public class ConnectionLinkService extends ConnectedFinanceBase {
         operations.findById(operationId).orElseThrow(ConnectionNotFoundException::new);
     operation.bindConnection(connectionId, now);
     operation.finish("SUCCEEDED", null, now);
+    // Persist an initial sync demand with the link so history is fetched even without a webhook.
+    demands.demand(connectionId, now);
     return operationId;
   }
 
@@ -592,6 +598,8 @@ public class ConnectionLinkService extends ConnectedFinanceBase {
                 }
                 attempt.finish("SUCCEEDED", connection.getId(), null, now);
                 finishOperation(operationId, "SUCCEEDED", null, now);
+                // Reconnect completion wakes the retained cursor with fresh demand.
+                demands.demand(connection.getId(), now);
                 return new UpdateCommit(operationId);
               });
       if (commit.rejected()) {
@@ -686,7 +694,20 @@ public class ConnectionLinkService extends ConnectedFinanceBase {
           eligible ? null : (kind == null ? "UNSUPPORTED_KIND" : "UNSUPPORTED_CURRENCY");
       String label = safeLabel(remote.name());
       if (existing.isPresent()) {
-        existing.get().refreshMetadata(label, kind, currency, eligible, reason, now);
+        ConnectionAccountMappingEntity mapping = existing.get();
+        if (mapping.getLocalAccountId() != null) {
+          // Admitted account identity is immutable: provider metadata never rewrites the
+          // admitted kind, currency, or local label. A conflicting classification blocks
+          // new admission for this mapping until the owner resolves it.
+          if (kind == null
+              || currency == null
+              || !kind.equals(mapping.getKind())
+              || !currency.equals(mapping.getCurrency())) {
+            mapping.blockIdentityConflict("IDENTITY_CONFLICT", now);
+          }
+        } else {
+          mapping.refreshMetadata(label, kind, currency, eligible, reason, now);
+        }
       } else {
         mappings.save(
             new ConnectionAccountMappingEntity(

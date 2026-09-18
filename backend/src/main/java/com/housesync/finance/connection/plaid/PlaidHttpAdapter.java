@@ -2,14 +2,25 @@ package com.housesync.finance.connection.plaid;
 
 import com.housesync.finance.connection.config.ConnectedFinanceProperties;
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.security.AlgorithmParameters;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.spec.ECGenParameterSpec;
+import java.security.spec.ECParameterSpec;
+import java.security.spec.ECPoint;
+import java.security.spec.ECPublicKeySpec;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -166,6 +177,188 @@ public class PlaidHttpAdapter implements PlaidAdapter {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("access_token", accessToken);
     post("/item/remove", body);
+  }
+
+  /**
+   * One {@code /transactions/sync} page. Envelope corruption (non-array lists, missing next cursor
+   * or has-more flag, an upset without account/transaction identity, or a non-numeric amount)
+   * aborts the round rather than inventing values; a domain-invalid but identifiable transaction
+   * keeps its provider fields and is quarantined by the normalizer. The mapper is the dedicated
+   * exact-decimal mapper, so {@code decimalValue()} never passes through a binary float.
+   */
+  @Override
+  public SyncPage fetchTransactionChanges(String accessToken, String cursor) {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("access_token", accessToken);
+    body.put("count", 100);
+    if (cursor != null && !cursor.isBlank()) {
+      body.put("cursor", cursor);
+    }
+    JsonNode response = post("/transactions/sync", body);
+    JsonNode added = response.path("added");
+    JsonNode modified = response.path("modified");
+    JsonNode removed = response.path("removed");
+    JsonNode nextCursorNode = response.path("next_cursor");
+    JsonNode hasMoreNode = response.path("has_more");
+    if (!added.isArray() || !modified.isArray() || !removed.isArray()) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    if (!nextCursorNode.isTextual() || nextCursorNode.asText().isBlank()) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    if (!hasMoreNode.isBoolean()) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    List<ProviderTransaction> upserts = new ArrayList<>();
+    for (JsonNode transaction : added) {
+      upserts.add(parseTransaction(transaction));
+    }
+    for (JsonNode transaction : modified) {
+      upserts.add(parseTransaction(transaction));
+    }
+    List<String> removedIds = new ArrayList<>();
+    for (JsonNode transaction : removed) {
+      String remoteId = readText(transaction, "transaction_id");
+      // A removal without identity cannot become a tombstone or be replayed safely.
+      if (remoteId == null) {
+        throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+      }
+      removedIds.add(remoteId);
+    }
+    boolean historyReady =
+        "HISTORICAL_UPDATE_COMPLETE"
+            .equalsIgnoreCase(response.path("transactions_update_status").asText(""));
+    return new SyncPage(
+        upserts, removedIds, nextCursorNode.asText(), hasMoreNode.asBoolean(), historyReady);
+  }
+
+  private ProviderTransaction parseTransaction(JsonNode transaction) {
+    String remoteAccountId = readText(transaction, "account_id");
+    String remoteTransactionId = readText(transaction, "transaction_id");
+    if (remoteAccountId == null || remoteTransactionId == null) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    String predecessor = readText(transaction, "pending_transaction_id");
+    JsonNode pendingNode = transaction.path("pending");
+    if (!pendingNode.isMissingNode() && !pendingNode.isBoolean()) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    boolean pending = pendingNode.isBoolean() && pendingNode.asBoolean();
+    String officialCurrency = readText(transaction, "iso_currency_code");
+    String unofficialCurrency = readText(transaction, "unofficial_currency_code");
+    BigDecimal amount = readDecimal(transaction.path("amount"));
+    LocalDate postedOn = readDate(transaction.path("date"));
+    LocalDate authorizedOn = readDate(transaction.path("authorized_date"));
+    String name = readText(transaction, "name");
+    String merchantName = readText(transaction, "merchant_name");
+    return new ProviderTransaction(
+        remoteAccountId,
+        remoteTransactionId,
+        predecessor,
+        pending,
+        officialCurrency,
+        unofficialCurrency,
+        amount,
+        postedOn,
+        authorizedOn,
+        name,
+        merchantName);
+  }
+
+  /**
+   * Provider decimal tokens arrive as JSON numbers. Anything else (absent, string, boolean) is a
+   * corrupt envelope; correctness cannot be recovered by guessing.
+   */
+  private static BigDecimal readDecimal(JsonNode node) {
+    if (node.isMissingNode() || node.isNull()) {
+      return null;
+    }
+    if (!node.isNumber()) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    try {
+      return node.decimalValue();
+    } catch (RuntimeException rejected) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+  }
+
+  private static LocalDate readDate(JsonNode node) {
+    String text = node.isTextual() ? node.asText() : null;
+    if (text == null || text.isBlank()) {
+      return null;
+    }
+    try {
+      return LocalDate.parse(text.strip());
+    } catch (RuntimeException rejected) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+  }
+
+  private static String readText(JsonNode object, String field) {
+    JsonNode node = object.path(field);
+    if (node.isMissingNode() || node.isNull()) {
+      return null;
+    }
+    if (!node.isTextual()) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    String text = node.asText();
+    return text.isBlank() ? null : text;
+  }
+
+  /**
+   * Fetches a Plaid verification JWK by key id through the fixed allowlisted host. The JWK must be
+   * an EC P-256 key for ES256; a malformed key is invalid data while a missing endpoint or a
+   * provider failure is transient infrastructure, never a verification success.
+   */
+  @Override
+  public VerificationKey fetchVerificationKey(String keyId) {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("key_id", keyId);
+    JsonNode response = post("/webhook_verification_key/get", body);
+    JsonNode key = response.path("key");
+    if (!key.isObject()) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    String kid = readText(key, "kid");
+    String kty = readText(key, "kty");
+    String crv = readText(key, "crv");
+    if (kid == null || !"EC".equals(kty) || !"P-256".equals(crv)) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    String alg = readText(key, "alg");
+    if (alg != null && !"ES256".equals(alg)) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    String x = readText(key, "x");
+    String y = readText(key, "y");
+    if (x == null || y == null) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
+    Instant expiredAt = null;
+    String expired = readText(key, "expired_at");
+    if (expired != null) {
+      try {
+        expiredAt = Instant.parse(expired.strip());
+      } catch (RuntimeException rejected) {
+        throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+      }
+    }
+    try {
+      AlgorithmParameters parameters = AlgorithmParameters.getInstance("EC");
+      parameters.init(new ECGenParameterSpec("secp256r1"));
+      ECParameterSpec spec = parameters.getParameterSpec(ECParameterSpec.class);
+      ECPoint point =
+          new ECPoint(
+              new BigInteger(1, Base64.getUrlDecoder().decode(x)),
+              new BigInteger(1, Base64.getUrlDecoder().decode(y)));
+      PublicKey publicKey =
+          KeyFactory.getInstance("EC").generatePublic(new ECPublicKeySpec(point, spec));
+      return new VerificationKey(kid, publicKey, expiredAt);
+    } catch (RuntimeException | java.security.GeneralSecurityException rejected) {
+      throw new PlaidAdapterException(ProviderErrorClass.INVALID_DATA);
+    }
   }
 
   private JsonNode post(String path, Map<String, Object> body) {
