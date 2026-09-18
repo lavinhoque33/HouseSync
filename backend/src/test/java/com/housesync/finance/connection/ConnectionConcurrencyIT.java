@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -63,8 +64,64 @@ class ConnectionConcurrencyIT extends ConnectedFinanceITSupport {
 
     List<Resp> responses = race(8, () -> startLink(owner, householdId, key));
     for (Resp response : responses) {
-      assertThat(response.status()).isIn(200, 201, 503);
+      assertThat(response.status()).as(response.body()).isIn(200, 201, 503);
     }
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM connection_operation_idempotency_keys"
+                    + " WHERE idempotency_key = ?::uuid AND operation = 'LINK_START'",
+                Integer.class,
+                key.toString()))
+        .isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(DISTINCT resource_id) FROM"
+                    + " connection_operation_idempotency_keys"
+                    + " WHERE idempotency_key = ?::uuid AND operation = 'LINK_START'",
+                Integer.class,
+                key.toString()))
+        .isEqualTo(1);
+  }
+
+  /**
+   * Deterministic reproduction of the reserved-attempt window: the winning starter is held inside
+   * the provider Link-token call after its durable key reservation commits. A same-key starter that
+   * arrives in that window must converge on an allowed replay/retryable outcome, never a version or
+   * idempotency conflict, and the one-attempt/one-resource invariants must hold.
+   */
+  @Test
+  void concurrentLinkStartConvergesWhileTheWinningTokenIsInFlight() throws Exception {
+    Agent owner = signedInAgent("race-start-window");
+    String householdId = createHousehold(owner, "Race window home");
+    UUID key = UUID.randomUUID();
+
+    CountDownLatch gate = new CountDownLatch(1);
+    fake.setLinkTokenGate(gate);
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      Future<Resp> winner = pool.submit(() -> startLink(owner, householdId, key));
+      long deadline = System.currentTimeMillis() + 15_000;
+      while (System.currentTimeMillis() < deadline
+          && jdbc.queryForObject(
+                  "SELECT COUNT(*) FROM connection_operation_idempotency_keys"
+                      + " WHERE idempotency_key = ?::uuid AND operation = 'LINK_START'",
+                  Integer.class,
+                  key.toString())
+              == 0) {
+        Thread.sleep(25);
+      }
+      // The winner holds the reservation and is blocked before attaching the token.
+      Resp racing = startLink(owner, householdId, key);
+      gate.countDown();
+      Resp winnerResponse = winner.get(30, TimeUnit.SECONDS);
+
+      assertThat(racing.status()).as(racing.body()).isIn(200, 503);
+      assertThat(winnerResponse.status()).as(winnerResponse.body()).isIn(201, 200, 503);
+    } finally {
+      gate.countDown();
+      pool.shutdownNow();
+    }
+
     assertThat(
             jdbc.queryForObject(
                 "SELECT COUNT(*) FROM connection_operation_idempotency_keys"

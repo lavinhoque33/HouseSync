@@ -556,6 +556,93 @@ class ConnectedFinanceSyncRaceIT extends ConnectedFinanceITSupport {
         .containsEntry("state", "QUEUED");
   }
 
+  /**
+   * Regression for the CI `connection_sync_work_timestamp_order` violation: two concurrent first
+   * demands can carry call timestamps in either order, so an older conflicting demand must never
+   * move `updated_at` backwards past `created_at`. The row is placed in the future so a naive
+   * assignment would definitely violate the constraint; GREATEST keeps it ordered and the demand
+   * sequence still advances.
+   */
+  @Test
+  void olderConflictingDemandNeverMovesUpdatedAtBackwards() throws Exception {
+    ConnectedLink link = linkedCheckingOnly("race-demand-clock");
+    UUID workId = workId(link);
+    jdbc.update(
+        "UPDATE connection_sync_work"
+            + " SET created_at = now() + interval '1 hour', updated_at = now() + interval '1 hour'"
+            + " WHERE id = ?::uuid",
+        workId.toString());
+    long before =
+        jdbc.queryForObject(
+            "SELECT demand_sequence FROM connection_sync_work WHERE id = ?::uuid",
+            Long.class,
+            workId.toString());
+
+    new TransactionTemplate(transactionManager)
+        .execute(
+            status -> {
+              demands.demand(
+                  UUID.fromString(link.connectionId()),
+                  Instant.now().minus(java.time.Duration.ofHours(2)));
+              return null;
+            });
+
+    assertThat(
+            jdbc.queryForMap(
+                "SELECT demand_sequence, updated_at >= created_at AS ordered,"
+                    + " updated_at > now() AS future FROM connection_sync_work WHERE id = ?::uuid",
+                workId.toString()))
+        .containsEntry("demand_sequence", before + 1)
+        .containsEntry("ordered", true)
+        .containsEntry("future", true);
+  }
+
+  /**
+   * Concurrent variant of the same hazard: both starters race for the first demand with inverted
+   * clock readings. Exactly one row exists with a monotonic sequence and ordered timestamps.
+   */
+  @Test
+  void concurrentInvertedDemandTimestampsKeepOrderAndSequence() throws Exception {
+    ConnectedLink link = linkedCheckingOnly("race-demand-inverted");
+    jdbc.update(
+        "DELETE FROM connection_sync_work WHERE connection_id = ?::uuid", link.connectionId());
+
+    CyclicBarrier barrier = new CyclicBarrier(2);
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      List<Future<Object>> futures = new ArrayList<>();
+      Instant base = Instant.now();
+      for (int index = 0; index < 2; index++) {
+        Instant requestedAt = index == 0 ? base : base.minus(java.time.Duration.ofMinutes(5));
+        futures.add(
+            pool.submit(
+                (Callable<Object>)
+                    () -> {
+                      barrier.await(5, TimeUnit.SECONDS);
+                      return new TransactionTemplate(transactionManager)
+                          .execute(
+                              status -> {
+                                demands.demand(UUID.fromString(link.connectionId()), requestedAt);
+                                return null;
+                              });
+                    }));
+      }
+      for (Future<Object> future : futures) {
+        future.get(20, TimeUnit.SECONDS);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+
+    assertThat(
+            jdbc.queryForMap(
+                "SELECT demand_sequence, updated_at >= created_at AS ordered"
+                    + " FROM connection_sync_work WHERE connection_id = ?::uuid",
+                link.connectionId()))
+        .containsEntry("demand_sequence", 2L)
+        .containsEntry("ordered", true);
+  }
+
   @Test
   void concurrentConfirmsAdmitExactlyOnce() throws Exception {
     Agent owner = signedInAgent("race-confirm");

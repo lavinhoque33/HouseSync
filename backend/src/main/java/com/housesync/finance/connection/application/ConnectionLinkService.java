@@ -740,7 +740,14 @@ public class ConnectionLinkService extends ConnectedFinanceBase {
       if ("FAILED".equals(attempt.getState())) {
         throw mapStoredFailure(attempt.getErrorCode());
       }
-      throw new ConnectionNotReadyException();
+      if ("EXPIRED".equals(attempt.getState())) {
+        throw new LinkAttemptExpiredException();
+      }
+      // The same-key winner has durably reserved this attempt but has not attached the provider
+      // Link token yet (still in flight, or crashed before attaching). Concurrent same-key
+      // starters converge on the durable 201/200 replay once the winner commits; until then this
+      // is a retryable transient outcome, never a version or idempotency conflict.
+      throw new ProviderTransientException();
     }
     Instant expiresAt = earliest(attempt.getExpiresAt(), attempt.getLinkTokenExpiresAt());
     if (!now.isBefore(expiresAt)) {

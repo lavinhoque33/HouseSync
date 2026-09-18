@@ -31,6 +31,11 @@ public interface ConnectionSyncWorkRepository
    * monotonic sequence, preserving a running round's lease fields. This avoids a flush-time unique
    * violation (which would poison the caller's persistence context) and needs no read-modify-write
    * race handling; callers that need the row re-read it under a row lock in the same transaction.
+   *
+   * <p>Two concurrent first demands can carry caller timestamps in either order, so the conflict
+   * branch never assigns {@code updated_at} directly: it keeps the greatest of the existing value
+   * and the incoming one. A backwards move would violate {@code
+   * connection_sync_work_timestamp_order} (and misstate the row's freshness).
    */
   @Modifying
   @Transactional
@@ -50,7 +55,7 @@ public interface ConnectionSyncWorkRepository
               THEN connection_sync_work.next_retry_at ELSE NULL END,
             last_error = CASE WHEN connection_sync_work.state = 'RUNNING'
               THEN connection_sync_work.last_error ELSE NULL END,
-            updated_at = :now
+            updated_at = GREATEST(connection_sync_work.updated_at, :now)
           """)
   int upsertDemand(
       @Param("id") UUID id, @Param("connectionId") UUID connectionId, @Param("now") Instant now);

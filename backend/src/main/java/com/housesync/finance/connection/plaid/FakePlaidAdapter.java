@@ -54,6 +54,8 @@ public class FakePlaidAdapter implements PlaidAdapter {
       scheduledSyncFailures = new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentHashMap<String, List<String>> syncCursorLog =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private final AtomicReference<java.util.concurrent.CountDownLatch> linkTokenGate =
+      new AtomicReference<>(null);
   private final java.util.concurrent.ConcurrentHashMap<String, AtomicLong> syncCallCounts =
       new java.util.concurrent.ConcurrentHashMap<>();
   private final java.util.concurrent.ConcurrentHashMap<String, PlaidAdapter.VerificationKey>
@@ -122,6 +124,16 @@ public class FakePlaidAdapter implements PlaidAdapter {
   }
 
   /**
+   * Test-only Link-token gate: the next createLinkToken call waits for the latch. It holds the
+   * winner inside the provider call after its idempotency reservation commits, which
+   * deterministically exposes the reserved-attempt-without-token window to concurrent same-key
+   * starters.
+   */
+  public void setLinkTokenGate(java.util.concurrent.CountDownLatch gate) {
+    linkTokenGate.set(gate);
+  }
+
+  /**
    * Test-only sync gate: each queued latch blocks exactly one fetch until released (FIFO), which
    * enables deterministic multi-worker interleaving for fence and demand tests.
    */
@@ -174,6 +186,17 @@ public class FakePlaidAdapter implements PlaidAdapter {
   @Override
   public LinkToken createLinkToken(UUID attemptId, String clientUserId) {
     lastClientUserId.set(clientUserId);
+    java.util.concurrent.CountDownLatch gate = linkTokenGate.getAndSet(null);
+    if (gate != null) {
+      try {
+        if (!gate.await(60, java.util.concurrent.TimeUnit.SECONDS)) {
+          throw new PlaidAdapterException(ProviderErrorClass.TRANSIENT);
+        }
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        throw new PlaidAdapterException(ProviderErrorClass.TRANSIENT);
+      }
+    }
     return new LinkToken(
         "fake-link-" + hex(attemptId, "link"), Instant.now(clock).plusSeconds(1800));
   }
