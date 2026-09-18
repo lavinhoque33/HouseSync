@@ -65,8 +65,16 @@ public class PlaidHttpAdapter implements PlaidAdapter {
   }
 
   @Override
-  public LinkToken createUpdateLinkToken(String accessToken) {
+  public LinkToken createUpdateLinkToken(String accessToken, String clientUserId) {
+    // Plaid requires the same base envelope as new-link mode and rejects products in update mode.
     Map<String, Object> body = new LinkedHashMap<>();
+    body.put("client_name", "HouseSync");
+    body.put("country_codes", List.of("US", "CA"));
+    body.put("language", "en");
+    body.put("user", Map.of("client_user_id", clientUserId));
+    if (!properties.getRedirectUrl().isBlank()) {
+      body.put("redirect_uri", properties.getRedirectUrl());
+    }
     body.put("access_token", accessToken);
     return readLinkToken(post("/link/token/create", body));
   }

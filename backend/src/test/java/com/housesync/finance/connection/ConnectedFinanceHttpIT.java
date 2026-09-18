@@ -3,6 +3,7 @@ package com.housesync.finance.connection;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.housesync.finance.connection.application.ConnectionLifecycleService;
+import com.housesync.finance.connection.crypto.ConnectionCrypto;
 import com.housesync.finance.connection.plaid.FakePlaidAdapter;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
@@ -312,6 +313,9 @@ class ConnectedFinanceHttpIT extends ConnectedFinanceITSupport {
                 Long.class,
                 connectionId))
         .isEqualTo(1L);
+    // Update mode must reuse the stable owner-derived client user id, never a fresh identity.
+    assertThat(fake.lastClientUserId())
+        .isEqualTo(ConnectionCrypto.sha256Hex("link-user\0" + householdId + "\0" + owner.userId()));
 
     Resp reconnectReplay =
         owner.request(

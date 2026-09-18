@@ -32,6 +32,7 @@ class PlaidHttpAdapterTest {
   private volatile String payload = "{}";
 
   private PlaidHttpAdapter adapter;
+  private ConnectedFinanceProperties properties;
 
   @BeforeEach
   void startStub() throws Exception {
@@ -48,7 +49,7 @@ class PlaidHttpAdapterTest {
           exchange.close();
         });
     server.start();
-    ConnectedFinanceProperties properties = new ConnectedFinanceProperties();
+    properties = new ConnectedFinanceProperties();
     properties.setClientId("test-client");
     properties.setSecret("test-secret");
     properties.setBaseUrl("http://127.0.0.1:" + server.getAddress().getPort());
@@ -79,6 +80,35 @@ class PlaidHttpAdapterTest {
   }
 
   @Test
+  void updateLinkTokenUsesUpdateModeEnvelopeWithoutProducts() {
+    payload = "{\"link_token\":\"link-update\",\"expiration\":900}";
+    PlaidAdapter.LinkToken token = adapter.createUpdateLinkToken("access-1", "opaque-user-1");
+
+    assertThat(paths).containsExactly("/link/token/create");
+    assertThat(bodies.get(0))
+        .contains("\"client_name\":\"HouseSync\"")
+        .contains("\"country_codes\":[\"US\",\"CA\"]")
+        .contains("\"language\":\"en\"")
+        .contains("\"user\":{\"client_user_id\":\"opaque-user-1\"}")
+        .contains("\"access_token\":\"access-1\"")
+        .doesNotContain("\"products\"")
+        .doesNotContain("\"redirect_uri\"");
+    assertThat(token.linkToken()).isEqualTo("link-update");
+    assertThat(token.expiresAt()).isEqualTo(Instant.EPOCH.plusSeconds(900));
+  }
+
+  @Test
+  void updateLinkTokenCarriesConfiguredRedirectUri() {
+    payload = "{\"link_token\":\"link-update\",\"expiration\":900}";
+    properties.setRedirectUrl("https://app.example.test/connected-finance/callback");
+
+    adapter.createUpdateLinkToken("access-1", "opaque-user-1");
+
+    assertThat(bodies.get(0))
+        .contains("\"redirect_uri\":\"https://app.example.test/connected-finance/callback\"");
+  }
+
+  @Test
   void linkTokenRejectsBlankTokenAndInvalidExpiration() {
     payload = "{}";
     assertThatThrownBy(() -> adapter.createLinkToken(UUID.randomUUID(), "opaque-user-1"))
@@ -93,11 +123,11 @@ class PlaidHttpAdapterTest {
         .isInstanceOf(PlaidAdapterException.class);
 
     payload = "{\"link_token\":\"link-1\"}";
-    assertThatThrownBy(() -> adapter.createUpdateLinkToken("access-1"))
+    assertThatThrownBy(() -> adapter.createUpdateLinkToken("access-1", "opaque-user-1"))
         .isInstanceOf(PlaidAdapterException.class);
 
     payload = "{\"link_token\":\"link-1\",\"expiration\":0}";
-    assertThatThrownBy(() -> adapter.createUpdateLinkToken("access-1"))
+    assertThatThrownBy(() -> adapter.createUpdateLinkToken("access-1", "opaque-user-1"))
         .isInstanceOf(PlaidAdapterException.class);
   }
 
@@ -110,7 +140,7 @@ class PlaidHttpAdapterTest {
     assertThat(token.expiresAt()).isEqualTo(Instant.parse("1970-01-02T00:00:00Z"));
 
     payload = "{\"link_token\":\"link-iso\",\"expiration\":\"1970-01-02T00:00:00+00:00\"}";
-    PlaidAdapter.LinkToken offset = adapter.createUpdateLinkToken("access-1");
+    PlaidAdapter.LinkToken offset = adapter.createUpdateLinkToken("access-1", "opaque-user-1");
     assertThat(offset.expiresAt()).isEqualTo(Instant.parse("1970-01-02T00:00:00Z"));
 
     payload = "{\"link_token\":\"link-iso\",\"expiration\":\"1969-12-31T23:59:59Z\"}";
@@ -122,7 +152,7 @@ class PlaidHttpAdapterTest {
                     .isEqualTo(ProviderErrorClass.INVALID_DATA));
 
     payload = "{\"link_token\":\"link-iso\",\"expiration\":\"not-a-timestamp\"}";
-    assertThatThrownBy(() -> adapter.createUpdateLinkToken("access-1"))
+    assertThatThrownBy(() -> adapter.createUpdateLinkToken("access-1", "opaque-user-1"))
         .isInstanceOf(PlaidAdapterException.class);
 
     payload = "{\"link_token\":\"link-iso\",\"expiration\":\"\"}";

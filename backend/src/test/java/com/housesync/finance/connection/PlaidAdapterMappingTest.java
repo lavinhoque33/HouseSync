@@ -55,7 +55,7 @@ class PlaidAdapterMappingTest {
     }
 
     @Override
-    public LinkToken createUpdateLinkToken(String accessToken) {
+    public LinkToken createUpdateLinkToken(String accessToken, String clientUserId) {
       throw new UnsupportedOperationException();
     }
 

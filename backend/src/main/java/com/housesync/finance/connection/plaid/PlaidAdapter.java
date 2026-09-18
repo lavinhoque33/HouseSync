@@ -23,8 +23,12 @@ public interface PlaidAdapter {
    */
   LinkToken createLinkToken(UUID attemptId, String clientUserId);
 
-  /** Update-mode Link token for reconnecting an existing credential. */
-  LinkToken createUpdateLinkToken(String accessToken);
+  /**
+   * Update-mode Link token for reconnecting an existing credential. Plaid requires the same stable
+   * {@code user.client_user_id} as the original link attempt, so the caller passes the id derived
+   * from the connection's owner identity.
+   */
+  LinkToken createUpdateLinkToken(String accessToken, String clientUserId);
 
   /** Exchanges a short-lived public token for the server-only Item identity and credential. */
   ExchangeResult exchangePublicToken(String publicToken);

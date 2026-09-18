@@ -195,7 +195,7 @@ public class ConnectionLifecycleService extends ConnectedFinanceBase
           });
     }
     UUID attemptId = reservation.attemptId();
-    String credential =
+    ReconnectMaterial material =
         transactions.execute(
             status -> {
               lockFinance(householdId, actorId);
@@ -204,16 +204,21 @@ public class ConnectionLifecycleService extends ConnectedFinanceBase
               if (connection.getEncryptedCredential() == null) {
                 throw new ConnectionNotReadyException();
               }
+              String credential;
               try {
-                return crypto.decrypt(
-                    connection.getEncryptedCredential(), credentialScope(connection.getId()));
+                credential =
+                    crypto.decrypt(
+                        connection.getEncryptedCredential(), credentialScope(connection.getId()));
               } catch (ConnectionCrypto.CredentialCryptoException failed) {
                 throw new ConnectionNotReadyException();
               }
+              return new ReconnectMaterial(
+                  credential,
+                  ConnectionLinkService.linkUserId(householdId, connection.getOwnerUserId()));
             });
     PlaidAdapter.LinkToken token;
     try {
-      token = adapter.createUpdateLinkToken(credential);
+      token = adapter.createUpdateLinkToken(material.credential(), material.linkUserId());
     } catch (PlaidAdapterException failed) {
       transactions.execute(
           status -> {
@@ -676,6 +681,8 @@ public class ConnectionLifecycleService extends ConnectedFinanceBase
   }
 
   private record Reservation(UUID attemptId, boolean replay) {}
+
+  private record ReconnectMaterial(String credential, String linkUserId) {}
 
   public record ReconnectResult(UUID attemptId, boolean replayed) {}
 

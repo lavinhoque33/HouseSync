@@ -89,7 +89,8 @@ public class FakePlaidAdapter implements PlaidAdapter {
   }
 
   @Override
-  public LinkToken createUpdateLinkToken(String accessToken) {
+  public LinkToken createUpdateLinkToken(String accessToken, String clientUserId) {
+    lastClientUserId.set(clientUserId);
     return new LinkToken(
         "fake-update-link-" + ConnectionCrypto.sha256Hex(accessToken).substring(0, 16),
         Instant.now(clock).plusSeconds(1800));
