@@ -64,6 +64,11 @@ public interface PlaidAdapter {
    * money leaving the account holder under Plaid's convention); normalization inverts the sign and
    * validates everything else. Missing optional fields stay null and are quarantined or tolerated
    * by the normalizer, never defaulted.
+   *
+   * <p>Categorization evidence is application-owned, bounded, and nullable: a stable
+   * provider merchant identity plus optional display name and personal-finance primary/detail
+   * codes. Raw provider payloads and identifiers beyond these normalized fields stay inside the
+   * adapter; the merchant identity is digested before storage, so it never persists raw.
    */
   record ProviderTransaction(
       String remoteAccountId,
@@ -76,7 +81,11 @@ public interface PlaidAdapter {
       LocalDate postedOn,
       LocalDate authorizedOn,
       String description,
-      String merchantName) {}
+      String merchantName,
+      String merchantIdentity,
+      String merchantDisplayName,
+      String pfcPrimaryCode,
+      String pfcDetailCode) {}
 
   /** One fetched sync page. {@code nextCursor} is required by the provider on every page. */
   record SyncPage(

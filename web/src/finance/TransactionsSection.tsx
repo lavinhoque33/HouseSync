@@ -13,11 +13,14 @@ import {
   fetchTransaction,
   fetchTransactionAllocation,
   fetchTransactionCategories,
+  fetchTransactionCategorization,
   fetchTransactions,
   patchAllocationRevoke,
   patchTransaction,
   postTransaction,
   postTransactionAllocation,
+  type CategorizationOrigin,
+  type CategorizationState,
   type CreateAllocationInput,
   type CreateTransactionInput,
   type CsrfToken,
@@ -96,6 +99,38 @@ interface FieldErrors {
   category?: string | undefined;
   participants?: string | undefined;
 }
+
+/**
+ * Owner-only provenance for the single open detail panel. It is never
+ * fetched per feed row: only the financial owner's own transaction is
+ * queried, and every close, generation change, or scope clear drops the
+ * request so private evidence cannot publish into a stale panel.
+ */
+type DetailProvenance =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'ready'; state: CategorizationState }
+  | { status: 'unavailable' };
+
+/**
+ * Calm user-facing provenance labels for the six assignment origins. A raw
+ * origin code is never prose, and LEGACY deliberately reads as an existing
+ * value rather than an owner choice: only USER is the owner's own decision.
+ */
+const ORIGIN_LABELS: Record<CategorizationOrigin, string> = {
+  NONE: 'No category assigned yet — HouseSync has not classified this entry.',
+  LEGACY: 'Existing category — recorded before you chose one.',
+  USER: 'Chosen by you — your decision; automation will not replace it.',
+  OWNER_RULE: 'Your merchant rule — matched a rule you created.',
+  PROVIDER: 'Bank category — mapped from the connected bank data.',
+  INHERITED: 'Inherited from expense — this refund follows its source expense.',
+};
+
+/** The ledger source of an entry: manual entry or a connected bank feed. */
+const SOURCE_LABELS: Record<Transaction['source'], string> = {
+  MANUAL: 'Manual',
+  CONNECTED: 'Connected',
+};
 
 interface TransactionsSectionProps {
   household: Household;
@@ -222,17 +257,20 @@ function postedRefundMinorUnits(
 }
 
 /**
- * Server-returned labels are the only user-visible category names; the raw
- * token is shown verbatim only when the taxonomy could not be loaded for
- * that code.
+ * Server-returned labels are the only user-visible category names. When the
+ * taxonomy could not be loaded, or when a code is absent from it, the calm
+ * unavailable text is shown instead: a raw enum token is never rendered as a
+ * category name.
  */
 function categoryLabel(
   category: string | null,
   categories: TransactionCategory[] | null,
 ): string {
   if (category === null) return 'Uncategorized';
+  if (categories === null) return 'Category unavailable';
   return (
-    categories?.find((value) => value.code === category)?.label ?? category
+    categories.find((value) => value.code === category)?.label ??
+    'Category unavailable'
   );
 }
 
@@ -323,6 +361,11 @@ export function TransactionsSection({
 
   const [detail, setDetail] = useState<Transaction | null>(null);
   const [detailLoadingId, setDetailLoadingId] = useState<string | null>(null);
+  // Owner-only provenance for the open detail panel. It is fetched
+  // when the owner opens one entry's details and never per feed row.
+  const [detailProvenance, setDetailProvenance] = useState<DetailProvenance>({
+    status: 'idle',
+  });
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editAmount, setEditAmount] = useState('');
@@ -375,10 +418,16 @@ export function TransactionsSection({
   // are async, so a second activation in the same flush must be refused by
   // the ref, not the not-yet-flushed state.
   const detailLoadingRef = useRef(false);
+  // Owner-only provenance requests are superseded by sequence and aborted by
+  // the newest request, the panel's close, and every scope clear.
+  const provenanceControllerRef = useRef<AbortController | null>(null);
+  const provenanceSeqRef = useRef(0);
   const noticeRef = useRef<HTMLDivElement>(null);
   const createAccountRef = useRef<HTMLSelectElement>(null);
+  const createCategoryRef = useRef<HTMLSelectElement>(null);
   const amountRef = useRef<HTMLInputElement>(null);
   const editAmountRef = useRef<HTMLInputElement>(null);
+  const editCategoryRef = useRef<HTMLSelectElement>(null);
   const voidConfirmRef = useRef<HTMLDivElement>(null);
   const voidTriggerRef = useRef<HTMLButtonElement | null>(null);
   const detailPanelRef = useRef<HTMLDivElement>(null);
@@ -502,12 +551,19 @@ export function TransactionsSection({
     setLoading(true);
     if (!options.preserveNotice) setNotice(null);
     try {
-      const [meta, feedPages] = await Promise.all([
+      const [accountsPage, categoriesOutcome, feedPages] = await Promise.all([
         options.includeMeta
-          ? Promise.all([
-              fetchFinancialAccounts(household.id, controller.signal),
-              fetchTransactionCategories(household.id, controller.signal),
-            ])
+          ? fetchFinancialAccounts(household.id, controller.signal)
+          : Promise.resolve(null),
+        // The taxonomy is optional metadata: its failure is captured rather
+        // than rejecting the load, so a category-list outage never hides the
+        // ledger. The controls then show the calm "Category unavailable"
+        // label and the section's refresh retries the list.
+        options.includeMeta
+          ? fetchTransactionCategories(household.id, controller.signal).then(
+              (page) => ({ items: page.items, failure: null as unknown }),
+              (failure: unknown) => ({ items: null, failure }),
+            )
           : Promise.resolve(null),
         Promise.all(
           options.views.map((view) =>
@@ -516,15 +572,43 @@ export function TransactionsSection({
         ),
       ]);
       if (!current(generation) || controller.signal.aborted) return;
-      if (meta) {
-        setAccounts(meta[0].items);
-        setCategories(meta[1].items);
-      }
+      if (accountsPage) setAccounts(accountsPage.items);
       options.views.forEach((view, index) => {
         const page = feedPages[index];
         if (page) setFeedPage(view, page.items, page.hasMore);
       });
       setLoading(false);
+      if (categoriesOutcome) {
+        if (categoriesOutcome.items) {
+          setCategories(categoriesOutcome.items);
+        } else {
+          const apiError =
+            categoriesOutcome.failure instanceof ApiError
+              ? categoriesOutcome.failure
+              : new ApiError({
+                  status: 0,
+                  code: 'NETWORK_ERROR',
+                  message: 'Could not load transaction categories.',
+                });
+          if (apiError.status === 401) {
+            clearScopedState();
+            onSessionExpired();
+            return;
+          }
+          if (apiError.code === 'HOUSEHOLD_NOT_FOUND') {
+            clearScopedState();
+            onHouseholdAccessChanged();
+            return;
+          }
+          setCategories(null);
+          setNotice({
+            kind: 'warning',
+            text: 'The category list could not be loaded, so category names are unavailable. Refresh to retry.',
+            correlationId: apiError.correlationId,
+            showRefresh: true,
+          });
+        }
+      }
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
       const apiError =
@@ -609,6 +693,19 @@ export function TransactionsSection({
     }
   }
 
+  /**
+   * Drops the owner-only provenance of the open panel: the in-flight request
+   * is aborted, its sequence invalidated, and the state returned to idle so a
+   * late response can never publish into a closed panel or a cleared scope.
+   */
+  function resetProvenance() {
+    provenanceControllerRef.current?.abort();
+    provenanceControllerRef.current = null;
+    provenanceSeqRef.current += 1;
+    setDetailProvenance((current) =>
+      current.status === 'idle' ? current : { status: 'idle' },
+    );
+  }
   function clearScopedState() {
     // Old generations must not publish into cleared state: in-flight
     // load continuations are ignored from here on.
@@ -627,6 +724,10 @@ export function TransactionsSection({
     setEditDescription('');
     setEditCategory('');
     setEditFieldErrors({});
+    // Owner-only provenance is private classification evidence: it is aborted
+    // and dropped with every other scoped draft on sign-out, session expiry,
+    // household switch, and access loss.
+    resetProvenance();
     setPendingVoid(null);
     setPendingShare(null);
     shareTriggerRef.current = null;
@@ -823,6 +924,24 @@ export function TransactionsSection({
 
   useEffect(() => {
     if (detail) detailPanelRef.current?.focus();
+  }, [detail]);
+
+  // Private provenance exists only while a detail panel is open. Defer cleanup past the current
+  // render; opening a replacement detail increments the sequence first, so this closure cannot
+  // abort the replacement request.
+  useEffect(() => {
+    if (detail) return;
+    const sequence = provenanceSeqRef.current;
+    void Promise.resolve().then(() => {
+      if (
+        unmountedRef.current ||
+        provenanceSeqRef.current !== sequence ||
+        detail
+      ) {
+        return;
+      }
+      resetProvenance();
+    });
   }, [detail]);
 
   async function ensureCsrf(
@@ -1088,6 +1207,7 @@ export function TransactionsSection({
     setters: {
       setFieldErrors: (errors: FieldErrors) => void;
       focusAmount: () => void;
+      focusCategory: () => void;
     },
   ): boolean {
     const fieldErrors = apiError.fieldErrors;
@@ -1107,10 +1227,30 @@ export function TransactionsSection({
     }
     if (Object.keys(mapped).length > 0) {
       setters.setFieldErrors(mapped);
-      setters.focusAmount();
+      // Focus follows the rejected control: a category rejection lands on the
+      // category selector instead of sending the user back to the amount.
+      if (mapped.category && !mapped.amount) setters.focusCategory();
+      else setters.focusAmount();
       return true;
     }
     return false;
+  }
+
+  /**
+   * Names the durable meaning of a committed category correction, including
+   * explicit uncategorized: the server records it as the owner's own USER
+   * decision, and no rule, provider mapping, sync, or later model result
+   * replaces it.
+   */
+  function categoryDecisionText(category: string | null): string {
+    if (category === null) {
+      return 'Category cleared: this entry stays uncategorized because you decided so — automation will not replace your decision.';
+    }
+    const label =
+      categories === null ? null : categoryLabel(category, categories);
+    return label === null
+      ? 'Category saved as your decision — automation will not replace it.'
+      : `Category set to ${label}: this is your decision — automation will not replace it.`;
   }
 
   async function submitCreate(request: PendingCreate) {
@@ -1197,7 +1337,16 @@ export function TransactionsSection({
       if (
         mapCreateFieldErrors(apiError, {
           setFieldErrors: setCreateFieldErrors,
-          focusAmount: () => amountRef.current?.focus(),
+          // Controls are disabled while the request is in flight, so the
+          // focus lands on the next frame, after the re-render that clears
+          // the pending request.
+          focusAmount: () =>
+            requestAnimationFrame(() => amountRef.current?.focus()),
+          focusCategory: () =>
+            requestAnimationFrame(() => {
+              if (refundSource) amountRef.current?.focus();
+              else createCategoryRef.current?.focus();
+            }),
         })
       ) {
         setPendingCreate(null);
@@ -1429,18 +1578,30 @@ export function TransactionsSection({
       );
       if (!current(generation) || controller.signal.aborted) return;
       cancelEdit();
-      if (detail?.id === updated.id) setDetail(null);
+      if (detail?.id === updated.id) {
+        // An open panel keeps the committed representation, and a category
+        // correction refreshes its owner-only provenance so the durable
+        // decision is visible without reopening anything. Unrelated drafts
+        // (the entry form, the split panel, the review draft) are untouched.
+        setDetail(updated);
+      }
+      const correctedText = `Transaction corrected: ${formatMoney(
+        updated.money.amount,
+        updated.money.currency,
+      )} on ${updated.occurredOn}.`;
       setNotice({
         kind: 'info',
-        text: `Transaction corrected: ${formatMoney(
-          updated.money.amount,
-          updated.money.currency,
-        )} on ${updated.occurredOn}.`,
+        text: changedCategory
+          ? `${correctedText} ${categoryDecisionText(updated.category)}`
+          : correctedText,
       });
       // A money correction of a refund or expense changes derived
       // balances; description/date/category changes do not.
       if (changedMoney) bumpBalances();
       reloadTransactions(true);
+      if (detail?.id === updated.id) {
+        void loadProvenance(updated);
+      }
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
       const apiError =
@@ -1527,7 +1688,22 @@ export function TransactionsSection({
       if (
         mapCreateFieldErrors(apiError, {
           setFieldErrors: setEditFieldErrors,
-          focusAmount: () => editAmountRef.current?.focus(),
+          // The editor and global notice both re-render after this failure. Two frames place
+          // focus after the notice's own announcement focus, on the field that needs correction.
+          focusAmount: () =>
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => editAmountRef.current?.focus()),
+            ),
+          focusCategory: () =>
+            requestAnimationFrame(() =>
+              requestAnimationFrame(() => {
+                if (transaction.kind === 'REFUND') {
+                  editAmountRef.current?.focus();
+                } else {
+                  editCategoryRef.current?.focus();
+                }
+              }),
+            ),
         })
       ) {
         setNotice({
@@ -2474,6 +2650,74 @@ export function TransactionsSection({
     if (pendingRevoke) revokeConfirmRef.current?.focus();
   }, [pendingRevoke]);
 
+  /**
+   * Loads the owner-only provenance of exactly one opened entry. Only
+   * the financial owner's own transaction is a candidate, so another member's
+   * shared row is never probed with a request that could disclose the
+   * existence of private classification state. A superseded request is
+   * aborted, and every continuation rechecks its generation and sequence, so
+   * closing the panel, switching household, signing out, or losing access
+   * never publishes stale private evidence.
+   */
+  async function loadProvenance(transaction: Transaction) {
+    resetProvenance();
+    if (transaction.ownerUserId !== currentUserId) return;
+    const generation = generationRef.current;
+    const sequence = provenanceSeqRef.current;
+    const controller = new AbortController();
+    provenanceControllerRef.current = controller;
+    track(controller);
+    setDetailProvenance({ status: 'loading' });
+    try {
+      const state = await fetchTransactionCategorization(
+        household.id,
+        transaction.id,
+        controller.signal,
+      );
+      if (
+        !current(generation) ||
+        controller.signal.aborted ||
+        provenanceSeqRef.current !== sequence
+      ) {
+        return;
+      }
+      setDetailProvenance({ status: 'ready', state });
+    } catch (error) {
+      if (
+        !current(generation) ||
+        controller.signal.aborted ||
+        provenanceSeqRef.current !== sequence
+      ) {
+        return;
+      }
+      const apiError =
+        error instanceof ApiError
+          ? error
+          : new ApiError({
+              status: 0,
+              code: 'NETWORK_ERROR',
+              message: 'Could not reach the server.',
+            });
+      if (apiError.status === 401) {
+        handleSessionLost();
+        return;
+      }
+      if (apiError.code === 'HOUSEHOLD_NOT_FOUND') {
+        handleAccessLost();
+        return;
+      }
+      // Calm and recoverable: the panel keeps the effective category and
+      // offers an explicit retry instead of an error notice for a
+      // resource this viewer may simply not have.
+      setDetailProvenance({ status: 'unavailable' });
+    } finally {
+      untrack(controller);
+      if (provenanceControllerRef.current === controller) {
+        provenanceControllerRef.current = null;
+      }
+    }
+  }
+
   async function openDetail(transaction: Transaction) {
     // The ref guards same-flush double activations; the aligned opener
     // guard refuses confirmations, mutations, loads, and unconfirmed
@@ -2496,6 +2740,9 @@ export function TransactionsSection({
       // replacement, or any newer generation taking over this section.
       if (!current(generation) || controller.signal.aborted) return;
       setDetail(fresh);
+      // Owner-only, and only for the entry whose details are open: shared
+      // entries and feed rows are never probed.
+      void loadProvenance(fresh);
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
       const apiError =
@@ -2852,6 +3099,7 @@ export function TransactionsSection({
                     onSubmit={() => void submitEdit(transaction)}
                     onCancel={() => cancelEdit(transaction.id)}
                     editAmountRef={editAmountRef}
+                    editCategoryRef={editCategoryRef}
                   />
                 ) : (
                   <div className="finance-account-actions">
@@ -3407,13 +3655,14 @@ export function TransactionsSection({
                   : categoryLabel(detail.category, categories)}
               </dd>
             </div>
+            {detailProvenanceRow(detail)}
             <div>
               <dt>Status</dt>
               <dd>{detail.status === 'POSTED' ? 'Posted' : 'Voided'}</dd>
             </div>
             <div>
               <dt>Source</dt>
-              <dd>Manual</dd>
+              <dd>{SOURCE_LABELS[detail.source]}</dd>
             </div>
             <div>
               <dt>Refund source</dt>
@@ -3734,6 +3983,7 @@ export function TransactionsSection({
                 Category
               </label>
               <select
+                ref={createCategoryRef}
                 id={`new-transaction-category-${household.id}`}
                 value={createCategory}
                 onChange={(event) => {
@@ -3757,7 +4007,7 @@ export function TransactionsSection({
               </select>
               {categories === null && (
                 <p className="household-hint">
-                  Categories could not be loaded. Refresh the section to retry.
+                  Category unavailable. Refresh the section to retry the list.
                 </p>
               )}
               {createFieldErrors.category && (
@@ -3824,6 +4074,59 @@ export function TransactionsSection({
     </section>
   );
 
+  /**
+   * Owner-only provenance for the open detail panel. Another member's shared
+   * entry renders nothing here: the panel then shows only the effective
+   * category that is already visible to every household reader. Loading, an
+   * out-of-date response, and an unavailable resource all stay calm prose
+   * with an explicit retry, never a raw code and never a claimed state.
+   */
+  function detailProvenanceRow(entry: Transaction) {
+    if (entry.ownerUserId !== currentUserId) return null;
+    const freshState =
+      detailProvenance.status === 'ready' &&
+      detailProvenance.state.transactionVersion === entry.version
+        ? detailProvenance.state
+        : null;
+    return (
+      <div>
+        <dt>Category decision</dt>
+        <dd>
+          {freshState ? (
+            <>
+              <span>{ORIGIN_LABELS[freshState.origin]}</span>{' '}
+              <span className="household-meta">
+                Assigned{' '}
+                <time dateTime={freshState.assignedAt}>
+                  {freshState.assignedAt}
+                </time>
+                .
+              </span>
+            </>
+          ) : detailProvenance.status === 'loading' ? (
+            'Loading your category decision…'
+          ) : (
+            <>
+              <span>
+                {detailProvenance.status === 'ready'
+                  ? 'This decision changed on the server — retry to load the current one.'
+                  : 'Category decision unavailable.'}
+              </span>{' '}
+              <button
+                type="button"
+                className="household-button household-button--secondary"
+                disabled={busy}
+                onClick={() => void loadProvenance(entry)}
+              >
+                Retry category decision
+              </button>
+            </>
+          )}
+        </dd>
+      </div>
+    );
+  }
+
   function createAmountPreview(): string {
     // The preview announces the encoded value; specific validation errors
     // stay in the field's alert paragraph and are never duplicated here.
@@ -3882,6 +4185,7 @@ interface EditFormProps {
   onSubmit: () => void;
   onCancel: () => void;
   editAmountRef: React.RefObject<HTMLInputElement | null>;
+  editCategoryRef: React.RefObject<HTMLSelectElement | null>;
 }
 
 function EditForm({
@@ -3907,6 +4211,7 @@ function EditForm({
   onSubmit,
   onCancel,
   editAmountRef,
+  editCategoryRef,
 }: EditFormProps) {
   return (
     <form
@@ -4057,6 +4362,7 @@ function EditForm({
             Category
           </label>
           <select
+            ref={editCategoryRef}
             id={`edit-transaction-category-${transaction.id}`}
             value={editCategory}
             onChange={(event) => onCategoryChange(event.target.value)}
@@ -4069,6 +4375,12 @@ function EditForm({
             }
           >
             <option value="">Clear category — uncategorized</option>
+            {categories === null && editCategory !== '' && (
+              // The stored token stays selected so the control never
+              // misreports the recorded category; its label is the calm
+              // unavailable text rather than a raw code.
+              <option value={editCategory}>Category unavailable</option>
+            )}
             {(categories ?? []).map((category) => (
               <option key={category.code} value={category.code}>
                 {category.label}
@@ -4077,7 +4389,7 @@ function EditForm({
           </select>
           {categories === null && (
             <p className="household-hint">
-              Categories could not be loaded. Refresh the section to retry.
+              Category unavailable. Refresh the section to retry the list.
             </p>
           )}
           {editFieldErrors.category && (

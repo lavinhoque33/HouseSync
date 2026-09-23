@@ -273,7 +273,10 @@ class PlaidHttpAdapterTest {
     payload =
         "{\"added\":[{\"account_id\":\"a1\",\"transaction_id\":\"t1\",\"pending\":false,"
             + "\"iso_currency_code\":\"USD\",\"amount\":12.3400,\"date\":\"2026-09-01\","
-            + "\"name\":\"Coffee\",\"merchant_name\":null,\"pending_transaction_id\":null}],"
+            + "\"name\":\"Coffee\",\"merchant_name\":\"Corner Cafe\","
+            + "\"merchant_entity_id\":\"mrc_1\",\"personal_finance_category\":{"
+            + "\"primary\":\"FOOD_AND_DRINK\",\"detailed\":\"FOOD_AND_DRINK_COFFEE\"},"
+            + "\"pending_transaction_id\":null}],"
             + "\"modified\":[{\"account_id\":\"a1\",\"transaction_id\":\"t2\",\"pending\":false,"
             + "\"iso_currency_code\":\"CAD\",\"amount\":-250.0000,\"date\":\"2026-09-02\","
             + "\"name\":\"Payroll\"}],"
@@ -290,6 +293,10 @@ class PlaidHttpAdapterTest {
     assertThat(debit.amount().toPlainString()).isEqualTo("12.3400");
     assertThat(debit.postedOn()).isEqualTo(java.time.LocalDate.of(2026, 9, 1));
     assertThat(debit.officialCurrency()).isEqualTo("USD");
+    assertThat(debit.merchantIdentity()).isEqualTo("mrc_1");
+    assertThat(debit.merchantDisplayName()).isEqualTo("Corner Cafe");
+    assertThat(debit.pfcPrimaryCode()).isEqualTo("FOOD_AND_DRINK");
+    assertThat(debit.pfcDetailCode()).isEqualTo("FOOD_AND_DRINK_COFFEE");
     assertThat(page.upserts().get(1).amount().toPlainString()).isEqualTo("-250.0000");
     assertThat(page.removedRemoteTransactionIds()).containsExactly("t0");
     assertThat(page.nextCursor()).isEqualTo("cursor-2");

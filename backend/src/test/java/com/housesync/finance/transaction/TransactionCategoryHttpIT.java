@@ -682,11 +682,12 @@ class TransactionCategoryHttpIT {
     assertThat(blockedPatch.status).isEqualTo(409);
     assertThat(blockedPatch.json().path("code").asText()).isEqualTo("RESOURCE_VERSION_EXHAUSTED");
 
-    Resp noopAtMax =
+    Resp provenanceAtMax =
         actor.patchTransaction(
             householdId, expenseId, "{\"expectedVersion\":2147483647,\"category\":null}");
-    assertThat(noopAtMax.status).isEqualTo(200);
-    assertThat(noopAtMax.json().path("version").asInt()).isEqualTo(2147483647);
+    assertThat(provenanceAtMax.status).isEqualTo(409);
+    assertThat(provenanceAtMax.json().path("code").asText())
+        .isEqualTo("RESOURCE_VERSION_EXHAUSTED");
 
     jdbc.update("UPDATE financial_transactions SET version = 0 WHERE id = ?::uuid", expenseId);
     String refundId =

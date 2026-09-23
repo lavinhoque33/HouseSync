@@ -1,6 +1,7 @@
 package com.housesync.finance.activity.domain;
 
 import com.housesync.finance.account.domain.SupportedCurrency;
+import com.housesync.finance.categorization.domain.CategorizationEvidence;
 import com.housesync.finance.connection.crypto.ConnectionCrypto;
 import com.housesync.finance.connection.plaid.PlaidAdapter.ProviderTransaction;
 import com.housesync.finance.transaction.domain.TransactionDescriptionPolicy;
@@ -41,6 +42,9 @@ public final class ObservationNormalizer {
 
   private static final int MAX_INTEGRAL_DIGITS = 12;
   private static final int MAX_EVIDENCE_CODE_POINTS = 500;
+  private static final int MAX_MERCHANT_DISPLAY_CODE_POINTS = 200;
+  private static final int MAX_PFC_PRIMARY_CODE_POINTS = 100;
+  private static final int MAX_PFC_DETAIL_CODE_POINTS = 200;
 
   /** Provider/environment binding for identity digests; raw provider IDs are never persisted. */
   public record Scope(String provider, String environment) {}
@@ -57,7 +61,12 @@ public final class ObservationNormalizer {
       String description,
       boolean descriptionValid,
       String pendingPredecessorDigest,
-      String invalidReason) {
+      String invalidReason,
+      String merchantIdentityDigest,
+      String merchantDisplayName,
+      String pfcPrimaryCode,
+      String pfcDetailCode,
+      String categorizationEvidenceFingerprint) {
 
     public boolean valid() {
       return invalidReason == null;
@@ -134,6 +143,25 @@ public final class ObservationNormalizer {
             ? null
             : digest(scope, transaction.pendingPredecessorId());
 
+    // Categorization evidence is normalized independently of money/date validity: an invalid
+    // observation keeps its bounded private evidence so later work can still explain it, while an
+    // unsafe (over-limit or malformed) value yields no evidence rather than a corrupt one.
+    String merchantIdentityDigest =
+        transaction.merchantIdentity() == null || transaction.merchantIdentity().isBlank()
+            ? null
+            : digest(scope, transaction.merchantIdentity());
+    String merchantDisplayName =
+        boundedEvidence(transaction.merchantDisplayName(), MAX_MERCHANT_DISPLAY_CODE_POINTS);
+    String pfcPrimary = boundedCode(transaction.pfcPrimaryCode(), MAX_PFC_PRIMARY_CODE_POINTS);
+    String pfcDetail = boundedCode(transaction.pfcDetailCode(), MAX_PFC_DETAIL_CODE_POINTS);
+    if (pfcDetail != null && pfcPrimary == null) {
+      // A detail code without its primary is unsafe evidence and never stored.
+      pfcDetail = null;
+    }
+    String evidenceFingerprint =
+        CategorizationEvidence.fingerprint(
+            merchantIdentityDigest, merchantDisplayName, pfcPrimary, pfcDetail);
+
     return new Normalized(
         transactionDigest,
         accountDigest,
@@ -146,7 +174,49 @@ public final class ObservationNormalizer {
         evidence,
         descriptionValid,
         predecessorDigest,
-        invalidReason);
+        invalidReason,
+        merchantIdentityDigest,
+        merchantDisplayName,
+        pfcPrimary,
+        pfcDetail,
+        evidenceFingerprint);
+  }
+
+  /** Display-name evidence: control characters removed, bounded in code points, or null. */
+  private static String boundedEvidence(String raw, int maxCodePoints) {
+    if (raw == null || raw.isBlank()) {
+      return null;
+    }
+    StringBuilder cleaned = new StringBuilder();
+    raw.codePoints()
+        .limit(maxCodePoints)
+        .filter(codePoint -> !Character.isISOControl(codePoint))
+        .forEach(cleaned::appendCodePoint);
+    String value = cleaned.toString();
+    return value.isBlank() ? null : value;
+  }
+
+  /**
+   * Provider category codes are uppercase identifier-shaped tokens; anything else (lowercase,
+   * punctuation, whitespace, over-limit) is unsafe evidence and yields null rather than a coerced
+   * value.
+   */
+  private static String boundedCode(String raw, int limit) {
+    if (raw == null || raw.isBlank() || raw.codePointCount(0, raw.length()) > limit) {
+      return null;
+    }
+    for (int index = 0; index < raw.length(); ) {
+      int codePoint = raw.codePointAt(index);
+      boolean allowed =
+          (codePoint >= 'A' && codePoint <= 'Z')
+              || (codePoint >= '0' && codePoint <= '9')
+              || codePoint == '_';
+      if (!allowed) {
+        return null;
+      }
+      index += Character.charCount(codePoint);
+    }
+    return raw;
   }
 
   /**

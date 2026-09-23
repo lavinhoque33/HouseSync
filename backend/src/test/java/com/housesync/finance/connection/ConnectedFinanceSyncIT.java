@@ -1454,6 +1454,10 @@ class ConnectedFinanceSyncIT extends ConnectedFinanceITSupport {
         date,
         null,
         description,
+        null,
+        null,
+        null,
+        null,
         null);
   }
 

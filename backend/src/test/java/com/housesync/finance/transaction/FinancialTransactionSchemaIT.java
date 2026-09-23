@@ -258,11 +258,12 @@ class FinancialTransactionSchemaIT {
         connection,
         "INSERT INTO financial_transactions (id, household_id, owner_user_id, account_id, kind,"
             + " amount, currency, occurred_on, description, source, visibility, status,"
-            + " refund_of_transaction_id, version, created_at, updated_at)"
+            + " refund_of_transaction_id, category_origin, category_assigned_at, version,"
+            + " created_at, updated_at)"
             + " VALUES (?, ?, ?, ?, ?, ?::numeric, ?, ?::date, 'Schema entry', 'MANUAL',"
             + " 'PRIVATE', 'POSTED', "
-            + (refundOf == null ? "NULL" : "'" + refundOf + "'")
-            + ", 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            + (refundOf == null ? "NULL, 'USER'" : "'" + refundOf + "', 'INHERITED'")
+            + ", CURRENT_TIMESTAMP, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
         id,
         householdId,
         userId,
@@ -288,7 +289,8 @@ class FinancialTransactionSchemaIT {
       UUID refundOf) {
     return "INSERT INTO financial_transactions (id, household_id, owner_user_id, account_id,"
         + " kind, amount, currency, occurred_on, description, source, visibility, status,"
-        + " refund_of_transaction_id, version, created_at, updated_at)"
+        + " refund_of_transaction_id, category_origin, category_assigned_at, version, created_at,"
+        + " updated_at)"
         + " VALUES ('"
         + UUID.randomUUID()
         + "', '"
@@ -304,8 +306,8 @@ class FinancialTransactionSchemaIT {
         + ", '"
         + currency
         + "', DATE '2026-09-17', 'Forged', 'MANUAL', 'PRIVATE', 'POSTED', "
-        + (refundOf == null ? "NULL" : "'" + refundOf + "'")
-        + ", 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
+        + (refundOf == null ? "NULL, 'USER'" : "'" + refundOf + "', 'INHERITED'")
+        + ", CURRENT_TIMESTAMP, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
   }
 
   private String datedRejectedInsert(

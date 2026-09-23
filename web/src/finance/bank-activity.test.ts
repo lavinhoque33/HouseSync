@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   confirmBankActivityBody,
+  confirmEvidenceOf,
   draftFor,
   dismissBankActivityBody,
   isConfirmable,
@@ -262,6 +263,53 @@ describe('bank activity parsing', () => {
     );
     expect(invalidDraft.description).toBe('');
     expect(invalidDraft.descriptionValid).toBe(false);
+  });
+
+  it('keeps draft evidence across non-material observation refreshes', () => {
+    const base = parseBankActivity(posted()) as BankActivity;
+    const evidence = confirmEvidenceOf(base);
+    // The observation row version moves for non-material bookkeeping such as
+    // new provider categorization evidence; it is not ledger evidence.
+    expect(
+      confirmEvidenceOf(
+        parseBankActivity(posted({ version: 9 })) as BankActivity,
+      ),
+    ).toBe(evidence);
+    // A newer provider description or merchant fact still describes the same
+    // ledger entry, so the owner's typed draft stays valid.
+    expect(
+      confirmEvidenceOf(
+        parseBankActivity(
+          posted({ providerDescription: 'Coffee Shop #2' }),
+        ) as BankActivity,
+      ),
+    ).toBe(evidence);
+  });
+
+  it('changes confirmation evidence when any ledger-relevant fact moves', () => {
+    const evidence = confirmEvidenceOf(
+      parseBankActivity(posted()) as BankActivity,
+    );
+    const movedFacts: Array<Record<string, unknown>> = [
+      { money: { amount: '-13.00', currency: 'USD' } },
+      { money: { amount: '-12.34', currency: 'CAD' } },
+      { occurredOn: '2026-09-12' },
+      { state: 'PENDING' },
+      { state: 'REMOVED' },
+      {
+        state: 'PENDING',
+        reviewState: 'DISMISSED',
+        dismissedReason: 'NOT_NEEDED',
+      },
+      { descriptionValid: false },
+      { reviewState: 'CONFIRMED', ledgerTransactionId: LEDGER_ID },
+      { localAccountId: '44444444-4444-4444-8444-444444444445' },
+    ];
+    for (const overrides of movedFacts) {
+      const changed = parseBankActivity(posted(overrides));
+      expect(changed).toBeDefined();
+      expect(confirmEvidenceOf(changed as BankActivity)).not.toBe(evidence);
+    }
   });
 
   it('flags only admitted MODIFIED/REMOVED rows as needing review', () => {

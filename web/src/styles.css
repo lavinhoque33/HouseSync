@@ -1788,7 +1788,7 @@ code {
 }
 
 .bank-activity-toolbar select {
-  min-height: 36px;
+  min-height: 44px;
   border: 1px solid var(--color-line);
   border-radius: 0.5rem;
   background: #fff;

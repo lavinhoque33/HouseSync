@@ -3,6 +3,7 @@ import {
   ApiError,
   fetchTransaction,
   fetchTransactionCategories,
+  fetchTransactionCategorization,
   fetchTransactions,
   patchTransaction,
   postTransaction,
@@ -706,6 +707,170 @@ describe('transaction typed client', () => {
     const body = refundInput as Record<string, unknown>;
     expect('category' in body).toBe(false);
     expect('visibility' in body).toBe(false);
+  });
+});
+
+describe('owner-only categorization provenance client', () => {
+  const CATEGORIZATION_URL = `/api/households/${HOUSEHOLD_ID}/transactions/${TRANSACTION_ID}/categorization`;
+
+  function validCategorization(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      transactionId: TRANSACTION_ID,
+      transactionVersion: 4,
+      category: 'GROCERIES',
+      origin: 'PROVIDER',
+      assignedAt: '2026-09-22T12:00:00Z',
+      reviewState: 'NONE',
+      ...overrides,
+    };
+  }
+
+  it('reads the exact six-field state over the owner-only path', async () => {
+    const calls = stubFetch((url) => {
+      expect(url).toBe(CATEGORIZATION_URL);
+      return jsonResponse(validCategorization());
+    });
+    const state = await fetchTransactionCategorization(
+      HOUSEHOLD_ID,
+      TRANSACTION_ID,
+    );
+    expect(state).toEqual(validCategorization());
+    expect(calls[0]?.init?.method).toBe('GET');
+    expect(calls[0]?.init?.credentials).toBe('include');
+    expect(calls[0]?.init?.cache).toBe('no-store');
+    expect(calls[0]?.init?.headers).toMatchObject({
+      Accept: 'application/json',
+    });
+  });
+
+  it('accepts every documented origin and a null category', async () => {
+    const origins = [
+      'NONE',
+      'LEGACY',
+      'USER',
+      'OWNER_RULE',
+      'PROVIDER',
+      'INHERITED',
+    ] as const;
+    for (const origin of origins) {
+      stubFetch(() =>
+        jsonResponse(
+          validCategorization({
+            origin,
+            category: origin === 'NONE' ? null : 'GROCERIES',
+          }),
+        ),
+      );
+      const state = await fetchTransactionCategorization(
+        HOUSEHOLD_ID,
+        TRANSACTION_ID,
+      );
+      expect(state.origin).toBe(origin);
+      expect(state.reviewState).toBe('NONE');
+    }
+    stubFetch(() => jsonResponse(validCategorization({ category: null })));
+    const uncategorized = await fetchTransactionCategorization(
+      HOUSEHOLD_ID,
+      TRANSACTION_ID,
+    );
+    expect(uncategorized.category).toBeNull();
+  });
+
+  it('rejects any drift from the exact six-field state', async () => {
+    const malformed: unknown[] = [
+      // A later version appends ruleEligible; this parser must not accept the widened shape.
+      validCategorization({ ruleEligible: true }),
+      // A missing field of any kind is drift.
+      validCategorization({ reviewState: undefined }),
+      validCategorization({ assignedAt: undefined }),
+      validCategorization({ category: undefined }),
+      // Unknown origin and review state tokens are never coerced.
+      validCategorization({ origin: 'AUTOMATIC' }),
+      validCategorization({ reviewState: 'OPEN ' }),
+      // A category outside the fixed taxonomy, including an empty string.
+      validCategorization({ category: 'OTHER' }),
+      validCategorization({ category: '' }),
+      validCategorization({ category: 'groceries' }),
+      // Identifier, version, and timestamp bounds.
+      validCategorization({ transactionId: 'not-a-uuid' }),
+      validCategorization({ transactionVersion: 1.5 }),
+      validCategorization({ transactionVersion: -1 }),
+      validCategorization({ transactionVersion: 2147483648 }),
+      validCategorization({ assignedAt: '2026-09-22' }),
+      validCategorization({ assignedAt: 'yesterday' }),
+      // Not an object at all.
+      null,
+      [],
+      'categorization',
+    ];
+    for (const body of malformed) {
+      stubFetch(() => jsonResponse(body));
+      const failure = await fetchTransactionCategorization(
+        HOUSEHOLD_ID,
+        TRANSACTION_ID,
+      ).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      expect(failure).toBeInstanceOf(ApiError);
+      expect(failure as ApiError).toMatchObject({
+        code: 'UNKNOWN_ERROR',
+        message: 'The server returned an unexpected transaction response.',
+      });
+    }
+  });
+
+  it('refuses a state describing another transaction', async () => {
+    stubFetch(() =>
+      jsonResponse(
+        validCategorization({
+          transactionId: '40000000-0000-4000-8000-000000000009',
+        }),
+      ),
+    );
+    await expect(
+      fetchTransactionCategorization(HOUSEHOLD_ID, TRANSACTION_ID),
+    ).rejects.toMatchObject({ code: 'UNKNOWN_ERROR' });
+  });
+
+  it('keeps the privacy-preserving generic 404 for a non-owner', async () => {
+    stubFetch(() =>
+      jsonResponse(
+        {
+          code: 'TRANSACTION_NOT_FOUND',
+          message: 'Transaction is unavailable.',
+          correlationId: 'corr-privacy',
+        },
+        404,
+      ),
+    );
+    const failure = await fetchTransactionCategorization(
+      HOUSEHOLD_ID,
+      TRANSACTION_ID,
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure as ApiError).toMatchObject({
+      status: 404,
+      code: 'TRANSACTION_NOT_FOUND',
+      correlationId: 'corr-privacy',
+    });
+  });
+
+  it('surfaces session loss as an unauthenticated error', async () => {
+    stubFetch(() =>
+      jsonResponse(
+        { code: 'UNAUTHENTICATED', message: 'You are not signed in.' },
+        401,
+      ),
+    );
+    await expect(
+      fetchTransactionCategorization(HOUSEHOLD_ID, TRANSACTION_ID),
+    ).rejects.toMatchObject({ status: 401, code: 'UNAUTHENTICATED' });
   });
 });
 

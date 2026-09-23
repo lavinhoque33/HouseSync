@@ -512,6 +512,28 @@ export function draftFor(activity: BankActivity): ConfirmDraft {
 }
 
 /**
+ * The evidence that decides whether an open confirmation draft still
+ * describes the same ledger entry: the provider revision's money/date/state
+ * facts plus the review linkage and confirmability flags. The observation row
+ * version is deliberately excluded because it also moves for non-material
+ * bookkeeping — new provider categorization evidence, review updates — which
+ * must never discard the owner's typed description or category. A refresh
+ * that changes none of these keeps the draft and only converges its version.
+ */
+export function confirmEvidenceOf(activity: BankActivity): string {
+  return [
+    activity.state,
+    activity.reviewState,
+    activity.changeState ?? '',
+    activity.money ? `${activity.money.amount}|${activity.money.currency}` : '',
+    activity.occurredOn ?? '',
+    activity.localAccountId ?? '',
+    activity.ledgerTransactionId ?? '',
+    activity.descriptionValid ? 'valid' : 'invalid',
+  ].join('|');
+}
+
+/**
  * In-memory resolve draft: the chosen reconciliation action, the APPLY_BANK
  * field subset, and the ledger version read from the current ledger entry.
  * Keyed by observation id like the confirm draft so background refreshes

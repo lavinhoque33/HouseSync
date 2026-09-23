@@ -30,7 +30,9 @@ import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler
  * {@code GET /api/households/{householdId}/transactions}, {@code GET
  * /api/households/{householdId}/transactions/{transactionId}}, and {@code PATCH
  * /api/households/{householdId}/transactions/{transactionId}} for authenticated users. Categories add
- * the fixed {@code GET /api/households/{householdId}/transaction-categories} list. Allocation adds the
+ * the fixed {@code GET /api/households/{householdId}/transaction-categories} list. Categorization provenance adds
+ * exactly {@code GET /api/households/{householdId}/transactions/{transactionId}/categorization},
+ * the financial-owner-only provenance detail behind service-level owner scoping. Settlement adds the
  * singular allocation routes {@code POST}/{@code GET}/{@code PATCH
  * /api/households/{householdId}/transactions/{transactionId}/allocation} and the bounded {@code GET
  * /api/households/{householdId}/member-balances}. Reporting adds {@code GET} and {@code PATCH
@@ -111,6 +113,9 @@ public class SecurityConfiguration {
                         HttpMethod.GET,
                         "/api/households/*/transactions",
                         "/api/households/*/transactions/*",
+                        // Owner-only provenance detail; service authorization is
+                        // owner-scoped so members receive the generic transaction 404.
+                        "/api/households/*/transactions/*/categorization",
                         "/api/households/*/transaction-categories",
                         "/api/households/*/finance-settings",
                         "/api/households/*/spending-summary")

@@ -79,6 +79,28 @@ public class ConnectionObservationEntity {
   @Column(name = "invalid_reason", length = 64)
   private String invalidReason;
 
+  /** Scope-bound digest of the provider-stable merchant identity; never a raw provider ID. */
+  @Column(name = "provider_merchant_identity_digest", length = 64)
+  private String providerMerchantIdentityDigest;
+
+  /** Bounded untrusted private display text distinct from the statement description. */
+  @Column(name = "merchant_display_name", length = 200)
+  private String merchantDisplayName;
+
+  @Column(name = "pfc_primary_code", length = 100)
+  private String pfcPrimaryCode;
+
+  @Column(name = "pfc_detail_code", length = 200)
+  private String pfcDetailCode;
+
+  /**
+   * Separate deterministic digest over merchant/category evidence. A category- or
+   * name-only provider update changes this value without touching {@code providerRevision}, so it
+   * never reopens reconciliation or marks an admitted entry modified.
+   */
+  @Column(name = "categorization_evidence_fingerprint", length = 64)
+  private String categorizationEvidenceFingerprint;
+
   @Column(name = "dismissed_reason", length = 32)
   private String dismissedReason;
 
@@ -115,6 +137,11 @@ public class ConnectionObservationEntity {
       String providerDescription,
       boolean descriptionValid,
       String pendingPredecessorDigest,
+      String providerMerchantIdentityDigest,
+      String merchantDisplayName,
+      String pfcPrimaryCode,
+      String pfcDetailCode,
+      String categorizationEvidenceFingerprint,
       Instant now) {
     this.id = id;
     this.connectionId = connectionId;
@@ -132,6 +159,11 @@ public class ConnectionObservationEntity {
     this.providerDescription = providerDescription;
     this.descriptionValid = descriptionValid;
     this.pendingPredecessorDigest = pendingPredecessorDigest;
+    this.providerMerchantIdentityDigest = providerMerchantIdentityDigest;
+    this.merchantDisplayName = merchantDisplayName;
+    this.pfcPrimaryCode = pfcPrimaryCode;
+    this.pfcDetailCode = pfcDetailCode;
+    this.categorizationEvidenceFingerprint = categorizationEvidenceFingerprint;
     this.version = 0;
     this.createdAt = now;
     this.updatedAt = now;
@@ -161,6 +193,11 @@ public class ConnectionObservationEntity {
             null,
             null,
             false,
+            null,
+            null,
+            null,
+            null,
+            null,
             null,
             now);
     observation.tombstone = true;
@@ -243,6 +280,26 @@ public class ConnectionObservationEntity {
     return invalidReason;
   }
 
+  public String getProviderMerchantIdentityDigest() {
+    return providerMerchantIdentityDigest;
+  }
+
+  public String getMerchantDisplayName() {
+    return merchantDisplayName;
+  }
+
+  public String getPfcPrimaryCode() {
+    return pfcPrimaryCode;
+  }
+
+  public String getPfcDetailCode() {
+    return pfcDetailCode;
+  }
+
+  public String getCategorizationEvidenceFingerprint() {
+    return categorizationEvidenceFingerprint;
+  }
+
   public String getDismissedReason() {
     return dismissedReason;
   }
@@ -270,7 +327,10 @@ public class ConnectionObservationEntity {
   /**
    * Applies a provider revision. A material change (state, money, currency, posted date) bumps the
    * version and either reopens a dismissed candidate or marks an admitted entry as modified;
-   * cosmetic metadata updates stored evidence without a version bump.
+   * cosmetic metadata updates stored evidence without a version bump. Categorization evidence
+   * always refreshes: it is stored for later deterministic work, but only a {@code
+   * providerRevision} change is material, so a category/name-only provider update never reopens a
+   * dismissed item or marks an admitted entry modified.
    */
   public void revise(
       UUID accountMappingId,
@@ -283,6 +343,11 @@ public class ConnectionObservationEntity {
       String providerDescription,
       boolean descriptionValid,
       String pendingPredecessorDigest,
+      String providerMerchantIdentityDigest,
+      String merchantDisplayName,
+      String pfcPrimaryCode,
+      String pfcDetailCode,
+      String categorizationEvidenceFingerprint,
       boolean materialChange,
       Instant now) {
     this.accountMappingId = accountMappingId;
@@ -297,6 +362,11 @@ public class ConnectionObservationEntity {
     this.pendingPredecessorDigest = pendingPredecessorDigest;
     this.invalidReason = null;
     this.tombstone = false;
+    this.providerMerchantIdentityDigest = providerMerchantIdentityDigest;
+    this.merchantDisplayName = merchantDisplayName;
+    this.pfcPrimaryCode = pfcPrimaryCode;
+    this.pfcDetailCode = pfcDetailCode;
+    this.categorizationEvidenceFingerprint = categorizationEvidenceFingerprint;
     if (materialChange) {
       this.version += 1;
       if ("DISMISSED".equals(reviewState)) {

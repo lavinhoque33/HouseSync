@@ -470,13 +470,15 @@ class FinancialAllocationSchemaIT {
         connection,
         "INSERT INTO financial_transactions (id, household_id, owner_user_id, account_id, kind,"
             + " amount, currency, occurred_on, description, source, visibility, status,"
-            + " refund_of_transaction_id, category, version, created_at, updated_at)"
+            + " refund_of_transaction_id, category, category_origin, category_assigned_at,"
+            + " version, created_at, updated_at)"
             + " VALUES (?, ?, ?, ?, ?, ?::numeric, ?, ?::date, 'Schema entry', 'MANUAL', ?,"
             + " 'POSTED', "
             + (refundOf == null ? "NULL" : "'" + refundOf + "'")
             + ", "
             + (category == null ? "NULL" : "'" + category + "'")
-            + ", 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            + (refundOf == null ? ", 'USER'" : ", 'INHERITED'")
+            + ", CURRENT_TIMESTAMP, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
         id,
         householdId,
         userId,

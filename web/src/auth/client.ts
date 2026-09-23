@@ -2426,6 +2426,32 @@ export interface TransactionPage {
 }
 
 /**
+ * Assignment provenance. `LEGACY` marks a category that existed
+ * before HouseSync recorded decisions, so it is deliberately never presented
+ * as the owner's own choice.
+ */
+export type CategorizationOrigin =
+  'NONE' | 'LEGACY' | 'USER' | 'OWNER_RULE' | 'PROVIDER' | 'INHERITED';
+
+/** `OPEN` only exists once review items are persisted; until then the state is `NONE`. */
+export type CategorizationReviewState = 'NONE' | 'OPEN';
+
+/**
+ * Exactly the documented six-field owner-only categorization resource. It is
+ * a separate contract from the 16-field transaction DTO: no rule reference,
+ * provider code, merchant key, confidence, reason, model, or evidence digest
+ * ever appears here.
+ */
+export interface CategorizationState {
+  transactionId: string;
+  transactionVersion: number;
+  category: string | null;
+  origin: CategorizationOrigin;
+  assignedAt: string;
+  reviewState: CategorizationReviewState;
+}
+
+/**
  * Create inputs are a discriminated union: `refundOfTransactionId` is
  * required and non-null for REFUND creation and forbidden on every other
  * kind (even as null). Refund payloads omit `visibility` and `category` so
@@ -2744,6 +2770,101 @@ export async function fetchTransaction(
   const transaction = parseTransaction(await readJson<unknown>(response));
   if (!transaction) throw unexpectedTransactionResponse(response.status);
   return transaction;
+}
+
+function isCategorizationOrigin(value: unknown): value is CategorizationOrigin {
+  return (
+    value === 'NONE' ||
+    value === 'LEGACY' ||
+    value === 'USER' ||
+    value === 'OWNER_RULE' ||
+    value === 'PROVIDER' ||
+    value === 'INHERITED'
+  );
+}
+
+const CATEGORIZATION_STATE_KEYS = 6;
+const INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
+/**
+ * Strict parser for the owner-only categorization resource: exactly the six
+ * documented fields, each validated. A missing or unknown field, an unknown
+ * origin or review state, or a category outside the fixed taxonomy fails the
+ * whole response rather than reaching the UI. The structural origin/category
+ * combinations stay server-enforced invariants; the browser never invents a
+ * category for a state it cannot interpret.
+ */
+function parseCategorizationState(
+  value: unknown,
+): CategorizationState | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).length !== CATEGORIZATION_STATE_KEYS ||
+    typeof record.transactionId !== 'string' ||
+    !UUID_PATTERN.test(record.transactionId) ||
+    typeof record.transactionVersion !== 'number' ||
+    !Number.isInteger(record.transactionVersion) ||
+    record.transactionVersion < 0 ||
+    record.transactionVersion > 2147483647 ||
+    (record.category !== null && !isCategoryToken(record.category)) ||
+    !isCategorizationOrigin(record.origin) ||
+    typeof record.assignedAt !== 'string' ||
+    !INSTANT_PATTERN.test(record.assignedAt) ||
+    Number.isNaN(Date.parse(record.assignedAt)) ||
+    (record.reviewState !== 'NONE' && record.reviewState !== 'OPEN')
+  ) {
+    return undefined;
+  }
+  return {
+    transactionId: record.transactionId,
+    transactionVersion: record.transactionVersion,
+    category: record.category === null ? null : (record.category as string),
+    origin: record.origin,
+    assignedAt: record.assignedAt,
+    reviewState: record.reviewState,
+  };
+}
+
+/**
+ * Owner-only categorization provenance for one transaction. The
+ * route is financial-owner-only, so another member reading a shared entry and
+ * an outsider both receive the same generic transaction 404: a 404 here means
+ * "no provenance for this viewer" and is never treated as a retryable
+ * failure or as evidence about another owner's data.
+ */
+export async function fetchTransactionCategorization(
+  householdId: string,
+  transactionId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<CategorizationState> {
+  const response = await apiFetch(
+    `${transactionPath(householdId, transactionId)}/categorization`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load this category decision.',
+    );
+  }
+  const state = parseCategorizationState(await readJson<unknown>(response));
+  // A state that describes another entry is drift: rendering it would attach
+  // someone else's decision to this transaction.
+  if (!state || state.transactionId !== transactionId) {
+    throw unexpectedTransactionResponse(response.status);
+  }
+  return state;
 }
 
 export async function postTransaction(

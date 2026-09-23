@@ -530,7 +530,12 @@ public class ConnectionSyncService extends ConnectedFinanceBase {
                         normalized.description(),
                         normalized.descriptionValid(),
                         normalized.pendingPredecessorDigest(),
-                        normalized.invalidReason()));
+                        normalized.invalidReason(),
+                        normalized.merchantIdentityDigest(),
+                        normalized.merchantDisplayName(),
+                        normalized.pfcPrimaryCode(),
+                        normalized.pfcDetailCode(),
+                        normalized.categorizationEvidenceFingerprint()));
               }
               for (String removedId : page.removedRemoteTransactionIds()) {
                 rows.add(
@@ -548,6 +553,11 @@ public class ConnectionSyncService extends ConnectedFinanceBase {
                         null,
                         null,
                         false,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
                         null,
                         null));
               }
@@ -718,6 +728,11 @@ public class ConnectionSyncService extends ConnectedFinanceBase {
               delta.getDescription(),
               delta.isDescriptionValid(),
               delta.getPendingPredecessorDigest(),
+              delta.getProviderMerchantIdentityDigest(),
+              delta.getMerchantDisplayName(),
+              delta.getPfcPrimaryCode(),
+              delta.getPfcDetailCode(),
+              delta.getCategorizationEvidenceFingerprint(),
               now));
     } else {
       boolean materialChange =
@@ -734,6 +749,11 @@ public class ConnectionSyncService extends ConnectedFinanceBase {
           delta.getDescription(),
           delta.isDescriptionValid(),
           delta.getPendingPredecessorDigest(),
+          delta.getProviderMerchantIdentityDigest(),
+          delta.getMerchantDisplayName(),
+          delta.getPfcPrimaryCode(),
+          delta.getPfcDetailCode(),
+          delta.getCategorizationEvidenceFingerprint(),
           materialChange,
           now);
     }
@@ -775,6 +795,11 @@ public class ConnectionSyncService extends ConnectedFinanceBase {
               delta.getDescription(),
               delta.isDescriptionValid(),
               delta.getPendingPredecessorDigest(),
+              delta.getProviderMerchantIdentityDigest(),
+              delta.getMerchantDisplayName(),
+              delta.getPfcPrimaryCode(),
+              delta.getPfcDetailCode(),
+              delta.getCategorizationEvidenceFingerprint(),
               now);
       observation.quarantine(reason, now);
       observations.save(observation);

@@ -634,7 +634,11 @@ public class BankActivityService {
                         values.kind() == TransactionKind.REFUND
                             ? request.refundOfTransactionId()
                             : null,
-                        request.acknowledgeDisclosure()));
+                        request.acknowledgeDisclosure(),
+                        observation.getProviderMerchantIdentityDigest(),
+                        observation.getPfcPrimaryCode(),
+                        observation.getPfcDetailCode(),
+                        observation.getCategorizationEvidenceFingerprint()));
             Instant now = now();
             association.voided();
             // Flush the superseded row before inserting the replacement: the partial unique
@@ -997,7 +1001,11 @@ public class BankActivityService {
                 values.category(),
                 values.categoryPresent(),
                 values.kind() == TransactionKind.REFUND ? request.refundOfTransactionId() : null,
-                request.acknowledgeDisclosure()));
+                request.acknowledgeDisclosure(),
+                observation.getProviderMerchantIdentityDigest(),
+                observation.getPfcPrimaryCode(),
+                observation.getPfcDetailCode(),
+                observation.getCategorizationEvidenceFingerprint()));
     associations.save(
         new ConnectionLedgerAssociationEntity(
             UUID.randomUUID(),

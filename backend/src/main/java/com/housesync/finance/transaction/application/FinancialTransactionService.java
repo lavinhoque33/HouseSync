@@ -11,6 +11,8 @@ import com.housesync.finance.account.domain.SupportedCurrency;
 import com.housesync.finance.account.persistence.FinancialAccountEntity;
 import com.housesync.finance.account.persistence.FinancialAccountRepository;
 import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAccountNotFoundException;
+import com.housesync.finance.categorization.domain.CategorizationClassifier;
+import com.housesync.finance.categorization.domain.CategorizationOrigin;
 import com.housesync.finance.transaction.domain.AllocationStatus;
 import com.housesync.finance.transaction.domain.TransactionCategory;
 import com.housesync.finance.transaction.domain.TransactionKind;
@@ -171,10 +173,6 @@ public class FinancialTransactionService {
         values.kind() == TransactionKind.REFUND
             ? source.getVisibility()
             : (values.rawVisibility() == null ? PRIVATE_VISIBILITY : values.rawVisibility());
-    String category =
-        values.kind() == TransactionKind.REFUND
-            ? source.getCategory()
-            : values.category() == null ? null : values.category().name();
     FinancialTransactionEntity transaction =
         new FinancialTransactionEntity(
             UUID.randomUUID(),
@@ -187,9 +185,25 @@ public class FinancialTransactionService {
             values.occurredOn(),
             values.description(),
             visibility,
-            category,
+            /* category placeholder; the initial assignment below decides */ null,
             source == null ? null : source.getId(),
+            "MANUAL",
+            CategorizationOrigin.NONE,
+            now,
             now);
+    if (values.kind() == TransactionKind.REFUND) {
+      // Refunds never classify independently: they inherit the source expense's effective
+      // category and carry the INHERITED origin with no rule or mapping reference.
+      transaction.inheritedFrom(source.getCategory(), now);
+    } else if (values.category() != null) {
+      // An explicit supported token is a user decision; automation never runs.
+      transaction.userAssigned(values.category().name(), now);
+    } else {
+      // Omitted and explicit-null are the same classifier-eligible instruction (the accepted
+      // idempotency equivalence); an exact provider mapping applies, otherwise NONE. The
+      // OWNER_RULE precedence slot stays empty until owner rules exist.
+      categorizeFromEvidence(transaction, null, null, null, null, now);
+    }
     transactions.save(transaction);
     idempotency.save(new TransactionIdempotencyEntity(key, fingerprint, transaction.getId(), now));
     if (source != null) {
@@ -213,7 +227,11 @@ public class FinancialTransactionService {
       String rawCategory,
       boolean categoryPresent,
       UUID refundOfTransactionId,
-      boolean acknowledgeDisclosure) {}
+      boolean acknowledgeDisclosure,
+      String observationMerchantIdentityDigest,
+      String observationPfcPrimaryCode,
+      String observationPfcDetailCode,
+      String observationEvidenceFingerprint) {}
 
   /**
    * One-time CONNECTED ledger admission behind bank-activity confirmation. Runs inside the caller's
@@ -249,8 +267,6 @@ public class FinancialTransactionService {
     Instant now = now();
     String visibility =
         admission.kind() == TransactionKind.REFUND ? source.getVisibility() : PRIVATE_VISIBILITY;
-    String category =
-        admission.kind() == TransactionKind.REFUND ? source.getCategory() : admission.rawCategory();
     FinancialTransactionEntity transaction =
         FinancialTransactionEntity.connected(
             UUID.randomUUID(),
@@ -263,9 +279,26 @@ public class FinancialTransactionService {
             admission.occurredOn(),
             admission.description(),
             visibility,
-            category,
+            /* category placeholder; the initial assignment below decides */ null,
             source == null ? null : source.getId(),
             now);
+    if (admission.kind() == TransactionKind.REFUND) {
+      // Refunds inherit exactly like the manual path: no independent classification.
+      transaction.inheritedFrom(source.getCategory(), now);
+    } else if (admission.categoryPresent() && admission.rawCategory() != null) {
+      // An explicit supported token at confirmation time is a user decision.
+      transaction.userAssigned(admission.rawCategory(), now);
+    } else {
+      // Omitted or explicit-null at confirmation: deterministic classification from the
+      // observation's stored provider evidence.
+      categorizeFromEvidence(
+          transaction,
+          admission.observationMerchantIdentityDigest(),
+          admission.observationPfcPrimaryCode(),
+          admission.observationPfcDetailCode(),
+          admission.observationEvidenceFingerprint(),
+          now);
+    }
     transactions.save(transaction);
     if (source != null) {
       // A state-changing refund admission moves its source expense version once, exactly like a
@@ -274,6 +307,36 @@ public class FinancialTransactionService {
     }
     transactions.flush();
     return transaction;
+  }
+
+  /**
+   * Deterministic provider-mapping assignment for one classifier-eligible new posted non-refund row. The
+   * evidence arrives already normalized and identity-safe (the merchant identity as its scope-bound
+   * digest); an exact reviewed provider mapping applies, otherwise the row stays uncategorized with
+   * {@code NONE} — never a default token. The assignment is part of the entry's initial state: one
+   * transaction at version 0, no extra version bump. Manual entries carry no provider evidence, so
+   * they classify as {@code NONE} until owner rules exist.
+   */
+  private static void categorizeFromEvidence(
+      FinancialTransactionEntity transaction,
+      String merchantIdentityDigest,
+      String pfcPrimaryCode,
+      String pfcDetailCode,
+      String evidenceFingerprint,
+      Instant assignedAt) {
+    var assignment =
+        CategorizationClassifier.classify(pfcPrimaryCode, pfcDetailCode, transaction.getKind());
+    if (assignment.isPresent()) {
+      transaction.initiallyCategorized(
+          CategorizationOrigin.PROVIDER,
+          assignment.get().category().name(),
+          assignment.get().rulesetVersion(),
+          evidenceFingerprint,
+          assignedAt);
+    } else {
+      transaction.initiallyCategorized(
+          CategorizationOrigin.NONE, null, null, evidenceFingerprint, assignedAt);
+    }
   }
 
   private FinancialTransactionEntity loadConnectedRefundSource(
@@ -515,8 +578,9 @@ public class FinancialTransactionService {
         // is a no-op like a same-value visibility touch.
         throw new TransactionVoidedException();
       }
-      // A visibility-only patch on a retained voided entry stays allowed in C, including
-      // refund-group propagation below.
+      // A visibility-only patch on a retained voided entry stays allowed in C. A repeated
+      // category value may also record the user's authoritative provenance decision without
+      // changing the retained economic category.
     }
 
     BigDecimal nextAmount = transaction.getAmount();
@@ -554,11 +618,19 @@ public class FinancialTransactionService {
     boolean descriptionChanged = !nextDescription.equals(transaction.getDescription());
     boolean visibilityChanged = !nextVisibility.equals(transaction.getVisibility());
     boolean categoryChanged = !Objects.equals(nextCategory, transaction.getCategory());
+    // A category field decision is authoritative even when it repeats the stored token: when the
+    // prior origin was automated (OWNER_RULE/PROVIDER), NONE, or LEGACY, recording USER is a
+    // real provenance change and bumps the version like any other value change. Repeating the
+    // same category while origin is already USER stays the accepted no-op. A retained voided
+    // entry may change provenance, but never its effective category.
+    boolean originChangesToUser =
+        values.categoryPresent() && transaction.getCategoryOrigin() != CategorizationOrigin.USER;
     if (!amountChanged
         && !dateChanged
         && !descriptionChanged
         && !visibilityChanged
-        && !categoryChanged) {
+        && !categoryChanged
+        && !originChangesToUser) {
       // Authorized no-op returns the unchanged representation without a version bump.
       return toResponse(transaction);
     }
@@ -605,6 +677,12 @@ public class FinancialTransactionService {
     Instant now = now();
     transaction.correct(
         nextAmount, nextOccurredOn, nextDescription, nextCategory, nextVisibility, now);
+    if (values.categoryPresent()) {
+      // The explicit category field decision records USER and clears automated references.
+      // Refunds never reach here: a direct refund category patch is rejected earlier. A voided
+      // entry may record provenance only when the effective category value is unchanged.
+      transaction.userAssigned(nextCategory, now);
+    }
     if (source != null) {
       // A state-changing refund correction bumps its source expense version once.
       bumpRefundSource(source, now);

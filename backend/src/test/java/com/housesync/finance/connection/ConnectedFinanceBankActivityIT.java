@@ -216,6 +216,108 @@ class ConnectedFinanceBankActivityIT extends ConnectedFinanceITSupport {
   }
 
   @Test
+  void providerMappingClassifiesOnceAndLaterEvidenceCannotRewriteTheLedger() throws Exception {
+    Agent owner = signedInAgent("activity-categorization");
+    String householdId = createHousehold(owner, "Categorization bank home");
+    ConnectedLink link = linkAndSelect(owner, householdId, true, false);
+
+    importPage(
+        owner,
+        householdId,
+        link,
+        List.of(
+            categorizedTransaction(
+                link,
+                "tx-category-1",
+                "12.34",
+                "2026-09-12",
+                "Store purchase",
+                "merchant-entity-1",
+                "GENERAL_MERCHANDISE",
+                null)));
+    JsonNode inbox = owner.get("/api/households/" + householdId + "/bank-activity").json();
+    JsonNode posted = findItem(inbox, item -> "POSTED".equals(item.path("state").asText()));
+    String observationId = posted.path("id").asText();
+
+    Resp confirmed =
+        owner.request(
+            "POST",
+            "/api/households/" + householdId + "/bank-activity/" + observationId + "/confirm",
+            "{\"expectedVersion\":0,\"kind\":\"EXPENSE\",\"description\":\"Store purchase\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(confirmed.status()).isEqualTo(201);
+    String transactionId = confirmed.json().path("transactionId").asText();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT category FROM financial_transactions WHERE id = ?::uuid",
+                String.class,
+                transactionId))
+        .isEqualTo("SHOPPING");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT category_origin FROM financial_transactions WHERE id = ?::uuid",
+                String.class,
+                transactionId))
+        .isEqualTo("PROVIDER");
+
+    Resp provenance =
+        owner.get(
+            "/api/households/"
+                + householdId
+                + "/transactions/"
+                + transactionId
+                + "/categorization");
+    assertThat(provenance.status()).isEqualTo(200);
+    assertThat(provenance.json().path("category").asText()).isEqualTo("SHOPPING");
+    assertThat(provenance.json().path("origin").asText()).isEqualTo("PROVIDER");
+
+    // A category-only provider update refreshes private evidence without reopening bank review or
+    // rewriting the already-confirmed ledger assignment.
+    importPage(
+        owner,
+        householdId,
+        link,
+        List.of(
+            categorizedTransaction(
+                link,
+                "tx-category-1",
+                "12.34",
+                "2026-09-12",
+                "Store purchase",
+                "merchant-entity-1",
+                "MEDICAL",
+                null)));
+    JsonNode refreshed = observationJson(owner, householdId, observationId);
+    assertThat(refreshed.path("version").asInt()).isEqualTo(1);
+    assertThat(refreshed.path("changeState").isNull()).isTrue();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT category FROM financial_transactions WHERE id = ?::uuid",
+                String.class,
+                transactionId))
+        .isEqualTo("SHOPPING");
+
+    Resp corrected =
+        owner.request(
+            "PATCH",
+            "/api/households/" + householdId + "/transactions/" + transactionId,
+            "{\"expectedVersion\":0,\"category\":\"GROCERIES\"}",
+            owner.csrfToken,
+            null);
+    assertThat(corrected.status()).isEqualTo(200);
+    Resp userProvenance =
+        owner.get(
+            "/api/households/"
+                + householdId
+                + "/transactions/"
+                + transactionId
+                + "/categorization");
+    assertThat(userProvenance.json().path("category").asText()).isEqualTo("GROCERIES");
+    assertThat(userProvenance.json().path("origin").asText()).isEqualTo("USER");
+  }
+
+  @Test
   void modifiedAndRemovedAdmittedObservationsAreLabeledWithoutLedgerChanges() throws Exception {
     Agent owner = signedInAgent("activity-review");
     String householdId = createHousehold(owner, "Review home");
@@ -503,7 +605,38 @@ class ConnectedFinanceBankActivityIT extends ConnectedFinanceITSupport {
         LocalDate.parse(date),
         null,
         description,
+        null,
+        null,
+        null,
+        null,
         null);
+  }
+
+  private static PlaidAdapter.ProviderTransaction categorizedTransaction(
+      ConnectedLink link,
+      String transactionId,
+      String amount,
+      String date,
+      String description,
+      String merchantIdentity,
+      String pfcPrimary,
+      String pfcDetail) {
+    return new PlaidAdapter.ProviderTransaction(
+        link.remoteCheckingId(),
+        transactionId,
+        null,
+        false,
+        "USD",
+        null,
+        new BigDecimal(amount),
+        LocalDate.parse(date),
+        null,
+        description,
+        description,
+        merchantIdentity,
+        description,
+        pfcPrimary,
+        pfcDetail);
   }
 
   private static JsonNode findItem(JsonNode page, java.util.function.Predicate<JsonNode> match) {

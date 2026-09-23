@@ -40,7 +40,7 @@ class FinanceReportingSchemaIT {
             .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
             .locations("classpath:db/migration")
             .load();
-    assertThat(flyway.migrate().migrationsExecuted).isGreaterThanOrEqualTo(10);
+    assertThat(flyway.migrate().migrationsExecuted).isGreaterThanOrEqualTo(15);
     flyway.validate();
 
     Properties credentials = credentials();
@@ -157,9 +157,9 @@ class FinanceReportingSchemaIT {
             .dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
             .locations("classpath:db/migration")
             .load();
-    assertThat(current.migrate().migrationsExecuted).isEqualTo(5);
+    assertThat(current.migrate().migrationsExecuted).isEqualTo(6);
     current.validate();
-    assertThat(current.info().applied()).hasSize(14);
+    assertThat(current.info().applied()).hasSize(15);
 
     try (Connection connection = DriverManager.getConnection(POSTGRES.getJdbcUrl(), credentials)) {
       try (PreparedStatement settings =

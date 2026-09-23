@@ -37,6 +37,7 @@ import {
   type TransactionCategory,
 } from '../auth/client';
 import {
+  confirmEvidenceOf,
   draftFor,
   replaceDraftFor,
   resolveDraftFor,
@@ -640,6 +641,10 @@ export function BankActivitySection({
   const unmountedRef = useRef(false);
   const ownedRef = useRef<Set<AbortController>>(new Set());
   const draftsRef = useRef<Record<string, ConfirmDraft>>({});
+  // The evidence each retained confirmation draft was built from, so a
+  // non-material inbox refresh reuses the typed draft instead of rebuilding
+  // it while a material revision still replaces it.
+  const draftEvidenceRef = useRef<Record<string, string>>({});
   const resolveDraftsRef = useRef<Record<string, ResolveDraft>>({});
   const replaceDraftsRef = useRef<Record<string, ReplaceDraft>>({});
   const noticeRef = useRef<HTMLDivElement>(null);
@@ -938,11 +943,17 @@ export function BankActivitySection({
 
   function openConfirm(activity: BankActivity) {
     const existing = draftsRef.current[activity.id];
+    const evidence = confirmEvidenceOf(activity);
+    // A refresh that changed only non-material evidence keeps the owner's
+    // typed draft; its version still converges so the next submit is guarded
+    // against the current revision. Anything ledger-relevant rebuilds it.
     const draft =
-      existing && existing.version === activity.version
-        ? existing
+      existing !== undefined &&
+      draftEvidenceRef.current[activity.id] === evidence
+        ? { ...existing, version: activity.version }
         : draftFor(activity);
     draftsRef.current[activity.id] = draft;
+    draftEvidenceRef.current[activity.id] = evidence;
     setConfirmDraft(draft);
     setRefundOptions(null);
     setNotice(null);
@@ -1028,6 +1039,7 @@ export function BankActivitySection({
       );
       if (!current(generation)) return;
       delete draftsRef.current[draft.activityId];
+      delete draftEvidenceRef.current[draft.activityId];
       setConfirmDraft(null);
       applyDecision(decision);
       showNotice(
@@ -1042,6 +1054,7 @@ export function BankActivitySection({
       if (!current(generation)) return;
       if (error instanceof ApiError) {
         if (handleAuthFailure(error, generation)) return;
+        if (staleDecisionRecovery(error, draft.activityId)) return;
         showNotice(
           'error',
           error.message || 'That bank activity could not be confirmed.',
@@ -1090,6 +1103,7 @@ export function BankActivitySection({
       if (!current(generation)) return;
       if (error instanceof ApiError) {
         if (handleAuthFailure(error, generation)) return;
+        if (staleDecisionRecovery(error, activity.id)) return;
         showNotice(
           'error',
           error.message || 'That bank activity could not be dismissed.',
@@ -1356,6 +1370,15 @@ export function BankActivitySection({
           currentDraft?.activityId === activityId ? next : currentDraft,
         );
       }
+      const confirmOpen = draftsRef.current[activityId];
+      if (confirmOpen) {
+        const next = { ...confirmOpen, version: freshActivity.version };
+        draftsRef.current[activityId] = next;
+        draftEvidenceRef.current[activityId] = confirmEvidenceOf(freshActivity);
+        setConfirmDraft((currentDraft) =>
+          currentDraft?.activityId === activityId ? next : currentDraft,
+        );
+      }
       const replaceOpen = replaceDraftsRef.current[activityId];
       if (replaceOpen) {
         const next = { ...replaceOpen, version: freshActivity.version };
@@ -1423,6 +1446,21 @@ export function BankActivitySection({
     } finally {
       ownedRef.current.delete(controller);
     }
+  }
+
+  /**
+   * Stale confirm/dismiss recovery: the observation version moved under the
+   * request, so the current revision is refetched, the open draft keeps every
+   * typed field for review, and only versions converge. The owner never
+   * resends blind and never loses text to a conflict.
+   */
+  function staleDecisionRecovery(
+    apiError: ApiError,
+    activityId: string,
+  ): boolean {
+    if (apiError.code !== 'RESOURCE_VERSION_CONFLICT') return false;
+    void refetchAfterConflict(activityId);
+    return true;
   }
 
   function resolveFailureNotice(

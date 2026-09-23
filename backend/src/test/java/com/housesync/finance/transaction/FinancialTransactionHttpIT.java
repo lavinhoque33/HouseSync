@@ -404,6 +404,113 @@ class FinancialTransactionHttpIT {
   }
 
   @Test
+  void categorizationProvenanceIsExactOwnerOnlyAndTracksUserAndRefundDecisions() throws Exception {
+    Agent owner = signedInAgent("categorization-owner");
+    String householdId = createHousehold(owner, "Categorization home");
+    Agent member = signedInAgent("categorization-member");
+    addMember(householdId, member.userId(), "MEMBER");
+    Agent outsider = signedInAgent("categorization-outsider");
+    String accountId =
+        createAccount(owner, householdId, UUID.randomUUID(), "Card", "CREDIT_CARD", "BRL");
+
+    Resp explicit =
+        owner.createTransaction(
+            householdId,
+            UUID.randomUUID(),
+            "{\"accountId\":\""
+                + accountId
+                + "\",\"kind\":\"EXPENSE\",\"money\":{\"amount\":\"-20.00\","
+                + "\"currency\":\"BRL\"},\"occurredOn\":\"2026-09-16\","
+                + "\"description\":\"Shared groceries\",\"visibility\":\"HOUSEHOLD\","
+                + "\"category\":\"GROCERIES\"}");
+    String explicitId = created(explicit);
+    assertThat(explicit.json().size()).isEqualTo(16);
+    assertThat(member.get(transactionPath(householdId) + "/" + explicitId).status).isEqualTo(200);
+
+    String categorizationPath = transactionPath(householdId) + "/" + explicitId + "/categorization";
+    Resp provenance = owner.get(categorizationPath);
+    assertThat(provenance.status).isEqualTo(200);
+    assertThat(provenance.cacheControl()).contains("no-store");
+    assertThat(provenance.json().propertyNames())
+        .containsExactly(
+            "transactionId",
+            "transactionVersion",
+            "category",
+            "origin",
+            "assignedAt",
+            "reviewState");
+    assertThat(provenance.json().path("transactionId").asText()).isEqualTo(explicitId);
+    assertThat(provenance.json().path("transactionVersion").asInt()).isZero();
+    assertThat(provenance.json().path("category").asText()).isEqualTo("GROCERIES");
+    assertThat(provenance.json().path("origin").asText()).isEqualTo("USER");
+    assertThat(provenance.json().path("assignedAt").asText()).isNotBlank();
+    assertThat(provenance.json().path("reviewState").asText()).isEqualTo("NONE");
+
+    Resp memberProvenance = member.get(categorizationPath);
+    assertThat(memberProvenance.status).isEqualTo(404);
+    assertThat(memberProvenance.json().path("code").asText()).isEqualTo("TRANSACTION_NOT_FOUND");
+    assertThat(memberProvenance.body).doesNotContain("GROCERIES", explicitId);
+    Resp outsiderProvenance = outsider.get(categorizationPath);
+    assertThat(outsiderProvenance.status).isEqualTo(404);
+    assertThat(outsiderProvenance.json().path("code").asText()).isEqualTo("HOUSEHOLD_NOT_FOUND");
+    assertThat(owner.get(categorizationPath + "?extra=true").status).isEqualTo(400);
+
+    String uncategorizedId =
+        created(
+            owner.createTransaction(
+                householdId,
+                UUID.randomUUID(),
+                entry(accountId, "EXPENSE", "-50.00", "BRL", "Uncategorized")));
+    Resp initialNone =
+        owner.get(transactionPath(householdId) + "/" + uncategorizedId + "/categorization");
+    assertThat(initialNone.json().path("origin").asText()).isEqualTo("NONE");
+    assertThat(initialNone.json().path("category").isNull()).isTrue();
+
+    Resp explicitNull =
+        owner.patchTransaction(
+            householdId, uncategorizedId, "{\"expectedVersion\":0,\"category\":null}");
+    assertThat(explicitNull.status).isEqualTo(200);
+    assertThat(explicitNull.json().path("version").asInt()).isEqualTo(1);
+    Resp userNull =
+        owner.get(transactionPath(householdId) + "/" + uncategorizedId + "/categorization");
+    assertThat(userNull.json().path("origin").asText()).isEqualTo("USER");
+    assertThat(userNull.json().path("category").isNull()).isTrue();
+
+    String refundId =
+        created(
+            owner.createTransaction(
+                householdId,
+                UUID.randomUUID(),
+                refundEntry(accountId, explicitId, "5.00", "2026-09-17", "Partial refund")));
+    Resp inherited = owner.get(transactionPath(householdId) + "/" + refundId + "/categorization");
+    assertThat(inherited.json().path("origin").asText()).isEqualTo("INHERITED");
+    assertThat(inherited.json().path("category").asText()).isEqualTo("GROCERIES");
+
+    String voidedId =
+        created(
+            owner.createTransaction(
+                householdId,
+                UUID.randomUUID(),
+                entry(accountId, "EXPENSE", "-3.00", "BRL", "Voided uncategorized")));
+    assertThat(
+            owner.patchTransaction(
+                    householdId, voidedId, "{\"expectedVersion\":0,\"status\":\"VOIDED\"}")
+                .status)
+        .isEqualTo(200);
+    Resp voidedDecision =
+        owner.patchTransaction(householdId, voidedId, "{\"expectedVersion\":1,\"category\":null}");
+    assertThat(voidedDecision.status).isEqualTo(200);
+    assertThat(voidedDecision.json().path("version").asInt()).isEqualTo(2);
+    assertThat(
+            owner
+                .get(transactionPath(householdId) + "/" + voidedId + "/categorization")
+                .json()
+                .path("origin")
+                .asText())
+        .isEqualTo("USER");
+  }
+
+  @Test
   void refundLifecycleEnforcesSourceCapDatesKindsAndVoidDependencies() throws Exception {
     Agent actor = signedInAgent("refund-rules");
     String householdId = createHousehold(actor, "Refund home");

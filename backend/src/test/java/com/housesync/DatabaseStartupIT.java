@@ -117,7 +117,7 @@ class DatabaseStartupIT {
             "connection_ledger_associations_observation_reference",
             "connection_ledger_associations_account_reference",
             "connection_ledger_associations_transaction_reference");
-    assertThat(flyway.info().applied()).hasSize(14);
+    assertThat(flyway.info().applied()).hasSize(15);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
     assertThat(

@@ -68,6 +68,24 @@ public class ConnectionSyncRoundDeltaEntity {
   @Column(name = "invalid_reason", length = 64)
   private String invalidReason;
 
+  /** Scope-bound digest of the provider-stable merchant identity; never a raw provider ID. */
+  @Column(name = "provider_merchant_identity_digest", length = 64)
+  private String providerMerchantIdentityDigest;
+
+  /** Bounded untrusted private display text distinct from the statement description. */
+  @Column(name = "merchant_display_name", length = 200)
+  private String merchantDisplayName;
+
+  @Column(name = "pfc_primary_code", length = 100)
+  private String pfcPrimaryCode;
+
+  @Column(name = "pfc_detail_code", length = 200)
+  private String pfcDetailCode;
+
+  /** Separate deterministic digest over merchant/category evidence; never the provider revision. */
+  @Column(name = "categorization_evidence_fingerprint", length = 64)
+  private String categorizationEvidenceFingerprint;
+
   protected ConnectionSyncRoundDeltaEntity() {}
 
   public ConnectionSyncRoundDeltaEntity(
@@ -85,7 +103,12 @@ public class ConnectionSyncRoundDeltaEntity {
       String description,
       boolean descriptionValid,
       String pendingPredecessorDigest,
-      String invalidReason) {
+      String invalidReason,
+      String providerMerchantIdentityDigest,
+      String merchantDisplayName,
+      String pfcPrimaryCode,
+      String pfcDetailCode,
+      String categorizationEvidenceFingerprint) {
     this.roundId = roundId;
     this.sequence = sequence;
     this.remoteTransactionDigest = remoteTransactionDigest;
@@ -101,6 +124,11 @@ public class ConnectionSyncRoundDeltaEntity {
     this.descriptionValid = descriptionValid;
     this.pendingPredecessorDigest = pendingPredecessorDigest;
     this.invalidReason = invalidReason;
+    this.providerMerchantIdentityDigest = providerMerchantIdentityDigest;
+    this.merchantDisplayName = merchantDisplayName;
+    this.pfcPrimaryCode = pfcPrimaryCode;
+    this.pfcDetailCode = pfcDetailCode;
+    this.categorizationEvidenceFingerprint = categorizationEvidenceFingerprint;
   }
 
   public UUID getRoundId() {
@@ -169,6 +197,26 @@ public class ConnectionSyncRoundDeltaEntity {
 
   public String getInvalidReason() {
     return invalidReason;
+  }
+
+  public String getProviderMerchantIdentityDigest() {
+    return providerMerchantIdentityDigest;
+  }
+
+  public String getMerchantDisplayName() {
+    return merchantDisplayName;
+  }
+
+  public String getPfcPrimaryCode() {
+    return pfcPrimaryCode;
+  }
+
+  public String getPfcDetailCode() {
+    return pfcDetailCode;
+  }
+
+  public String getCategorizationEvidenceFingerprint() {
+    return categorizationEvidenceFingerprint;
   }
 
   /** Composite key (round, sequence); deltas are always read in ascending sequence order. */

@@ -26,6 +26,10 @@ class ObservationNormalizerTest {
         date,
         null,
         name,
+        null,
+        null,
+        null,
+        null,
         null);
   }
 
@@ -130,6 +134,10 @@ class ObservationNormalizerTest {
             LocalDate.of(2026, 9, 1),
             null,
             "I",
+            null,
+            null,
+            null,
+            null,
             null);
     Normalized unofficialResult = ObservationNormalizer.normalize(SCOPE, unofficial);
     assertThat(unofficialResult.invalidReason())
@@ -239,6 +247,10 @@ class ObservationNormalizerTest {
             null,
             LocalDate.of(2026, 9, 9),
             "Authorization only",
+            null,
+            null,
+            null,
+            null,
             null);
     Normalized posted = ObservationNormalizer.normalize(SCOPE, postedAuthorizationOnly);
     assertThat(posted.invalidReason()).isEqualTo(ObservationNormalizer.REASON_MISSING_DATE);
@@ -258,6 +270,10 @@ class ObservationNormalizerTest {
             null,
             LocalDate.of(2026, 9, 9),
             "Pending authorization",
+            null,
+            null,
+            null,
+            null,
             null);
     Normalized pendingResult = ObservationNormalizer.normalize(SCOPE, pending);
     assertThat(pendingResult.valid()).isTrue();
@@ -279,7 +295,11 @@ class ObservationNormalizerTest {
             LocalDate.of(2026, 9, 2),
             LocalDate.of(2026, 9, 1),
             "Posted name",
-            "Merchant");
+            "Merchant",
+            null,
+            null,
+            null,
+            null);
     Normalized normalized = ObservationNormalizer.normalize(SCOPE, posted);
     assertThat(normalized.pendingPredecessorDigest())
         .isEqualTo(ObservationNormalizer.digest(SCOPE, "remote-transaction-4"));
@@ -298,9 +318,64 @@ class ObservationNormalizerTest {
             LocalDate.of(2026, 9, 1),
             LocalDate.of(2026, 9, 1),
             "Pending name",
+            null,
+            null,
+            null,
+            null,
             null);
     Normalized pendingNormalized = ObservationNormalizer.normalize(SCOPE, pending);
     assertThat(pendingNormalized.state()).isEqualTo("PENDING");
     assertThat(pendingNormalized.occurredOn()).isEqualTo(LocalDate.of(2026, 9, 1));
+  }
+
+  @Test
+  void categorizationEvidenceIsScopedBoundedAndSeparateFromProviderRevision() {
+    ProviderTransaction first =
+        new ProviderTransaction(
+            "remote-account-1",
+            "remote-transaction-6",
+            null,
+            false,
+            "USD",
+            null,
+            new BigDecimal("12.34"),
+            LocalDate.of(2026, 9, 3),
+            null,
+            "Statement",
+            "Merchant",
+            "merchant-entity-1",
+            "M".repeat(250),
+            "FOOD_AND_DRINK",
+            "FOOD_AND_DRINK_GROCERIES");
+    ProviderTransaction changedEvidence =
+        new ProviderTransaction(
+            "remote-account-1",
+            "remote-transaction-6",
+            null,
+            false,
+            "USD",
+            null,
+            new BigDecimal("12.34"),
+            LocalDate.of(2026, 9, 3),
+            null,
+            "Statement",
+            "Merchant",
+            "merchant-entity-2",
+            "Other merchant",
+            "GENERAL_MERCHANDISE",
+            null);
+
+    Normalized normalized = ObservationNormalizer.normalize(SCOPE, first);
+    Normalized changed = ObservationNormalizer.normalize(SCOPE, changedEvidence);
+
+    assertThat(normalized.merchantIdentityDigest())
+        .isEqualTo(ObservationNormalizer.digest(SCOPE, "merchant-entity-1"));
+    assertThat(normalized.merchantDisplayName()).hasSize(200);
+    assertThat(normalized.pfcPrimaryCode()).isEqualTo("FOOD_AND_DRINK");
+    assertThat(normalized.pfcDetailCode()).isEqualTo("FOOD_AND_DRINK_GROCERIES");
+    assertThat(normalized.categorizationEvidenceFingerprint()).hasSize(64);
+    assertThat(changed.providerRevision()).isEqualTo(normalized.providerRevision());
+    assertThat(changed.categorizationEvidenceFingerprint())
+        .isNotEqualTo(normalized.categorizationEvidenceFingerprint());
   }
 }

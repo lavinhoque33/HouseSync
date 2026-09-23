@@ -1038,6 +1038,10 @@ class ConnectedFinanceReconciliationIT extends ConnectedFinanceITSupport {
         LocalDate.parse(date),
         null,
         description,
+        null,
+        null,
+        null,
+        null,
         null);
   }
 

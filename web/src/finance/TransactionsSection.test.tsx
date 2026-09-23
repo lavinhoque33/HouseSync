@@ -8,7 +8,13 @@ import {
 } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import type { FinancialAccount, Household, Transaction } from '../auth/client';
+import type {
+  CategorizationOrigin,
+  CategorizationState,
+  FinancialAccount,
+  Household,
+  Transaction,
+} from '../auth/client';
 import { TransactionsSection } from './TransactionsSection';
 
 const CSRF = { token: 'csrf-token-1', headerName: 'X-CSRF-TOKEN' };
@@ -85,6 +91,7 @@ interface RouteHandlers {
   transactionsGet?: (view: 'OWN' | 'HOUSEHOLD') => Response | Promise<Response>;
   transactionsPost?: () => Response | Promise<Response>;
   transactionGet?: (transactionId: string) => Response | Promise<Response>;
+  categorizationGet?: (transactionId: string) => Response | Promise<Response>;
   transactionsPatch?: (transactionId: string) => Response | Promise<Response>;
   allocationsGet?: (transactionId: string) => Response | Promise<Response>;
   allocationsPost?: (init?: RequestInit) => Response | Promise<Response>;
@@ -97,6 +104,30 @@ interface RouteHandlers {
 }
 
 type Call = { url: string; init?: RequestInit | undefined };
+
+const CATEGORIZATION_SUFFIX = '/categorization';
+
+const categorizationCalls = (calls: Call[]) =>
+  calls.filter(({ url }) => url.endsWith(CATEGORIZATION_SUFFIX));
+
+/**
+ * Owner-only provenance state. The default is the neutral NONE state
+ * so a detail test that does not care about classification still sees a
+ * complete, honest panel.
+ */
+function categorizationState(
+  overrides: Partial<CategorizationState> = {},
+): CategorizationState {
+  return {
+    transactionId: EXPENSE_ID,
+    transactionVersion: 0,
+    category: null,
+    origin: 'NONE',
+    assignedAt: '2026-09-16T12:00:00Z',
+    reviewState: 'NONE',
+    ...overrides,
+  };
+}
 
 const ALLOCATION_NOT_FOUND = () =>
   jsonResponse(
@@ -221,6 +252,21 @@ function stubFetch(routes: RouteHandlers) {
           return routes.allocationsPatch(transactionId);
         }
         return routes.allocationsGet?.(transactionId) ?? ALLOCATION_NOT_FOUND();
+      }
+      if (
+        url.startsWith(`${transactionBase}/`) &&
+        url.endsWith(CATEGORIZATION_SUFFIX)
+      ) {
+        const transactionId = decodeURIComponent(
+          url.slice(
+            transactionBase.length + 1,
+            url.length - CATEGORIZATION_SUFFIX.length,
+          ),
+        );
+        return (
+          routes.categorizationGet?.(transactionId) ??
+          jsonResponse(categorizationState({ transactionId }))
+        );
       }
       if (url === transactionBase && init?.method === 'POST') {
         if (!routes.transactionsPost) {
@@ -4540,9 +4586,540 @@ describe('sibling ledger refresh signal', () => {
     gateControl.release?.();
 
     expect(await screen.findByText('Signal arrival')).toBeInTheDocument();
-    // The parked signal was served after the initial load settled.
+    // The parked signal is served by the post-load settling effect.
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.includes('/transactions?')).length,
+      ).toBeGreaterThanOrEqual(2),
+    );
+  });
+});
+
+describe('categorization provenance', () => {
+  it('loads the owner-only provenance once when details open, never per feed row', async () => {
+    const { calls } = renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: (transactionId) =>
+        jsonResponse(
+          categorizationState({
+            transactionId,
+            category: 'GROCERIES',
+            origin: 'PROVIDER',
+            assignedAt: '2026-09-22T12:00:00Z',
+          }),
+        ),
+    });
+    await screen.findByText('Groceries');
+    // A visible feed row is never a provenance probe.
+    expect(categorizationCalls(calls)).toHaveLength(0);
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
     expect(
-      calls.filter(({ url }) => url.includes('/transactions?')).length,
-    ).toBeGreaterThanOrEqual(2);
+      await within(panel).findByText(
+        /Bank category — mapped from the connected bank data\./,
+      ),
+    ).toBeInTheDocument();
+    expect(categorizationCalls(calls)).toHaveLength(1);
+    expect(categorizationCalls(calls)[0]?.url).toBe(
+      `/api/households/${HOUSEHOLD.id}/transactions/${EXPENSE_ID}/categorization`,
+    );
+    expect(categorizationCalls(calls)[0]?.init?.method).toBe('GET');
+    // The server's assignment instant is shown verbatim.
+    expect(within(panel).getByText('2026-09-22T12:00:00Z')).toBeInTheDocument();
+  });
+
+  it('never probes provenance for another member’s shared entry', async () => {
+    const { calls } = renderSection({
+      transactionsGet: (view: 'OWN' | 'HOUSEHOLD') =>
+        view === 'HOUSEHOLD'
+          ? transactionPage([sharedByOther()])
+          : transactionPage([]),
+      transactionGet: () => jsonResponse(sharedByOther()),
+      categorizationGet: () => {
+        throw new Error('a shared entry must never be probed for provenance');
+      },
+    });
+    await screen.findByText('No transactions yet.');
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    const row = (await screen.findByText('Shared internet bill')).closest(
+      'li',
+    ) as HTMLLIElement;
+    fireEvent.click(
+      within(row).getByRole('button', {
+        name: 'Details for Shared internet bill',
+      }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Shared internet bill',
+    });
+    // The shared reader sees only the effective category.
+    expect(within(panel).getByText('Utilities')).toBeInTheDocument();
+    expect(within(panel).queryByText('Category decision')).toBeNull();
+    expect(categorizationCalls(calls)).toHaveLength(0);
+  });
+
+  it('converges the open detail and provenance after a committed correction', async () => {
+    let provenance = categorizationState({
+      category: 'GROCERIES',
+      origin: 'PROVIDER',
+    });
+    const { calls } = renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      transactionsPatch: () => {
+        provenance = categorizationState({
+          category: 'DINING',
+          origin: 'USER',
+          transactionVersion: 7,
+        });
+        return jsonResponse(transaction({ category: 'DINING', version: 7 }));
+      },
+      categorizationGet: (transactionId) =>
+        jsonResponse({ ...provenance, transactionId }),
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    expect(await within(panel).findByText(/Bank category/)).toBeInTheDocument();
+
+    // An unrelated manual-entry draft is in progress.
+    fireEvent.change(
+      screen.getByLabelText('Amount', {
+        selector: `#new-transaction-amount-${HOUSEHOLD.id}`,
+      }),
+      { target: { value: '12.34' } },
+    );
+    fireEvent.change(
+      screen.getByLabelText('Description', {
+        selector: `#new-transaction-description-${HOUSEHOLD.id}`,
+      }),
+      { target: { value: 'Draft groceries' } },
+    );
+
+    const editButton = screen.getByRole('button', { name: 'Edit Groceries' });
+    const row = editButton.closest('li') as HTMLLIElement;
+    fireEvent.click(editButton);
+    fireEvent.change(within(row).getByLabelText('Category'), {
+      target: { value: 'DINING' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save correction' }));
+
+    expect(
+      await screen.findByText(
+        /this is your decision — automation will not replace it/,
+      ),
+    ).toBeInTheDocument();
+    // The panel stays open on the committed entry and its provenance
+    // converges to the owner's own decision.
+    expect(within(panel).getByText('Dining')).toBeInTheDocument();
+    expect(
+      await within(panel).findByText(
+        /Chosen by you — your decision; automation will not replace it\./,
+      ),
+    ).toBeInTheDocument();
+    expect(categorizationCalls(calls)).toHaveLength(2);
+    // The unrelated entry draft survives the convergence.
+    expect(
+      screen.getByLabelText('Amount', {
+        selector: `#new-transaction-amount-${HOUSEHOLD.id}`,
+      }),
+    ).toHaveValue('12.34');
+    expect(
+      screen.getByLabelText('Description', {
+        selector: `#new-transaction-description-${HOUSEHOLD.id}`,
+      }),
+    ).toHaveValue('Draft groceries');
+    expect(JSON.parse(String(patchCalls(calls)[0]?.init?.body))).toEqual({
+      expectedVersion: 0,
+      category: 'DINING',
+    });
+  });
+
+  it('names the durable decision when a correction clears the category', async () => {
+    let provenance = categorizationState({
+      category: 'GROCERIES',
+      origin: 'LEGACY',
+    });
+    renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      transactionsPatch: () => {
+        provenance = categorizationState({
+          category: null,
+          origin: 'USER',
+          transactionVersion: 1,
+        });
+        return jsonResponse(transaction({ category: null, version: 1 }));
+      },
+      categorizationGet: (transactionId) =>
+        jsonResponse({ ...provenance, transactionId }),
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    expect(
+      await within(panel).findByText(
+        /Existing category — recorded before you chose one\./,
+      ),
+    ).toBeInTheDocument();
+    const editButton = screen.getByRole('button', { name: 'Edit Groceries' });
+    const row = editButton.closest('li') as HTMLLIElement;
+    fireEvent.click(editButton);
+    fireEvent.change(within(row).getByLabelText('Category'), {
+      target: { value: '' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save correction' }));
+    expect(
+      await screen.findByText(
+        /Category cleared: this entry stays uncategorized because you decided so/,
+      ),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText('Uncategorized')).toBeInTheDocument();
+    expect(await within(panel).findByText(/Chosen by you/)).toBeInTheDocument();
+  });
+
+  it('renders calm labels for every origin and never a raw code', async () => {
+    const cases: Array<[CategorizationOrigin, RegExp]> = [
+      ['NONE', /No category assigned yet/],
+      ['LEGACY', /Existing category — recorded before you chose one\./],
+      ['USER', /Chosen by you/],
+      ['OWNER_RULE', /Your merchant rule/],
+      ['PROVIDER', /Bank category/],
+      ['INHERITED', /Inherited from expense/],
+    ];
+    for (const [origin, label] of cases) {
+      const refund = origin === 'INHERITED';
+      const entry = refund
+        ? transaction({
+            kind: 'REFUND',
+            refundOfTransactionId: EXPENSE_ID,
+            money: { amount: '5.00', currency: 'BRL' },
+          })
+        : transaction({ category: 'GROCERIES', source: 'CONNECTED' });
+      const { unmount } = renderSection({
+        transactionsGet: () => transactionPage([entry]),
+        transactionGet: () => jsonResponse(entry),
+        categorizationGet: (transactionId) =>
+          jsonResponse(
+            categorizationState({
+              transactionId,
+              category: refund ? 'GROCERIES' : null,
+              origin,
+            }),
+          ),
+      });
+      await screen.findByText('Groceries');
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Details for Groceries' }),
+      );
+      const panel = await screen.findByRole('group', {
+        name: 'Details for Groceries',
+      });
+      expect(await within(panel).findByText(label)).toBeInTheDocument();
+      expect(within(panel).queryByText(origin)).toBeNull();
+      unmount();
+    }
+  });
+
+  it('renders the connected ledger source instead of assuming manual entry', async () => {
+    renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ source: 'CONNECTED' })]),
+      transactionGet: () => jsonResponse(transaction({ source: 'CONNECTED' })),
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    expect(within(panel).getByText('Connected')).toBeInTheDocument();
+    expect(within(panel).queryByText('Manual')).toBeNull();
+  });
+
+  it('keeps an unavailable decision calm and recovers on explicit retry', async () => {
+    let unavailable = true;
+    const { calls } = renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: () =>
+        unavailable
+          ? jsonResponse(
+              {
+                code: 'TRANSACTION_NOT_FOUND',
+                message: 'Transaction is unavailable.',
+              },
+              404,
+            )
+          : jsonResponse(
+              categorizationState({
+                category: 'GROCERIES',
+                origin: 'LEGACY',
+              }),
+            ),
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    expect(
+      await within(panel).findByText('Category decision unavailable.'),
+    ).toBeInTheDocument();
+    // A private 404 is a calm state: no error notice, no raw code, and the
+    // detail panel itself is untouched.
+    expect(screen.queryByText(/no longer available to you/)).toBeNull();
+    expect(screen.queryByText(/TRANSACTION_NOT_FOUND/)).toBeNull();
+    unavailable = false;
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Retry category decision' }),
+    );
+    expect(
+      await within(panel).findByText(/Existing category/),
+    ).toBeInTheDocument();
+    expect(categorizationCalls(calls)).toHaveLength(2);
+  });
+
+  it('never presents an out-of-date decision as the current one', async () => {
+    renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES', version: 6 })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES', version: 6 })),
+      categorizationGet: (transactionId) =>
+        jsonResponse(
+          categorizationState({
+            transactionId,
+            category: 'GROCERIES',
+            origin: 'USER',
+            transactionVersion: 5,
+          }),
+        ),
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    expect(
+      await within(panel).findByText(
+        /This decision changed on the server — retry to load the current one\./,
+      ),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByText(/Chosen by you/)).toBeNull();
+  });
+
+  it('aborts the provenance request when the panel closes', async () => {
+    let releaseProvenance!: (response: Response) => void;
+    const gate = new Promise<Response>((resolve) => {
+      releaseProvenance = resolve;
+    });
+    const { calls } = renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: () => gate,
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    expect(
+      await within(panel).findByText('Loading your category decision…'),
+    ).toBeInTheDocument();
+    const signal = categorizationCalls(calls)[0]?.init?.signal;
+    expect(signal?.aborted).toBe(false);
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Close details' }),
+    );
+    await waitFor(() => expect(signal?.aborted).toBe(true));
+    releaseProvenance(
+      jsonResponse(
+        categorizationState({ category: 'GROCERIES', origin: 'LEGACY' }),
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByText(/Existing category/)).toBeNull();
+  });
+
+  it('binds and focuses the category control when the server rejects a category', async () => {
+    renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () => transactionPage([]),
+      transactionsPost: () =>
+        jsonResponse(
+          {
+            code: 'VALIDATION_FAILED',
+            message: 'Check the highlighted fields.',
+            correlationId: 'corr-category-focus',
+            fieldErrors: { category: 'That category is not accepted.' },
+          },
+          400,
+        ),
+    });
+    await screen.findByText('No transactions yet.');
+    fireEvent.change(screen.getByLabelText('Category'), {
+      target: { value: 'GROCERIES' },
+    });
+    await fillAndSubmit({ date: FIXED_DATE });
+    expect(
+      await screen.findByText('That category is not accepted.'),
+    ).toBeInTheDocument();
+    const category = screen.getByLabelText('Category');
+    expect(category).toHaveAttribute('aria-invalid', 'true');
+    // The rejection is announced on, and returns focus to, the category
+    // control rather than sending the user to the amount field.
+    await waitFor(() => expect(category).toHaveFocus());
+    expect(screen.getByLabelText('Amount')).not.toHaveFocus();
+  });
+
+  it('focuses the editor category control on a rejected correction', async () => {
+    renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'DINING' })]),
+      transactionsPatch: () =>
+        jsonResponse(
+          {
+            code: 'VALIDATION_FAILED',
+            message: 'Check the highlighted fields.',
+            fieldErrors: { category: 'That category is not accepted.' },
+          },
+          400,
+        ),
+    });
+    await screen.findByText('Groceries');
+    const editButton = screen.getByRole('button', { name: 'Edit Groceries' });
+    const row = editButton.closest('li') as HTMLLIElement;
+    fireEvent.click(editButton);
+    const category = within(row).getByLabelText('Category');
+    fireEvent.change(category, { target: { value: 'GROCERIES' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save correction' }));
+    expect(
+      await screen.findByText('That category is not accepted.'),
+    ).toBeInTheDocument();
+    expect(category).toHaveAttribute('aria-invalid', 'true');
+    await waitFor(() => expect(category).toHaveFocus());
+  });
+
+  it('exposes provenance as a labelled detail with a native retry control', async () => {
+    renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: () =>
+        jsonResponse(
+          { code: 'INTERNAL_ERROR', message: 'State is unavailable.' },
+          500,
+        ),
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    const term = await within(panel).findByText('Category decision');
+    expect(term.tagName).toBe('DT');
+    // The decision belongs to the same definition list as every other detail.
+    expect(term.closest('dl')).not.toBeNull();
+    const retry = within(panel).getByRole('button', {
+      name: 'Retry category decision',
+    });
+    expect(retry.tagName).toBe('BUTTON');
+    expect(retry).toBeEnabled();
+  });
+
+  it('clears the open panel and private provenance on session loss', async () => {
+    const { onSessionExpired } = renderSection({
+      transactionsGet: () => transactionPage([transaction()]),
+      transactionGet: () => jsonResponse(transaction()),
+      categorizationGet: () =>
+        jsonResponse(
+          { code: 'UNAUTHENTICATED', message: 'You are not signed in.' },
+          401,
+        ),
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    expect(
+      screen.queryByRole('group', { name: 'Details for Groceries' }),
+    ).toBeNull();
+    expect(screen.queryByText('Groceries')).toBeNull();
+    expect(screen.queryByText('Category decision')).toBeNull();
+  });
+
+  it('labels categories as unavailable when the taxonomy fails and retries on refresh', async () => {
+    let taxonomyWorks = false;
+    renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      categoriesGet: () =>
+        taxonomyWorks
+          ? jsonResponse({ items: CATEGORY_ITEMS })
+          : jsonResponse(
+              { code: 'INTERNAL_ERROR', message: 'Category list is down.' },
+              500,
+            ),
+    });
+    const row = (await screen.findByText('Groceries')).closest(
+      'li',
+    ) as HTMLLIElement;
+    // The ledger stays visible and no raw enum token is used as a label.
+    expect(within(row).getByText('Category unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('GROCERIES')).toBeNull();
+    expect(
+      await screen.findByText(
+        /so category names are unavailable\. Refresh to retry\./,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Category unavailable. Refresh the section to retry the list.',
+      ),
+    ).toBeInTheDocument();
+
+    taxonomyWorks = true;
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Refresh transactions' }),
+    );
+    expect(await within(row).findByText('Food shopping')).toBeInTheDocument();
+    expect(within(row).queryByText('Category unavailable')).toBeNull();
   });
 });

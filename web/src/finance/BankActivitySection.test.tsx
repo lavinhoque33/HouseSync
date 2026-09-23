@@ -110,6 +110,8 @@ interface Harness {
   setLedgerTransaction: (transaction: unknown | null) => void;
   setAllocation: (allocation: unknown | null) => void;
   failNextResolveWith: (code: string, status?: number) => void;
+  failNextConfirmWith: (code: string, status?: number) => void;
+  failNextDismissWith: (code: string, status?: number) => void;
 }
 
 function stubFetch(): Harness {
@@ -121,6 +123,8 @@ function stubFetch(): Harness {
   let ledgerDetail: unknown | null = ledgerTransaction();
   let allocationDetail: unknown | null = null;
   let nextResolveFailure: { code: string; status: number } | null = null;
+  let nextConfirmFailure: { code: string; status: number } | null = null;
+  let nextDismissFailure: { code: string; status: number } | null = null;
   let nextSyncState = 'IDLE';
   let nextHistoryReady = true;
   let bankActivityGate: Promise<void> | null = null;
@@ -210,6 +214,22 @@ function stubFetch(): Harness {
       if (url.startsWith(`${base}/bank-activity/`) && method === 'POST') {
         const payload = init?.body ? JSON.parse(String(init.body)) : {};
         const id = url.split('/bank-activity/')[1]?.split('/')[0];
+        if (url.endsWith('/confirm') && nextConfirmFailure) {
+          const failure = nextConfirmFailure;
+          nextConfirmFailure = null;
+          return jsonResponse(
+            { code: failure.code, message: 'Conflict.' },
+            failure.status,
+          );
+        }
+        if (url.endsWith('/dismiss') && nextDismissFailure) {
+          const failure = nextDismissFailure;
+          nextDismissFailure = null;
+          return jsonResponse(
+            { code: failure.code, message: 'Conflict.' },
+            failure.status,
+          );
+        }
         if (url.endsWith('/resolve')) {
           if (nextResolveFailure) {
             const failure = nextResolveFailure;
@@ -413,6 +433,12 @@ function stubFetch(): Harness {
     failNextResolveWith: (code, status = 409) => {
       nextResolveFailure = { code, status };
     },
+    failNextConfirmWith: (code, status = 409) => {
+      nextConfirmFailure = { code, status };
+    },
+    failNextDismissWith: (code, status = 409) => {
+      nextDismissFailure = { code, status };
+    },
   };
 }
 
@@ -559,6 +585,143 @@ describe('BankActivitySection', () => {
       expect(screen.getByLabelText('Description')).toHaveValue(
         'Typed draft text',
       );
+    });
+  });
+
+  it('keeps a confirm draft across a non-material evidence refresh', async () => {
+    const { harness } = renderSection();
+    const posted = await findItemByAmount('-12.34');
+    fireEvent.click(
+      within(posted).getByRole('button', { name: /^Confirm bank activity/ }),
+    );
+    fireEvent.change(await screen.findByLabelText('Description'), {
+      target: { value: 'Typed draft text' },
+    });
+
+    // The provider posts new categorization evidence: the observation row
+    // version moves while every ledger-relevant fact stays identical.
+    harness.setItems([activity({ version: 12 })]);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh inbox' }));
+    await waitFor(() =>
+      expect(screen.getByLabelText('Description')).toHaveValue(
+        'Typed draft text',
+      ),
+    );
+
+    // Reopening the form reuses the retained draft instead of rebuilding it,
+    // and the submit is guarded by the current revision.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    const refreshed = await findItemByAmount('-12.34');
+    fireEvent.click(
+      within(refreshed).getByRole('button', { name: /^Confirm bank activity/ }),
+    );
+    expect(await screen.findByLabelText('Description')).toHaveValue(
+      'Typed draft text',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Add to ledger' }));
+    await waitFor(() => {
+      const confirm = harness.calls.find((call) =>
+        call.url.endsWith(`/bank-activity/${POSTED_ID}/confirm`),
+      );
+      expect(confirm).toBeDefined();
+      expect(JSON.parse(String(confirm?.init?.body))).toEqual({
+        expectedVersion: 12,
+        kind: 'EXPENSE',
+        description: 'Typed draft text',
+        category: null,
+      });
+    });
+  });
+
+  it('refetches and preserves a confirm draft after a stale version', async () => {
+    const { harness } = renderSection();
+    const posted = await findItemByAmount('-12.34');
+    fireEvent.click(
+      within(posted).getByRole('button', { name: /^Confirm bank activity/ }),
+    );
+    fireEvent.change(await screen.findByLabelText('Description'), {
+      target: { value: 'Typed coffee' },
+    });
+
+    // Another device revised the entry: the version moved under the request.
+    harness.setItems([
+      activity({
+        money: { amount: '-13.00', currency: 'USD' },
+        occurredOn: '2026-09-12',
+        providerDescription: 'Coffee Shop revised',
+        version: 4,
+      }),
+    ]);
+    harness.failNextConfirmWith('RESOURCE_VERSION_CONFLICT');
+    fireEvent.click(screen.getByRole('button', { name: 'Add to ledger' }));
+
+    // The stale version refetches and asks for review instead of resending
+    // blind; the typed draft survives.
+    expect(
+      await screen.findByText(/changed while you were reviewing/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Description')).toHaveValue('Typed coffee');
+    const row = await findItemByAmount('-13.00');
+    expect(row.textContent).toContain('Coffee Shop revised');
+
+    // The retry travels with the refetched version and the same typed draft.
+    fireEvent.click(screen.getByRole('button', { name: 'Add to ledger' }));
+    await waitFor(() => {
+      const confirms = harness.calls.filter((call) =>
+        call.url.endsWith(`/bank-activity/${POSTED_ID}/confirm`),
+      );
+      expect(confirms).toHaveLength(2);
+      expect(JSON.parse(String(confirms[1]?.init?.body))).toEqual({
+        expectedVersion: 4,
+        kind: 'EXPENSE',
+        description: 'Typed coffee',
+        category: null,
+      });
+    });
+  });
+
+  it('refetches after a stale dismiss so the retry uses the current version', async () => {
+    const { harness } = renderSection();
+    const pending = await findItemByAmount('-5.00');
+    fireEvent.click(
+      within(pending).getByRole('button', { name: /^Dismiss bank activity/ }),
+    );
+    const form = await screen.findByRole('group', {
+      name: /^Dismiss -5.00 USD on 2026-09-11/,
+    });
+    fireEvent.change(within(form).getByLabelText('Reason'), {
+      target: { value: 'NOT_NEEDED' },
+    });
+
+    harness.setItems([
+      activity({
+        id: PENDING_ID,
+        state: 'PENDING',
+        money: { amount: '-5.00', currency: 'USD' },
+        occurredOn: '2026-09-11',
+        providerDescription: 'Pending charge',
+        version: 9,
+      }),
+    ]);
+    harness.failNextDismissWith('RESOURCE_VERSION_CONFLICT');
+    fireEvent.click(within(form).getByRole('button', { name: 'Dismiss item' }));
+
+    expect(
+      await screen.findByText(/changed while you were reviewing/),
+    ).toBeInTheDocument();
+    // The dismissal choice survives for review rather than being resent.
+    expect(within(form).getByLabelText('Reason')).toHaveValue('NOT_NEEDED');
+
+    fireEvent.click(within(form).getByRole('button', { name: 'Dismiss item' }));
+    await waitFor(() => {
+      const dismissals = harness.calls.filter((call) =>
+        call.url.endsWith(`/bank-activity/${PENDING_ID}/dismiss`),
+      );
+      expect(dismissals).toHaveLength(2);
+      expect(JSON.parse(String(dismissals[1]?.init?.body))).toEqual({
+        expectedVersion: 9,
+        reason: 'NOT_NEEDED',
+      });
     });
   });
 

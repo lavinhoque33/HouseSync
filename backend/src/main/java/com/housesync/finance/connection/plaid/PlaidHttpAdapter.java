@@ -251,6 +251,19 @@ public class PlaidHttpAdapter implements PlaidAdapter {
     LocalDate authorizedOn = readDate(transaction.path("authorized_date"));
     String name = readText(transaction, "name");
     String merchantName = readText(transaction, "merchant_name");
+    // Stable merchant identity is provider-scoped evidence; the display name is bounded untrusted
+    // text distinct from the statement description. Personal-finance codes normalize to the
+    // documented uppercase token shape before anything persists.
+    String merchantIdentity = readText(transaction, "merchant_entity_id");
+    String merchantDisplayName = merchantName;
+    String pfcPrimary =
+        normalizePfcCode(readText(transaction.path("personal_finance_category"), "primary"));
+    String pfcDetail =
+        normalizePfcCode(readText(transaction.path("personal_finance_category"), "detailed"));
+    if (pfcDetail != null && pfcPrimary == null) {
+      // A detail code without its primary is unsafe evidence and never surfaced.
+      pfcDetail = null;
+    }
     return new ProviderTransaction(
         remoteAccountId,
         remoteTransactionId,
@@ -262,7 +275,32 @@ public class PlaidHttpAdapter implements PlaidAdapter {
         postedOn,
         authorizedOn,
         name,
-        merchantName);
+        merchantName,
+        merchantIdentity,
+        merchantDisplayName,
+        pfcPrimary,
+        pfcDetail);
+  }
+
+  /**
+   * Provider category codes are uppercase identifier-shaped tokens; a lowercase, punctuated, or
+   * over-limit value is malformed evidence and becomes null rather than a coerced guess.
+   */
+  private static String normalizePfcCode(String raw) {
+    if (raw == null || raw.isBlank() || raw.length() > 200) {
+      return null;
+    }
+    for (int index = 0; index < raw.length(); index++) {
+      char character = raw.charAt(index);
+      boolean allowed =
+          (character >= 'A' && character <= 'Z')
+              || (character >= '0' && character <= '9')
+              || character == '_';
+      if (!allowed) {
+        return null;
+      }
+    }
+    return raw;
   }
 
   /**

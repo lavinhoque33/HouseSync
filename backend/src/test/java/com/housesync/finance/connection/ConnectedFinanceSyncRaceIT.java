@@ -181,6 +181,10 @@ class ConnectedFinanceSyncRaceIT extends ConnectedFinanceITSupport {
         LocalDate.of(2026, 9, 12),
         null,
         description,
+        null,
+        null,
+        null,
+        null,
         null);
   }
 

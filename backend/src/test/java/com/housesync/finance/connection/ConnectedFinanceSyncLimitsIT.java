@@ -109,6 +109,10 @@ class ConnectedFinanceSyncLimitsIT extends ConnectedFinanceITSupport {
         LocalDate.of(2026, 9, 9),
         null,
         description,
+        null,
+        null,
+        null,
+        null,
         null);
   }
 
