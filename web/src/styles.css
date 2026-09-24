@@ -1797,8 +1797,19 @@ code {
   .auth-card,
   .household-card,
   .finance-transactions,
-  .finance-review-card {
+  .finance-review-card,
+  .finance-rules,
+  .member-card {
     padding-inline: 8px;
+  }
+
+  .member-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .eyebrow {
+    letter-spacing: 0;
+    overflow-wrap: anywhere;
   }
 
   .finance-reviews {
@@ -1969,6 +1980,26 @@ code {
   .spending-group,
   .spending-row {
     padding-inline: 16px;
+  }
+}
+
+@media (max-width: 360px) {
+  .spending-dashboard {
+    margin-inline: -8px;
+    padding-inline: 8px;
+  }
+
+  .spending-group,
+  .spending-row {
+    padding-inline: 8px;
+  }
+
+  .spending-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .spending-row dt {
+    overflow-wrap: anywhere;
   }
 }
 
