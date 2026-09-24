@@ -1,5 +1,6 @@
 package com.housesync.finance.categorization.application;
 
+import com.housesync.finance.activity.application.BankActivityService;
 import com.housesync.finance.categorization.domain.CategorizationOrigin;
 import com.housesync.finance.transaction.persistence.FinancialTransactionEntity;
 import com.housesync.finance.transaction.persistence.FinancialTransactionRepository;
@@ -11,11 +12,15 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Owner-private categorization read use case. The route is financial-owner-only: the
- * authorization scope is the owner-scoped transaction lookup, so another current member — even one
- * sharing the household-disclosed entry — receives the generic privacy-preserving transaction 404
- * exactly like a foreign or missing resource. Only provenance is exposed; the review state is
- * constant {@code NONE} until the review queue exists.
+ * Owner-private categorization read use case. The route is financial-owner-only:
+ * the authorization scope is the owner-scoped transaction lookup, so another current member — even
+ * one sharing the household-disclosed entry — receives the generic privacy-preserving transaction
+ * 404 exactly like a foreign or missing resource.
+ *
+ * <p>The seventh field, {@code ruleEligible}, reports whether the owner may explicitly
+ * learn an exact rule from this entry right now. It is evaluated live for the current actor and
+ * transaction — posted non-refund USER origin with a non-null category, a safe server-derived match
+ * key, and no active rule for that key — and the derived key itself never leaves the server.
  */
 @Service
 public class CategorizationQueryService {
@@ -25,11 +30,18 @@ public class CategorizationQueryService {
 
   private final FinancialTransactionRepository transactions;
   private final HouseholdService households;
+  private final CategorizationRuleService rules;
+  private final BankActivityService bankActivity;
 
   public CategorizationQueryService(
-      FinancialTransactionRepository transactions, HouseholdService households) {
+      FinancialTransactionRepository transactions,
+      HouseholdService households,
+      CategorizationRuleService rules,
+      BankActivityService bankActivity) {
     this.transactions = transactions;
     this.households = households;
+    this.rules = rules;
+    this.bankActivity = bankActivity;
   }
 
   @Transactional(readOnly = true)
@@ -39,7 +51,15 @@ public class CategorizationQueryService {
     // missing resource, so existence is never disclosed through this resource.
     return transactions
         .findOwnedScoped(householdId, transactionId, actorId)
-        .map(CategorizationQueryService::toResponse)
+        .map(
+            transaction ->
+                CategorizationQueryService.toResponse(
+                    transaction,
+                    rules.ruleEligible(
+                        householdId,
+                        actorId,
+                        transaction,
+                        retainedMerchantIdentityDigest(householdId, transactionId, actorId))))
         .orElseGet(
             () -> {
               // Separates the resource 404 from the household 404 for a non-member without
@@ -49,8 +69,22 @@ public class CategorizationQueryService {
             });
   }
 
-  /** Safe provenance projection; the exact six-field contract with no internal references. */
-  private static CategorizationResponse toResponse(FinancialTransactionEntity transaction) {
+  /**
+   * Retained provider merchant identity behind a connected entry's admitted observation, or null
+   * for manual entries. The lookup is scoped to the owner so a foreign or replaced association
+   * never contributes evidence.
+   */
+  private String retainedMerchantIdentityDigest(
+      UUID householdId, UUID transactionId, UUID actorId) {
+    return bankActivity
+        .retainedCategorizationEvidence(householdId, transactionId, actorId)
+        .map(BankActivityService.RetainedEvidence::merchantIdentityDigest)
+        .orElse(null);
+  }
+
+  /** Safe provenance projection; the exact seven-field contract with no internal references. */
+  private static CategorizationResponse toResponse(
+      FinancialTransactionEntity transaction, boolean ruleEligible) {
     CategorizationOrigin origin = transaction.getCategoryOrigin();
     return new CategorizationResponse(
         transaction.getId(),
@@ -58,6 +92,7 @@ public class CategorizationQueryService {
         transaction.getCategory(),
         origin.name(),
         transaction.getCategoryAssignedAt(),
-        REVIEW_STATE_NONE);
+        REVIEW_STATE_NONE,
+        ruleEligible);
   }
 }

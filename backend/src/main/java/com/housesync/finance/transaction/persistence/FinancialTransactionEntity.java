@@ -340,21 +340,22 @@ public class FinancialTransactionEntity {
 
   /**
    * Records the initial assignment for a new row (already version 0, so no bump and no updated_at
-   * change beyond creation): a {@code USER} token decision, a mapped {@code PROVIDER} assignment
-   * with its ruleset version, or {@code NONE}. The {@code OWNER_RULE} seam stays unassigned until
-   * owner rules exist. Evidence participates only as the internal digest.
+   * change beyond creation): a {@code USER} token decision, an exact {@code OWNER_RULE} assignment
+   * with its retained rule reference and ruleset version, a mapped {@code PROVIDER} assignment with
+   * its ruleset version, or {@code NONE}. Evidence participates only as the internal digest.
    */
   public void initiallyCategorized(
       CategorizationOrigin origin,
       String category,
       String rulesetVersion,
+      UUID ruleId,
       String evidenceFingerprint,
       Instant assignedAt) {
     this.category = category;
     this.categoryOrigin = origin;
     this.categoryAssignedAt = assignedAt;
     this.categorizationRulesetVersion = rulesetVersion;
-    this.categoryRuleId = null;
+    this.categoryRuleId = ruleId;
     this.categorizationEvidenceFingerprint = evidenceFingerprint;
   }
 

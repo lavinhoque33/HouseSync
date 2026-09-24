@@ -19,6 +19,7 @@ import {
   patchTransaction,
   postTransaction,
   postTransactionAllocation,
+  postTransactionCategorizationRule,
   type CategorizationOrigin,
   type CategorizationState,
   type CreateAllocationInput,
@@ -45,6 +46,8 @@ import {
   type MoneySign,
 } from './money';
 import { previewEqualShares, sortCanonicalUserIds } from './allocation';
+import { categoryLabel } from './categories';
+import { CategorizationRulesSection } from './CategorizationRulesSection';
 import { MemberBalancesSection } from './MemberBalancesSection';
 import { ReportingSettingsSection } from './ReportingSettingsSection';
 import { SpendingDashboardSection } from './SpendingDashboardSection';
@@ -73,6 +76,19 @@ interface PendingVoid {
 interface PendingShare {
   transaction: Transaction;
   action: 'SHARE' | 'REVOKE';
+}
+
+/**
+ * One explicit "Use for future matches" intent: the durable idempotency key
+ * and the exact request are retained together while the outcome is unknown,
+ * so a retry never sends an edited payload under an uncertain key and a
+ * same-key replay can never create a second rule.
+ */
+interface PendingRuleCreate {
+  key: string;
+  transactionId: string;
+  description: string;
+  expectedTransactionVersion: number;
 }
 
 /**
@@ -256,24 +272,6 @@ function postedRefundMinorUnits(
   return total;
 }
 
-/**
- * Server-returned labels are the only user-visible category names. When the
- * taxonomy could not be loaded, or when a code is absent from it, the calm
- * unavailable text is shown instead: a raw enum token is never rendered as a
- * category name.
- */
-function categoryLabel(
-  category: string | null,
-  categories: TransactionCategory[] | null,
-): string {
-  if (category === null) return 'Uncategorized';
-  if (categories === null) return 'Category unavailable';
-  return (
-    categories.find((value) => value.code === category)?.label ??
-    'Category unavailable'
-  );
-}
-
 /** The positive magnitude of an expense's recorded amount. */
 function expenseMagnitudeOf(transaction: Transaction): string {
   return transaction.money.amount.startsWith('-')
@@ -380,6 +378,18 @@ export function TransactionsSection({
   const [pendingShare, setPendingShare] = useState<PendingShare | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
+  // Explicit rule learning. `pendingRuleCreate` retains the durable key
+  // and the exact request together while the outcome is unknown, so an
+  // explicit retry can never create a second rule under a fresh key; the
+  // signal converges the private rule list after a create commits.
+  const [pendingRuleCreate, setPendingRuleCreate] =
+    useState<PendingRuleCreate | null>(null);
+  const [ruleCreating, setRuleCreating] = useState(false);
+  const [rulesRefresh, setRulesRefresh] = useState(0);
+  // Bumped by every scope clear so the private rule panel drops its own
+  // retained list and in-flight requests with the rest of the section.
+  const [scopeReset, setScopeReset] = useState(0);
+
   // Allocation state. The cache holds the active allocation per
   // transaction ID, null when the server answers that none is active, and
   // stays undefined while unknown; only the affected entry is ever cleared.
@@ -422,6 +432,7 @@ export function TransactionsSection({
   // the newest request, the panel's close, and every scope clear.
   const provenanceControllerRef = useRef<AbortController | null>(null);
   const provenanceSeqRef = useRef(0);
+  const ruleCreatingRef = useRef(false);
   const noticeRef = useRef<HTMLDivElement>(null);
   const createAccountRef = useRef<HTMLSelectElement>(null);
   const createCategoryRef = useRef<HTMLSelectElement>(null);
@@ -728,6 +739,12 @@ export function TransactionsSection({
     // and dropped with every other scoped draft on sign-out, session expiry,
     // household switch, and access loss.
     resetProvenance();
+    // The retained learn intent is private merchant evidence too: it is
+    // dropped with the same scope change, never retried into a new household.
+    ruleCreatingRef.current = false;
+    setPendingRuleCreate(null);
+    setRuleCreating(false);
+    setScopeReset((value) => value + 1);
     setPendingVoid(null);
     setPendingShare(null);
     shareTriggerRef.current = null;
@@ -2718,6 +2735,175 @@ export function TransactionsSection({
     }
   }
 
+  /**
+   * Starts the explicit "Use for future matches" intent for the decision the
+   * open panel is showing. The server alone decides eligibility: the action
+   * only exists while the owner-only resource reports `ruleEligible`, so no
+   * match key is ever derived, submitted, or rendered here. The transaction's
+   * current version and a fresh durable key are captured together, and the
+   * category that was already saved stays committed whatever happens next.
+   */
+  function createRuleFrom(
+    transaction: Transaction,
+    state: CategorizationState,
+  ) {
+    if (ruleCreatingRef.current || !authorityConfirmed) return;
+    const request: PendingRuleCreate = {
+      key: crypto.randomUUID(),
+      transactionId: transaction.id,
+      description: transaction.description,
+      expectedTransactionVersion: state.transactionVersion,
+    };
+    setPendingRuleCreate(request);
+    void submitRuleCreate(request);
+  }
+
+  /**
+   * Sends exactly one learn intent. A same-key replay returns the already
+   * created rule, so an explicit retry after a timed-out, busy, or
+   * unreachable attempt is safe and can never create a second rule. Every
+   * failure keeps the saved category: learning is a separate, additive step.
+   */
+  async function submitRuleCreate(request: PendingRuleCreate) {
+    if (ruleCreatingRef.current || !authorityConfirmed) return;
+    const generation = generationRef.current;
+    const controller = new AbortController();
+    track(controller);
+    ruleCreatingRef.current = true;
+    setRuleCreating(true);
+    setNotice(null);
+    try {
+      const token = await ensureCsrf(generation, controller.signal);
+      if (!current(generation) || controller.signal.aborted) return;
+      if (!token) {
+        setNotice({ kind: 'error', text: 'Security setup failed. Retry.' });
+        return;
+      }
+      const rule = await postTransactionCategorizationRule(
+        household.id,
+        request.transactionId,
+        { expectedTransactionVersion: request.expectedTransactionVersion },
+        request.key,
+        token,
+        controller.signal,
+      );
+      if (!current(generation) || controller.signal.aborted) return;
+      setPendingRuleCreate(null);
+      // The private rule list converges on the committed rule, including a
+      // same-key replay that created it earlier.
+      setRulesRefresh((value) => value + 1);
+      setNotice({
+        kind: 'info',
+        text: `Future matches for “${rule.matchLabel}” now use ${categoryLabel(
+          rule.category,
+          categories,
+        )}. Entries already recorded keep the category they have.`,
+      });
+      // The capability is spent for this entry: the reloaded decision shows
+      // the owner rule instead of offering the same action again. An
+      // unrelated open panel and every other draft stay untouched.
+      if (detail?.id === request.transactionId) void loadProvenance(detail);
+    } catch (error) {
+      if (!current(generation) || controller.signal.aborted) return;
+      const apiError =
+        error instanceof ApiError
+          ? error
+          : new ApiError({
+              status: 0,
+              code: 'NETWORK_ERROR',
+              message: 'Could not reach the server.',
+            });
+      if (mapCommonErrors(apiError)) return;
+      if (apiError.code === 'CSRF_INVALID') {
+        const refreshed = await refreshCsrf(generation, controller.signal);
+        if (!current(generation) || controller.signal.aborted) return;
+        setNotice({
+          kind: 'error',
+          text: refreshed
+            ? 'Your security token was refreshed. Retry the same request with its original key.'
+            : 'Your secure request expired. Reload before retrying.',
+          correlationId: apiError.correlationId,
+        });
+        // The request never reached the rule, so the retained intent stays
+        // available for the same-key retry.
+        return;
+      }
+      if (apiError.code === 'CATEGORY_RULE_CONFLICT') {
+        // Another active rule already covers this key. Nothing about that
+        // rule is disclosed here beyond its existence; the private list below
+        // is where the owner manages it.
+        setPendingRuleCreate(null);
+        setRulesRefresh((value) => value + 1);
+        setNotice({
+          kind: 'warning',
+          text: 'You already have an active rule for this merchant. It keeps assigning the category; manage it under “Your future-match rules”.',
+          correlationId: apiError.correlationId,
+        });
+        if (detail?.id === request.transactionId) void loadProvenance(detail);
+        return;
+      }
+      if (apiError.code === 'TRANSACTION_NOT_FOUND') {
+        removeFromFeeds(request.transactionId);
+        setPendingRuleCreate(null);
+        if (detail?.id === request.transactionId) setDetail(null);
+        setNotice({
+          kind: 'warning',
+          text: 'This transaction is no longer available to you. Refresh to see the current list.',
+          correlationId: apiError.correlationId,
+          showRefresh: true,
+        });
+        return;
+      }
+      if (
+        apiError.code === 'RESOURCE_VERSION_CONFLICT' ||
+        apiError.code === 'TRANSACTION_VOIDED' ||
+        apiError.code === 'RESOURCE_VERSION_EXHAUSTED' ||
+        apiError.code === 'VALIDATION_FAILED' ||
+        apiError.code === 'IDEMPOTENCY_CONFLICT'
+      ) {
+        // A definite rejection: the entry changed, was voided, or can no
+        // longer supply a safe key. The saved category is untouched and the
+        // decision is reloaded so the offer reflects the current state.
+        setPendingRuleCreate(null);
+        if (detail?.id === request.transactionId) setDetail(null);
+        setNotice({
+          kind: 'error',
+          text:
+            apiError.code === 'VALIDATION_FAILED'
+              ? 'This decision cannot become a rule right now. The category you saved is unchanged; review the current decision and try again.'
+              : 'This entry changed on the server. The list was refreshed; review the current decision before teaching it.',
+          correlationId: apiError.correlationId,
+          showRefresh: true,
+        });
+        reloadTransactions(true);
+        return;
+      }
+      // Anything else — a timeout, a busy ledger, an unreachable server, or
+      // an unexpected server failure — leaves the outcome unknown, so the
+      // exact same request stays retained for a same-key retry.
+      setNotice({
+        kind:
+          apiError.timedOut ||
+          apiError.code === 'FINANCE_BUSY' ||
+          apiError.code === 'NETWORK_ERROR'
+            ? 'warning'
+            : 'error',
+        text:
+          apiError.timedOut ||
+          apiError.code === 'FINANCE_BUSY' ||
+          apiError.code === 'NETWORK_ERROR'
+            ? 'The rule request has an unknown outcome. Retry the same request with its original key, or refresh first — the category you saved is unchanged.'
+            : apiError.message ||
+              'The future-match rule could not be created. The category you saved is unchanged.',
+        correlationId: apiError.correlationId,
+      });
+    } finally {
+      untrack(controller);
+      ruleCreatingRef.current = false;
+      if (!unmountedRef.current) setRuleCreating(false);
+    }
+  }
+
   async function openDetail(transaction: Transaction) {
     // The ref guards same-flush double activations; the aligned opener
     // guard refuses confirmations, mutations, loads, and unconfirmed
@@ -2978,6 +3164,40 @@ export function TransactionsSection({
               onClick={refresh}
             >
               Refresh transactions
+            </button>
+          </div>
+        </div>
+      )}
+
+      {transactions !== null && pendingRuleCreate !== null && (
+        // The same durable same-key retry affordance as a transaction create:
+        // it lives outside the transient notice so no later notice or refresh
+        // can strand the retained request. The saved category is already
+        // committed either way; only the additive rule is uncertain.
+        <div className="finance-pending-request">
+          <p>
+            A “Use for future matches” request for “
+            {pendingRuleCreate.description}” still has an unknown result. Retry
+            the exact same request with its original key, or reload your rules
+            first. Reloading keeps this request available; only a same-key retry
+            can prove whether the rule was created.
+          </p>
+          <div className="finance-account-actions">
+            <button
+              type="button"
+              className="household-button"
+              disabled={busy || !authorityConfirmed}
+              onClick={() => void submitRuleCreate(pendingRuleCreate)}
+            >
+              Retry same request
+            </button>
+            <button
+              type="button"
+              className="household-button household-button--secondary"
+              disabled={busy}
+              onClick={() => setRulesRefresh((value) => value + 1)}
+            >
+              Reload rules
             </button>
           </div>
         </div>
@@ -4048,6 +4268,17 @@ export function TransactionsSection({
         </form>
       )}
 
+      <CategorizationRulesSection
+        household={household}
+        csrf={csrf}
+        onCsrfRefreshed={onCsrfRefreshed}
+        onSessionExpired={onSessionExpired}
+        onHouseholdAccessChanged={onHouseholdAccessChanged}
+        authorityConfirmed={authorityConfirmed}
+        categories={categories}
+        refreshSignal={rulesRefresh}
+        scopeResetSignal={scopeReset}
+      />
       <MemberBalancesSection
         household={household}
         currentUserId={currentUserId}
@@ -4102,6 +4333,30 @@ export function TransactionsSection({
                 </time>
                 .
               </span>
+              {freshState.ruleEligible && (
+                // The offer exists only while the server reports a safe
+                // derived key and no active rule for it: the browser neither
+                // derives the key nor decides eligibility, and a rule
+                // failure never rolls back the category already saved.
+                <div className="finance-rule-offer">
+                  <button
+                    type="button"
+                    className="household-button household-button--secondary"
+                    disabled={
+                      busy || pendingRuleCreate !== null || !authorityConfirmed
+                    }
+                    onClick={() => createRuleFrom(entry, freshState)}
+                  >
+                    {ruleCreating ? 'Creating rule…' : 'Use for future matches'}
+                  </button>
+                  <p className="household-hint">
+                    Creates a private rule: future entries that match this one
+                    use {categoryLabel(freshState.category, categories)}.
+                    Nothing already recorded changes, and only you can see the
+                    rule.
+                  </p>
+                </div>
+              )}
             </>
           ) : detailProvenance.status === 'loading' ? (
             'Loading your category decision…'

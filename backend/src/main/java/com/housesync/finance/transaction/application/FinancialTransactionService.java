@@ -11,7 +11,10 @@ import com.housesync.finance.account.domain.SupportedCurrency;
 import com.housesync.finance.account.persistence.FinancialAccountEntity;
 import com.housesync.finance.account.persistence.FinancialAccountRepository;
 import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAccountNotFoundException;
+import com.housesync.finance.categorization.application.CategorizationRuleLookup;
+import com.housesync.finance.categorization.application.CategorizationRuleLookup.OwnerRuleMatch;
 import com.housesync.finance.categorization.domain.CategorizationClassifier;
+import com.housesync.finance.categorization.domain.CategorizationMatchKeys;
 import com.housesync.finance.categorization.domain.CategorizationOrigin;
 import com.housesync.finance.transaction.domain.AllocationStatus;
 import com.housesync.finance.transaction.domain.TransactionCategory;
@@ -84,6 +87,7 @@ public class FinancialTransactionService {
   private final FinancialAccountRepository accounts;
   private final FinancialTransactionAllocationRepository allocations;
   private final HouseholdService households;
+  private final CategorizationRuleLookup categorizationRules;
   private final Clock clock;
   private final EntityManager entityManager;
 
@@ -93,6 +97,7 @@ public class FinancialTransactionService {
       FinancialAccountRepository accounts,
       FinancialTransactionAllocationRepository allocations,
       HouseholdService households,
+      CategorizationRuleLookup categorizationRules,
       Clock clock,
       EntityManager entityManager) {
     this.transactions = transactions;
@@ -100,6 +105,7 @@ public class FinancialTransactionService {
     this.accounts = accounts;
     this.allocations = allocations;
     this.households = households;
+    this.categorizationRules = categorizationRules;
     this.clock = clock;
     this.entityManager = entityManager;
   }
@@ -200,9 +206,10 @@ public class FinancialTransactionService {
       transaction.userAssigned(values.category().name(), now);
     } else {
       // Omitted and explicit-null are the same classifier-eligible instruction (the accepted
-      // idempotency equivalence); an exact provider mapping applies, otherwise NONE. The
-      // OWNER_RULE precedence slot stays empty until owner rules exist.
-      categorizeFromEvidence(transaction, null, null, null, null, now);
+      // idempotency equivalence); an exact owner rule applies ahead of any provider mapping,
+      // otherwise NONE. Manual entries carry no provider evidence, so only a description-keyed
+      // owner rule can match.
+      categorizeNewEntry(transaction, householdId, actorId, null, null, null, null, now);
     }
     transactions.save(transaction);
     idempotency.save(new TransactionIdempotencyEntity(key, fingerprint, transaction.getId(), now));
@@ -290,9 +297,11 @@ public class FinancialTransactionService {
       transaction.userAssigned(admission.rawCategory(), now);
     } else {
       // Omitted or explicit-null at confirmation: deterministic classification from the
-      // observation's stored provider evidence.
-      categorizeFromEvidence(
+      // observation's stored provider evidence, with the exact owner rule matching first.
+      categorizeNewEntry(
           transaction,
+          householdId,
+          actorId,
           admission.observationMerchantIdentityDigest(),
           admission.observationPfcPrimaryCode(),
           admission.observationPfcDetailCode(),
@@ -310,20 +319,37 @@ public class FinancialTransactionService {
   }
 
   /**
-   * Deterministic provider-mapping assignment for one classifier-eligible new posted non-refund row. The
-   * evidence arrives already normalized and identity-safe (the merchant identity as its scope-bound
-   * digest); an exact reviewed provider mapping applies, otherwise the row stays uncategorized with
-   * {@code NONE} — never a default token. The assignment is part of the entry's initial state: one
-   * transaction at version 0, no extra version bump. Manual entries carry no provider evidence, so
-   * they classify as {@code NONE} until owner rules exist.
+   * Deterministic assignment for one classifier-eligible new posted non-refund row, applying the
+   * ADR precedence exactly (categorization contract §3): an exact active owner rule beats the
+   * versioned provider mapping; no match leaves the row uncategorized with {@code NONE} — never a
+   * default token. The rule key is derived server-side from the entry's own retained evidence, and
+   * the lookup is scoped by household and financial owner in SQL. The assignment is part of the
+   * entry's initial state: one transaction at version 0, no extra version bump.
    */
-  private static void categorizeFromEvidence(
+  private void categorizeNewEntry(
       FinancialTransactionEntity transaction,
+      UUID householdId,
+      UUID ownerId,
       String merchantIdentityDigest,
       String pfcPrimaryCode,
       String pfcDetailCode,
       String evidenceFingerprint,
       Instant assignedAt) {
+    var ownerRule =
+        CategorizationMatchKeys.derive(
+                transaction.getKind(), transaction.getDescription(), merchantIdentityDigest)
+            .flatMap(key -> categorizationRules.findActiveMatch(householdId, ownerId, key));
+    if (ownerRule.isPresent()) {
+      OwnerRuleMatch matched = ownerRule.get();
+      transaction.initiallyCategorized(
+          CategorizationOrigin.OWNER_RULE,
+          matched.category(),
+          matched.rulesetVersion(),
+          matched.ruleId(),
+          evidenceFingerprint,
+          assignedAt);
+      return;
+    }
     var assignment =
         CategorizationClassifier.classify(pfcPrimaryCode, pfcDetailCode, transaction.getKind());
     if (assignment.isPresent()) {
@@ -331,12 +357,31 @@ public class FinancialTransactionService {
           CategorizationOrigin.PROVIDER,
           assignment.get().category().name(),
           assignment.get().rulesetVersion(),
+          null,
           evidenceFingerprint,
           assignedAt);
     } else {
       transaction.initiallyCategorized(
-          CategorizationOrigin.NONE, null, null, evidenceFingerprint, assignedAt);
+          CategorizationOrigin.NONE, null, null, null, evidenceFingerprint, assignedAt);
     }
+  }
+
+  /**
+   * Owner-locked source entry for a categorization rule (categorization contract §4). The
+   * caller already holds the household lifecycle lock, so this only takes the owned row lock and
+   * compares the caller's version token there; rule eligibility (posted non-refund USER with a
+   * non-null category) stays in the categorization domain.
+   */
+  public FinancialTransactionEntity loadForCategorizationRule(
+      UUID householdId, UUID transactionId, UUID actorId, int expectedTransactionVersion) {
+    FinancialTransactionEntity transaction =
+        transactions
+            .findOwnedForUpdate(householdId, transactionId, actorId)
+            .orElseThrow(TransactionNotFoundException::new);
+    if (transaction.getVersion() != expectedTransactionVersion) {
+      throw new TransactionVersionConflictException();
+    }
+    return transaction;
   }
 
   private FinancialTransactionEntity loadConnectedRefundSource(

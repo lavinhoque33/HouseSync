@@ -4,6 +4,9 @@ import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAcc
 import com.housesync.finance.account.web.FinancialAccountExceptions.IdempotencyConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionExhaustedException;
+import com.housesync.finance.categorization.web.CategorizationRuleExceptions.CategoryRuleConflictException;
+import com.housesync.finance.categorization.web.CategorizationRuleExceptions.RuleIdempotencyConflictException;
+import com.housesync.finance.categorization.web.CategorizationRuleExceptions.RuleNotFoundException;
 import com.housesync.finance.connection.web.ConnectionExceptions.BankActivityNotFoundException;
 import com.housesync.finance.connection.web.ConnectionExceptions.ConnectedFinanceDisabledException;
 import com.housesync.finance.connection.web.ConnectionExceptions.ConnectionDisconnectedException;
@@ -401,6 +404,41 @@ public class FinancialAccountExceptionHandler {
         HttpStatus.NOT_FOUND,
         ErrorCodes.BANK_ACTIVITY_NOT_FOUND,
         "Bank activity was not found.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RuleNotFoundException.class)
+  public ResponseEntity<ApiError> ruleNotFound(RuleNotFoundException failure) {
+    // Missing, foreign, and other-owner rules are indistinguishable: the message names no
+    // household, owner, rule key, or evidence.
+    return error(
+        HttpStatus.NOT_FOUND,
+        ErrorCodes.CATEGORY_RULE_NOT_FOUND,
+        "Categorization rule was not found.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(CategoryRuleConflictException.class)
+  public ResponseEntity<ApiError> ruleConflict(CategoryRuleConflictException failure) {
+    // An active rule already exists for this owner's derived match key; the response never
+    // reveals whether another owner holds a similar rule.
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.CATEGORY_RULE_CONFLICT,
+        "A rule for this exact match already exists.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RuleIdempotencyConflictException.class)
+  public ResponseEntity<ApiError> ruleIdempotencyConflict(
+      RuleIdempotencyConflictException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.IDEMPOTENCY_CONFLICT,
+        "That request key was already used for different rule details.",
         null,
         failure);
   }

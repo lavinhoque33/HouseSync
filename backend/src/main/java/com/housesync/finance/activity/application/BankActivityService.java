@@ -253,6 +253,35 @@ public class BankActivityService {
             });
   }
 
+  /**
+   * Retained provider categorization evidence behind one admitted ledger entry. The
+   * association is the observation-to-ledger provenance chain, so rule derivation and the
+   * owner-only ruleEligible capability read the observation's stored stable merchant identity
+   * through it. The caller owns the surrounding authorized transaction; evidence is private server
+   * state and never reaches a browser response.
+   */
+  @org.springframework.transaction.annotation.Transactional(
+      readOnly = true,
+      propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
+  public java.util.Optional<RetainedEvidence> retainedCategorizationEvidence(
+      UUID householdId, UUID ledgerTransactionId, UUID actorId) {
+    return associations
+        .findByTransactionId(ledgerTransactionId)
+        .filter(
+            association ->
+                association.getHouseholdId().equals(householdId)
+                    && association.getOwnerUserId().equals(actorId))
+        .flatMap(association -> observations.findById(association.getObservationId()))
+        .map(
+            observation ->
+                new RetainedEvidence(
+                    observation.getProviderMerchantIdentityDigest(),
+                    observation.getMerchantDisplayName()));
+  }
+
+  /** Scope-bound stable merchant identity plus its bounded display name, both nullable. */
+  public record RetainedEvidence(String merchantIdentityDigest, String merchantDisplayName) {}
+
   public Decision confirm(
       UUID householdId,
       UUID observationId,

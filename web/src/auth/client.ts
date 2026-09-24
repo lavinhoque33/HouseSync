@@ -79,6 +79,8 @@ export type ApiErrorCode =
   | 'RESOURCE_VERSION_EXHAUSTED'
   | 'REFUND_CONFLICT'
   | 'TRANSACTION_VOIDED'
+  | 'CATEGORY_RULE_NOT_FOUND'
+  | 'CATEGORY_RULE_CONFLICT'
   | 'ALLOCATION_NOT_FOUND'
   | 'ALLOCATION_CONFLICT'
   | 'FINANCE_BUSY'
@@ -156,6 +158,8 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'RESOURCE_VERSION_EXHAUSTED',
     'REFUND_CONFLICT',
     'TRANSACTION_VOIDED',
+    'CATEGORY_RULE_NOT_FOUND',
+    'CATEGORY_RULE_CONFLICT',
     'ALLOCATION_NOT_FOUND',
     'ALLOCATION_CONFLICT',
     'FINANCE_BUSY',
@@ -193,6 +197,7 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
         key === 'currency' ||
         key === 'status' ||
         key === 'expectedVersion' ||
+        key === 'expectedTransactionVersion' ||
         key === 'expectedLedgerVersion' ||
         key === 'action' ||
         key === 'fields' ||
@@ -2437,10 +2442,16 @@ export type CategorizationOrigin =
 export type CategorizationReviewState = 'NONE' | 'OPEN';
 
 /**
- * Exactly the documented six-field owner-only categorization resource. It is
+ * Exactly the documented seven-field owner-only categorization resource. It is
  * a separate contract from the 16-field transaction DTO: no rule reference,
  * provider code, merchant key, confidence, reason, model, or evidence digest
  * ever appears here.
+ *
+ * `ruleEligible` is the server's sole authority for offering the
+ * explicit "Use for future matches" action: true only for the current posted
+ * non-refund whose decision is `USER`, whose category is non-null, that has a
+ * safe server-derived match key and no active rule for that key. The browser
+ * never derives, receives, or submits the private key.
  */
 export interface CategorizationState {
   transactionId: string;
@@ -2449,6 +2460,7 @@ export interface CategorizationState {
   origin: CategorizationOrigin;
   assignedAt: string;
   reviewState: CategorizationReviewState;
+  ruleEligible: boolean;
 }
 
 /**
@@ -2783,15 +2795,16 @@ function isCategorizationOrigin(value: unknown): value is CategorizationOrigin {
   );
 }
 
-const CATEGORIZATION_STATE_KEYS = 6;
+const CATEGORIZATION_STATE_KEYS = 7;
 const INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 /**
- * Strict parser for the owner-only categorization resource: exactly the six
+ * Strict parser for the owner-only categorization resource: exactly the seven
  * documented fields, each validated. A missing or unknown field, an unknown
- * origin or review state, or a category outside the fixed taxonomy fails the
- * whole response rather than reaching the UI. The structural origin/category
- * combinations stay server-enforced invariants; the browser never invents a
- * category for a state it cannot interpret.
+ * origin or review state, a category outside the fixed taxonomy, or a
+ * non-boolean capability fails the whole response rather than reaching the
+ * UI. The structural origin/category combinations stay server-enforced
+ * invariants; the browser never invents a category for a state it cannot
+ * interpret and never infers `ruleEligible` itself.
  */
 function parseCategorizationState(
   value: unknown,
@@ -2813,7 +2826,8 @@ function parseCategorizationState(
     typeof record.assignedAt !== 'string' ||
     !INSTANT_PATTERN.test(record.assignedAt) ||
     Number.isNaN(Date.parse(record.assignedAt)) ||
-    (record.reviewState !== 'NONE' && record.reviewState !== 'OPEN')
+    (record.reviewState !== 'NONE' && record.reviewState !== 'OPEN') ||
+    typeof record.ruleEligible !== 'boolean'
   ) {
     return undefined;
   }
@@ -2824,6 +2838,7 @@ function parseCategorizationState(
     origin: record.origin,
     assignedAt: record.assignedAt,
     reviewState: record.reviewState,
+    ruleEligible: record.ruleEligible,
   };
 }
 
@@ -2865,6 +2880,284 @@ export async function fetchTransactionCategorization(
     throw unexpectedTransactionResponse(response.status);
   }
   return state;
+}
+
+/**
+ * How the server derived a rule's private match key. The browser only ever
+ * sees this classification, the display label, and the assigned category:
+ * the key itself stays server-side and is never sent, derived, or rendered.
+ */
+export type CategorizationRuleMatchType =
+  'PROVIDER_MERCHANT' | 'NORMALIZED_TEXT';
+
+/** Rules support one one-way transition: `ACTIVE` → `INACTIVE`. */
+export type CategorizationRuleStatus = 'ACTIVE' | 'INACTIVE';
+
+/**
+ * Exactly the documented nine-field private rule projection. `matchLabel` is
+ * a bounded server-provided display label, never the match key. A rule
+ * belongs to one household and one financial owner: the list, create, and
+ * update routes only ever return the current actor's own rules.
+ */
+export interface CategorizationRule {
+  id: string;
+  sourceTransactionId: string;
+  matchType: CategorizationRuleMatchType;
+  matchLabel: string;
+  category: string;
+  status: CategorizationRuleStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Exactly `{items, limit, offset, hasMore}`; the contract has no total count. */
+export interface CategorizationRulePage {
+  items: CategorizationRule[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+export interface CategorizationRuleQuery {
+  /** Documented bound: 1-100. */
+  limit: number;
+  /** Documented bound: 0-10000. */
+  offset: number;
+  /** Omitted means every status. */
+  status?: CategorizationRuleStatus | undefined;
+}
+
+/**
+ * The two accepted rule updates. Exactly one of `category` and the one-way
+ * `status` transition is sent, and `expectedVersion` always accompanies it:
+ * the rule version is the concurrency token, so a lost response is
+ * recoverable by reloading instead of resending a blind update.
+ */
+export type CategorizationRulePatch =
+  | { expectedVersion: number; category: string }
+  | { expectedVersion: number; status: 'INACTIVE' };
+
+export interface CreateCategorizationRuleInput {
+  expectedTransactionVersion: number;
+}
+
+function isCategorizationRuleStatus(
+  value: unknown,
+): value is CategorizationRuleStatus {
+  return value === 'ACTIVE' || value === 'INACTIVE';
+}
+
+function parseCategorizationRule(
+  value: unknown,
+): CategorizationRule | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    // Exactly the nine documented fields: an extra key would be contract
+    // drift and could carry private evidence into the UI.
+    Object.keys(record).length !== 9 ||
+    typeof record.id !== 'string' ||
+    !UUID_PATTERN.test(record.id) ||
+    typeof record.sourceTransactionId !== 'string' ||
+    !UUID_PATTERN.test(record.sourceTransactionId) ||
+    (record.matchType !== 'PROVIDER_MERCHANT' &&
+      record.matchType !== 'NORMALIZED_TEXT') ||
+    typeof record.matchLabel !== 'string' ||
+    record.matchLabel.length === 0 ||
+    !isCategoryToken(record.category) ||
+    !isCategorizationRuleStatus(record.status) ||
+    typeof record.version !== 'number' ||
+    !Number.isInteger(record.version) ||
+    record.version < 0 ||
+    record.version > 2147483647 ||
+    typeof record.createdAt !== 'string' ||
+    !INSTANT_PATTERN.test(record.createdAt) ||
+    Number.isNaN(Date.parse(record.createdAt)) ||
+    typeof record.updatedAt !== 'string' ||
+    !INSTANT_PATTERN.test(record.updatedAt) ||
+    Number.isNaN(Date.parse(record.updatedAt))
+  ) {
+    return undefined;
+  }
+  return {
+    id: record.id,
+    sourceTransactionId: record.sourceTransactionId,
+    matchType: record.matchType,
+    matchLabel: record.matchLabel,
+    category: record.category,
+    status: record.status,
+    version: record.version,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function unexpectedRuleResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message: 'The server returned an unexpected categorization rule response.',
+  });
+}
+
+function rulePath(householdId: string, ruleId?: string): string {
+  const base = `/api/households/${encodeURIComponent(householdId)}/categorization-rules`;
+  return ruleId === undefined ? base : `${base}/${encodeURIComponent(ruleId)}`;
+}
+
+/**
+ * The current actor's own private rule page, ordered by the server
+ * (`updatedAt DESC, id DESC`). `status` is optional; omitting it lists every
+ * retained rule, including deactivated ones. No other owner's rule is ever
+ * reachable through this route.
+ */
+export async function fetchCategorizationRules(
+  householdId: string,
+  query: CategorizationRuleQuery,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<CategorizationRulePage> {
+  const parameters = new URLSearchParams();
+  parameters.set('limit', String(query.limit));
+  parameters.set('offset', String(query.offset));
+  if (query.status) parameters.set('status', query.status);
+  const response = await apiFetch(
+    `${rulePath(householdId)}?${parameters.toString()}`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load your categorization rules.',
+    );
+  }
+  const body = await readJson<unknown>(response);
+  if (
+    typeof body !== 'object' ||
+    body === null ||
+    Array.isArray(body) ||
+    Object.keys(body).length !== 4
+  ) {
+    throw unexpectedRuleResponse(response.status);
+  }
+  const page = body as Record<string, unknown>;
+  if (
+    // Exactly the four documented page fields: there is no total count, and
+    // an extra key would be contract drift rather than something to ignore.
+    !Array.isArray(page.items) ||
+    typeof page.limit !== 'number' ||
+    !Number.isInteger(page.limit) ||
+    typeof page.offset !== 'number' ||
+    !Number.isInteger(page.offset) ||
+    typeof page.hasMore !== 'boolean'
+  ) {
+    throw unexpectedRuleResponse(response.status);
+  }
+  const items: CategorizationRule[] = [];
+  for (const value of page.items) {
+    const rule = parseCategorizationRule(value);
+    if (!rule) throw unexpectedRuleResponse(response.status);
+    items.push(rule);
+  }
+  return {
+    items,
+    limit: page.limit,
+    offset: page.offset,
+    hasMore: page.hasMore,
+  };
+}
+
+/**
+ * Explicitly turns one of the owner's own category decisions into a private
+ * future-match rule. The body carries only the transaction's current version:
+ * household, owner, match type, and match key are all server-derived. The
+ * durable `Idempotency-Key` makes an unknown outcome recoverable — the same
+ * key with the same body is replayed as 200 with the already-created rule
+ * instead of creating a second one.
+ */
+export async function postTransactionCategorizationRule(
+  householdId: string,
+  transactionId: string,
+  input: CreateCategorizationRuleInput,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<CategorizationRule> {
+  const response = await apiFetch(
+    `${transactionPath(householdId, transactionId)}/categorization-rule`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        ...unsafeHeaders(csrf),
+        'Idempotency-Key': idempotencyKey,
+      },
+      cache: 'no-store',
+      body: JSON.stringify(input),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200 || response.status === 201) {
+    const rule = parseCategorizationRule(await readJson<unknown>(response));
+    if (!rule) throw unexpectedRuleResponse(response.status);
+    return rule;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'The future-match rule could not be created.',
+  );
+}
+
+/**
+ * Updates one of the owner's own rules: either its category (active rules
+ * only) or the one-way deactivation. Deactivation is retained, never a
+ * deletion, so an `INACTIVE` rule stays listed and keeps explaining any
+ * assignment it already made.
+ */
+export async function patchCategorizationRule(
+  householdId: string,
+  ruleId: string,
+  patch: CategorizationRulePatch,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<CategorizationRule> {
+  const response = await apiFetch(
+    rulePath(householdId, ruleId),
+    {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify(patch),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const rule = parseCategorizationRule(await readJson<unknown>(response));
+    if (!rule) throw unexpectedRuleResponse(response.status);
+    return rule;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'The rule could not be updated.',
+  );
 }
 
 export async function postTransaction(

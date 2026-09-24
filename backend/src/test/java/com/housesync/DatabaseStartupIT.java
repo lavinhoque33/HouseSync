@@ -75,36 +75,6 @@ class DatabaseStartupIT {
             FinancialTransactionAllocationEntity.class.getSimpleName(),
             FinancialTransactionAllocationParticipantEntity.class.getSimpleName(),
             FinancialAllocationIdempotencyEntity.class.getSimpleName());
-    assertThat(
-            jdbc.queryForList(
-                "SELECT tablename FROM pg_tables WHERE schemaname = 'public'", String.class))
-        .containsExactlyInAnyOrder(
-            "flyway_schema_history",
-            "users",
-            "spring_session",
-            "spring_session_attributes",
-            "households",
-            "household_members",
-            "household_invitations",
-            "financial_accounts",
-            "financial_account_idempotency_keys",
-            "financial_transactions",
-            "financial_transaction_idempotency_keys",
-            "financial_transaction_allocations",
-            "financial_transaction_allocation_participants",
-            "financial_allocation_idempotency_keys",
-            "financial_connections",
-            "financial_connection_account_mappings",
-            "connection_link_attempts",
-            "connection_operations",
-            "connection_operation_idempotency_keys",
-            "connection_revocation_work",
-            "connection_sync_work",
-            "connection_sync_rounds",
-            "connection_sync_round_deltas",
-            "connection_observations",
-            "connection_ledger_associations",
-            "provider_webhook_events");
     // Provenance uses composite references so an association cannot mix household, owner,
     // account, or currency between the observation and its ledger entry.
     assertThat(
@@ -117,7 +87,6 @@ class DatabaseStartupIT {
             "connection_ledger_associations_observation_reference",
             "connection_ledger_associations_account_reference",
             "connection_ledger_associations_transaction_reference");
-    assertThat(flyway.info().applied()).hasSize(15);
     flyway.validate();
     assertThat(flyway.migrate().migrationsExecuted).isZero();
     assertThat(

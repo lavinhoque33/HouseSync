@@ -38,6 +38,8 @@ public final class ErrorCodes {
   public static final String OBSERVATION_ADMITTED = "OBSERVATION_ADMITTED";
   public static final String RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED";
   public static final String MANUAL_SYNC_RATE_LIMITED = "MANUAL_SYNC_RATE_LIMITED";
+  public static final String CATEGORY_RULE_NOT_FOUND = "CATEGORY_RULE_NOT_FOUND";
+  public static final String CATEGORY_RULE_CONFLICT = "CATEGORY_RULE_CONFLICT";
   public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 
   private ErrorCodes() {}

@@ -32,8 +32,13 @@ import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler
  * /api/households/{householdId}/transactions/{transactionId}} for authenticated users. Categories add
  * the fixed {@code GET /api/households/{householdId}/transaction-categories} list. Categorization provenance adds
  * exactly {@code GET /api/households/{householdId}/transactions/{transactionId}/categorization},
- * the financial-owner-only provenance detail behind service-level owner scoping. Settlement adds the
- * singular allocation routes {@code POST}/{@code GET}/{@code PATCH
+ * the financial-owner-only provenance detail behind service-level owner scoping. Owner rules add
+ * exactly {@code POST
+ * /api/households/{householdId}/transactions/{transactionId}/categorization-rule}, {@code GET
+ * /api/households/{householdId}/categorization-rules}, and {@code PATCH
+ * /api/households/{householdId}/categorization-rules/{ruleId}} — the owner-private exact-rule
+ * surface behind household + financial-owner service scoping. Allocations add singular allocation
+ * routes {@code POST}/{@code GET}/{@code PATCH
  * /api/households/{householdId}/transactions/{transactionId}/allocation} and the bounded {@code GET
  * /api/households/{householdId}/member-balances}. Reporting adds {@code GET} and {@code PATCH
  * /api/households/{householdId}/finance-settings} and the bounded {@code GET
@@ -124,6 +129,16 @@ public class SecurityConfiguration {
                         HttpMethod.PATCH,
                         "/api/households/*/transactions/*",
                         "/api/households/*/finance-settings")
+                    .authenticated()
+                    // Owner-private exact rules — the learn action on one owned
+                    // transaction, the private management list, and the category/deactivation
+                    // patch. Service authorization is household + financial-owner scoped.
+                    .requestMatchers(
+                        HttpMethod.POST, "/api/households/*/transactions/*/categorization-rule")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.GET, "/api/households/*/categorization-rules")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.PATCH, "/api/households/*/categorization-rules/*")
                     .authenticated()
                     .requestMatchers(HttpMethod.POST, "/api/households/*/transactions/*/allocation")
                     .authenticated()

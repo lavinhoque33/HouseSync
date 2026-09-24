@@ -5,22 +5,20 @@ import com.housesync.finance.transaction.domain.TransactionKind;
 import java.util.Optional;
 
 /**
- * Deterministic classifier (ADR 0009 §3; categorization contract §3). A pure domain
- * service: no controller, JPA callback, provider SDK hook, or I/O. It receives already-authorized
- * normalized evidence and returns at most one auto-applicable assignment under the strict
- * precedence order:
+ * Deterministic provider-mapping classifier (ADR 0009 §3; categorization contract §3). A pure
+ * domain service: no controller, JPA callback, provider SDK hook, or I/O. It receives
+ * already-authorized normalized evidence and returns at most one auto-applicable assignment:
  *
  * <ol>
- *   <li>explicit user category instruction — short-circuits everything (recorded {@code USER} by
- *       the caller before classification ever runs);
  *   <li>versioned provider mapping — exact reviewed code mapping only;
  *   <li>{@code NONE} — no match, and never a default token.
  * </ol>
  *
- * <p>The {@code OWNER_RULE} precedence slot between user decisions and provider mapping is a
- * deliberate seam: exact household/owner rule lookup fits here without changing this
- * contract. Unknown, malformed, or unsafe evidence yields no assignment; classification never
- * defaults to {@code MISCELLANEOUS}, never changes kind, and never matches on text similarity.
+ * <p>The {@code OWNER_RULE} precedence slot sits ahead of this classifier: the application service
+ * applies an exact active owner rule first (categorization contract §3), and only a rule miss
+ * reaches this mapping. Unknown, malformed, or unsafe evidence yields no assignment; classification
+ * never defaults to {@code MISCELLANEOUS}, never changes kind, and never matches on text
+ * similarity.
  */
 public final class CategorizationClassifier {
 

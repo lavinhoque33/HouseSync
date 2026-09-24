@@ -10,6 +10,7 @@ import { StrictMode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   CategorizationOrigin,
+  CategorizationRule,
   CategorizationState,
   FinancialAccount,
   Household,
@@ -96,6 +97,12 @@ interface RouteHandlers {
   allocationsGet?: (transactionId: string) => Response | Promise<Response>;
   allocationsPost?: (init?: RequestInit) => Response | Promise<Response>;
   allocationsPatch?: (transactionId: string) => Response | Promise<Response>;
+  rulesGet?: (
+    status: string | null,
+    offset: string,
+  ) => Response | Promise<Response>;
+  rulePost?: (transactionId: string) => Response | Promise<Response>;
+  rulePatch?: (ruleId: string) => Response | Promise<Response>;
   balancesGet?: () => Response | Promise<Response>;
   membersGet?: () => Response | Promise<Response>;
   settingsGet?: () => Response | Promise<Response>;
@@ -111,9 +118,9 @@ const categorizationCalls = (calls: Call[]) =>
   calls.filter(({ url }) => url.endsWith(CATEGORIZATION_SUFFIX));
 
 /**
- * Owner-only provenance state. The default is the neutral NONE state
- * so a detail test that does not care about classification still sees a
- * complete, honest panel.
+ * Owner-only provenance state. The default is the neutral NONE
+ * state with no learn offer, so a detail test that does not care about
+ * classification still sees a complete, honest panel.
  */
 function categorizationState(
   overrides: Partial<CategorizationState> = {},
@@ -125,9 +132,31 @@ function categorizationState(
     origin: 'NONE',
     assignedAt: '2026-09-16T12:00:00Z',
     reviewState: 'NONE',
+    ruleEligible: false,
     ...overrides,
   };
 }
+
+const RULE_ID = '70000000-0000-4000-8000-000000000001';
+
+/** Exactly the nine documented private rule fields; never a match key. */
+function rule(overrides: Partial<CategorizationRule> = {}): CategorizationRule {
+  return {
+    id: RULE_ID,
+    sourceTransactionId: EXPENSE_ID,
+    matchType: 'NORMALIZED_TEXT',
+    matchLabel: 'Groceries',
+    category: 'GROCERIES',
+    status: 'ACTIVE',
+    version: 0,
+    createdAt: '2026-09-22T12:00:00Z',
+    updatedAt: '2026-09-22T12:00:00Z',
+    ...overrides,
+  };
+}
+
+const emptyRulePage = () =>
+  jsonResponse({ items: [], limit: 50, offset: 0, hasMore: false });
 
 const ALLOCATION_NOT_FOUND = () =>
   jsonResponse(
@@ -267,6 +296,36 @@ function stubFetch(routes: RouteHandlers) {
           routes.categorizationGet?.(transactionId) ??
           jsonResponse(categorizationState({ transactionId }))
         );
+      }
+      if (
+        url.startsWith(`${transactionBase}/`) &&
+        url.endsWith('/categorization-rule')
+      ) {
+        const transactionId = decodeURIComponent(
+          url.slice(
+            transactionBase.length + 1,
+            url.length - '/categorization-rule'.length,
+          ),
+        );
+        if (!routes.rulePost) {
+          throw new Error('unexpected POST categorization-rule');
+        }
+        return routes.rulePost(transactionId);
+      }
+      const rulesBase = `/api/households/${HOUSEHOLD.id}/categorization-rules`;
+      if (url.startsWith(`${rulesBase}?`)) {
+        const query = new URLSearchParams(url.slice(rulesBase.length + 1));
+        return (
+          routes.rulesGet?.(query.get('status'), query.get('offset') ?? '0') ??
+          emptyRulePage()
+        );
+      }
+      if (url.startsWith(`${rulesBase}/`) && init?.method === 'PATCH') {
+        const ruleId = decodeURIComponent(url.slice(rulesBase.length + 1));
+        if (!routes.rulePatch) {
+          throw new Error('unexpected PATCH categorization-rule');
+        }
+        return routes.rulePatch(ruleId);
       }
       if (url === transactionBase && init?.method === 'POST') {
         if (!routes.transactionsPost) {
@@ -5121,5 +5180,388 @@ describe('categorization provenance', () => {
     );
     expect(await within(row).findByText('Food shopping')).toBeInTheDocument();
     expect(within(row).queryByText('Category unavailable')).toBeNull();
+  });
+});
+describe('explicit future-match learning', () => {
+  const RULE_POST_SUFFIX = '/categorization-rule';
+  const rulePostCalls = (calls: Call[]) =>
+    calls.filter(({ url }) => url.endsWith(RULE_POST_SUFFIX));
+  const rulesGetCalls = (calls: Call[]) =>
+    calls.filter(({ url }) => url.includes('/categorization-rules?'));
+
+  const idempotencyKeyOf = (call: Call | undefined): string | undefined =>
+    (call?.init?.headers as Record<string, string> | undefined)?.[
+      'Idempotency-Key'
+    ];
+
+  /** The owner's own decision with the server's learn capability. */
+  function eligibleProvenance(transactionId: string) {
+    return jsonResponse(
+      categorizationState({
+        transactionId,
+        transactionVersion: 0,
+        category: 'GROCERIES',
+        origin: 'USER',
+        ruleEligible: true,
+      }),
+    );
+  }
+
+  async function openEligibleDetail() {
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    const offer = await within(panel).findByRole('button', {
+      name: 'Use for future matches',
+    });
+    return { panel, offer };
+  }
+
+  it('offers the learn action only when the server reports the capability', async () => {
+    const { unmount } = renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: (transactionId) =>
+        jsonResponse(
+          categorizationState({
+            transactionId,
+            category: 'GROCERIES',
+            origin: 'USER',
+            ruleEligible: false,
+          }),
+        ),
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    expect(await within(panel).findByText(/Chosen by you/)).toBeInTheDocument();
+    // An owner decision alone is not enough: the browser never derives a key
+    // or decides eligibility for itself.
+    expect(
+      within(panel).queryByRole('button', { name: 'Use for future matches' }),
+    ).toBeNull();
+    unmount();
+
+    const second = renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: eligibleProvenance,
+    });
+    await screen.findByText('Groceries');
+    const { offer } = await openEligibleDetail();
+    expect(offer).toBeEnabled();
+    // The private match key is never received, so it can never be submitted.
+    expect(rulePostCalls(second.calls)).toHaveLength(0);
+  });
+
+  it('creates the rule from the current version under a durable key', async () => {
+    let eligible = true;
+    const { calls } = renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: (transactionId) =>
+        jsonResponse(
+          categorizationState({
+            transactionId,
+            category: 'GROCERIES',
+            origin: 'USER',
+            ruleEligible: eligible,
+          }),
+        ),
+      rulePost: () => {
+        eligible = false;
+        return jsonResponse(rule(), 201);
+      },
+    });
+    await screen.findByText('Groceries');
+    const { panel, offer } = await openEligibleDetail();
+    fireEvent.click(offer);
+
+    expect(
+      await screen.findByText(
+        /Future matches for “Groceries” now use Food shopping\./,
+      ),
+    ).toBeInTheDocument();
+    const posts = rulePostCalls(calls);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]?.url).toBe(
+      `/api/households/${HOUSEHOLD.id}/transactions/${EXPENSE_ID}/categorization-rule`,
+    );
+    expect(posts[0]?.init?.method).toBe('POST');
+    expect(posts[0]?.init?.cache).toBe('no-store');
+    // Exactly the transaction version travels: household, owner, match type,
+    // and match key all stay server-derived.
+    expect(JSON.parse(String(posts[0]?.init?.body))).toEqual({
+      expectedTransactionVersion: 0,
+    });
+    expect(idempotencyKeyOf(posts[0])).toMatch(/^[0-9a-f-]{36}$/);
+    // The committed rule converges the private list, and the spent capability
+    // removes the offer instead of inviting a duplicate.
+    await waitFor(() =>
+      expect(rulesGetCalls(calls).length).toBeGreaterThanOrEqual(2),
+    );
+    await waitFor(() =>
+      expect(
+        within(panel).queryByRole('button', { name: 'Use for future matches' }),
+      ).toBeNull(),
+    );
+    expect(screen.queryByText(/Retry same request/)).toBeNull();
+  });
+
+  it('keeps the committed category and the same key when the outcome is unknown', async () => {
+    let outcome: 'busy' | 'created' = 'busy';
+    const { calls } = renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'DINING', version: 7 })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'DINING', version: 7 })),
+      categorizationGet: (transactionId) =>
+        jsonResponse(
+          categorizationState({
+            transactionId,
+            transactionVersion: 7,
+            category: 'DINING',
+            origin: 'USER',
+            ruleEligible: true,
+          }),
+        ),
+      rulePost: () =>
+        outcome === 'busy'
+          ? jsonResponse({ code: 'FINANCE_BUSY', message: 'Busy.' }, 503)
+          : jsonResponse(
+              rule({ category: 'DINING', matchLabel: 'Groceries' }),
+              200,
+            ),
+    });
+    await screen.findByText('Groceries');
+    const { offer } = await openEligibleDetail();
+    fireEvent.click(offer);
+
+    expect(
+      await screen.findByText(/has an unknown outcome/),
+    ).toBeInTheDocument();
+    // The already-saved category is untouched by the additive failure.
+    const row = screen
+      .getByRole('button', { name: 'Edit Groceries' })
+      .closest('li') as HTMLLIElement;
+    expect(within(row).getByText('Dining')).toBeInTheDocument();
+    // The exact request stays retained: the same key is offered for retry.
+    expect(screen.queryByText(/Retry same request/)).not.toBeNull();
+    expect(rulePostCalls(calls)).toHaveLength(1);
+    const firstKey = idempotencyKeyOf(rulePostCalls(calls)[0]);
+
+    outcome = 'created';
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same request' }));
+    expect(
+      await screen.findByText(
+        /Future matches for “Groceries” now use Dining\./,
+      ),
+    ).toBeInTheDocument();
+    const posts = rulePostCalls(calls);
+    expect(posts).toHaveLength(2);
+    expect(idempotencyKeyOf(posts[1])).toBe(firstKey);
+    expect(JSON.parse(String(posts[1]?.init?.body))).toEqual({
+      expectedTransactionVersion: 7,
+    });
+    expect(screen.queryByText(/Retry same request/)).toBeNull();
+  });
+
+  it('explains an existing active rule for the merchant and clears the offer', async () => {
+    let eligible = true;
+    const { calls } = renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: (transactionId) =>
+        jsonResponse(
+          categorizationState({
+            transactionId,
+            category: 'GROCERIES',
+            origin: 'USER',
+            ruleEligible: eligible,
+          }),
+        ),
+      rulesGet: () =>
+        jsonResponse({
+          items: [rule({ matchLabel: 'Corner Market' })],
+          limit: 50,
+          offset: 0,
+          hasMore: false,
+        }),
+      rulePost: () => {
+        eligible = false;
+        return jsonResponse(
+          {
+            code: 'CATEGORY_RULE_CONFLICT',
+            message: 'An active rule already covers this merchant.',
+          },
+          409,
+        );
+      },
+    });
+    await screen.findByText('Groceries');
+    const { panel, offer } = await openEligibleDetail();
+    fireEvent.click(offer);
+
+    expect(
+      await screen.findByText(
+        /You already have an active rule for this merchant/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Retry same request/)).toBeNull();
+    expect(rulePostCalls(calls)).toHaveLength(1);
+    await waitFor(() =>
+      expect(
+        within(panel).queryByRole('button', { name: 'Use for future matches' }),
+      ).toBeNull(),
+    );
+    // The owner's own existing rule is where it is managed.
+    expect(screen.getByText('Corner Market')).toBeInTheDocument();
+  });
+
+  it('refuses a stale learn attempt, closes the panel, and refreshes', async () => {
+    const { calls } = renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: eligibleProvenance,
+      rulePost: () =>
+        jsonResponse(
+          { code: 'RESOURCE_VERSION_CONFLICT', message: 'Stale.' },
+          409,
+        ),
+    });
+    await screen.findByText('Groceries');
+    const { offer } = await openEligibleDetail();
+    fireEvent.click(offer);
+
+    expect(
+      await screen.findByText(/This entry changed on the server/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Retry same request/)).toBeNull();
+    expect(
+      screen.queryByRole('group', { name: 'Details for Groceries' }),
+    ).toBeNull();
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.includes('view=OWN&status=ALL')).length,
+      ).toBeGreaterThanOrEqual(2),
+    );
+  });
+
+  it('reports a decision that cannot become a rule without losing the category', async () => {
+    renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: eligibleProvenance,
+      rulePost: () =>
+        jsonResponse(
+          {
+            code: 'VALIDATION_FAILED',
+            message: 'Check the highlighted fields.',
+          },
+          400,
+        ),
+    });
+    await screen.findByText('Groceries');
+    const { offer } = await openEligibleDetail();
+    fireEvent.click(offer);
+    expect(
+      await screen.findByText(/This decision cannot become a rule right now/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Retry same request/)).toBeNull();
+    // The category the owner already saved is still shown on the entry.
+    const row = screen
+      .getByRole('button', { name: 'Edit Groceries' })
+      .closest('li') as HTMLLIElement;
+    expect(within(row).getByText('Food shopping')).toBeInTheDocument();
+  });
+
+  it('drops the retained learn request when the session is lost', async () => {
+    const { calls, onSessionExpired } = renderSection({
+      transactionsGet: () =>
+        transactionPage([transaction({ category: 'GROCERIES' })]),
+      transactionGet: () =>
+        jsonResponse(transaction({ category: 'GROCERIES' })),
+      categorizationGet: eligibleProvenance,
+      rulesGet: () =>
+        jsonResponse({
+          items: [rule({ matchLabel: 'Corner Market' })],
+          limit: 50,
+          offset: 0,
+          hasMore: false,
+        }),
+      rulePost: () =>
+        jsonResponse(
+          { code: 'UNAUTHENTICATED', message: 'You are not signed in.' },
+          401,
+        ),
+    });
+    await screen.findByText('Groceries');
+    // The private rule list is loaded before the loss.
+    expect(await screen.findByText('Corner Market')).toBeInTheDocument();
+    const { offer } = await openEligibleDetail();
+    fireEvent.click(offer);
+
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    expect(rulePostCalls(calls)).toHaveLength(1);
+    // Private rule state, the retained intent, and the open panel are gone.
+    expect(screen.queryByText(/Retry same request/)).toBeNull();
+    expect(
+      screen.queryByRole('group', { name: 'Details for Groceries' }),
+    ).toBeNull();
+    await waitFor(() => expect(screen.queryByText('Corner Market')).toBeNull());
+    expect(
+      await screen.findByText(
+        'Your rules are not loaded. Refresh the household to load them again.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('never offers the action for another member’s shared entry', async () => {
+    const { calls } = renderSection({
+      transactionsGet: (view: 'OWN' | 'HOUSEHOLD') =>
+        view === 'HOUSEHOLD'
+          ? transactionPage([sharedByOther()])
+          : transactionPage([]),
+      transactionGet: () => jsonResponse(sharedByOther()),
+      categorizationGet: () => {
+        throw new Error('a shared entry must never be probed for provenance');
+      },
+    });
+    await screen.findByText('No transactions yet.');
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    const row = (await screen.findByText('Shared internet bill')).closest(
+      'li',
+    ) as HTMLLIElement;
+    fireEvent.click(
+      within(row).getByRole('button', {
+        name: 'Details for Shared internet bill',
+      }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Shared internet bill',
+    });
+    expect(
+      within(panel).queryByRole('button', { name: 'Use for future matches' }),
+    ).toBeNull();
+    expect(rulePostCalls(calls)).toHaveLength(0);
   });
 });

@@ -1299,6 +1299,73 @@ code {
   gap: var(--space-2);
 }
 
+.finance-rules {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 30%, white);
+  border-radius: 1rem;
+  background: #f7f8f3;
+}
+
+.finance-rules > * {
+  min-width: 0;
+}
+
+.finance-rules h5 {
+  margin: 0;
+  color: var(--color-ink);
+  overflow-wrap: anywhere;
+}
+
+.finance-rule-list {
+  list-style: none;
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+}
+
+.finance-rule-card {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2);
+  border-left: 4px solid var(--color-accent);
+  border-radius: 0.85rem;
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(35 63 42 / 7%);
+}
+
+.finance-rule-card > * {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.finance-rule-editor {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.finance-rule-editor > * {
+  min-width: 0;
+}
+
+.finance-rule-offer {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  margin-top: var(--space-1);
+}
+
+.finance-rule-offer .household-hint {
+  margin: 0;
+}
+
 .finance-allocation-form {
   display: grid;
   gap: var(--space-2);
@@ -1548,7 +1615,8 @@ code {
 
 @media (max-width: 420px) {
   .finance-accounts,
-  .finance-transactions {
+  .finance-transactions,
+  .finance-rules {
     display: flex;
     flex-direction: column;
   }
@@ -1567,6 +1635,8 @@ code {
   .finance-status-confirm,
   .finance-pending-request,
   .finance-transactions,
+  .finance-rules,
+  .finance-rule-card,
   .finance-transaction-card,
   .finance-detail-panel,
   .finance-refund-context,

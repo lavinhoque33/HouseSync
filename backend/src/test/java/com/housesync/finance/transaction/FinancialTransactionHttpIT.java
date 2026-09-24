@@ -438,13 +438,19 @@ class FinancialTransactionHttpIT {
             "category",
             "origin",
             "assignedAt",
-            "reviewState");
+            "reviewState",
+            "ruleEligible");
     assertThat(provenance.json().path("transactionId").asText()).isEqualTo(explicitId);
     assertThat(provenance.json().path("transactionVersion").asInt()).isZero();
     assertThat(provenance.json().path("category").asText()).isEqualTo("GROCERIES");
     assertThat(provenance.json().path("origin").asText()).isEqualTo("USER");
     assertThat(provenance.json().path("assignedAt").asText()).isNotBlank();
     assertThat(provenance.json().path("reviewState").asText()).isEqualTo("NONE");
+    // A USER entry with a safe key and no active rule may be learned, and the capability never
+    // leaks the derived match key.
+    assertThat(provenance.json().path("ruleEligible").isBoolean()).isTrue();
+    assertThat(provenance.json().path("ruleEligible").asBoolean()).isTrue();
+    assertThat(provenance.body).doesNotContain("shared groceries", "matchKey");
 
     Resp memberProvenance = member.get(categorizationPath);
     assertThat(memberProvenance.status).isEqualTo(404);
@@ -465,6 +471,8 @@ class FinancialTransactionHttpIT {
         owner.get(transactionPath(householdId) + "/" + uncategorizedId + "/categorization");
     assertThat(initialNone.json().path("origin").asText()).isEqualTo("NONE");
     assertThat(initialNone.json().path("category").isNull()).isTrue();
+    // An uncategorized NONE entry has no category to learn.
+    assertThat(initialNone.json().path("ruleEligible").asBoolean()).isFalse();
 
     Resp explicitNull =
         owner.patchTransaction(
@@ -475,6 +483,8 @@ class FinancialTransactionHttpIT {
         owner.get(transactionPath(householdId) + "/" + uncategorizedId + "/categorization");
     assertThat(userNull.json().path("origin").asText()).isEqualTo("USER");
     assertThat(userNull.json().path("category").isNull()).isTrue();
+    // An explicitly uncategorized USER entry has no category to learn either.
+    assertThat(userNull.json().path("ruleEligible").asBoolean()).isFalse();
 
     String refundId =
         created(
@@ -485,6 +495,8 @@ class FinancialTransactionHttpIT {
     Resp inherited = owner.get(transactionPath(householdId) + "/" + refundId + "/categorization");
     assertThat(inherited.json().path("origin").asText()).isEqualTo("INHERITED");
     assertThat(inherited.json().path("category").asText()).isEqualTo("GROCERIES");
+    // Refunds classify by inheritance and never learn rules.
+    assertThat(inherited.json().path("ruleEligible").asBoolean()).isFalse();
 
     String voidedId =
         created(
@@ -508,6 +520,14 @@ class FinancialTransactionHttpIT {
                 .path("origin")
                 .asText())
         .isEqualTo("USER");
+    // A voided entry is no longer posted and cannot learn a rule.
+    assertThat(
+            owner
+                .get(transactionPath(householdId) + "/" + voidedId + "/categorization")
+                .json()
+                .path("ruleEligible")
+                .asBoolean())
+        .isFalse();
   }
 
   @Test
