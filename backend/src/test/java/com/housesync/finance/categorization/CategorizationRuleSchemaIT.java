@@ -461,6 +461,79 @@ class CategorizationRuleSchemaIT {
     }
   }
 
+  @Test
+  void aiWorkIsOwnerBoundCoalescedAndLeaseConstrained() throws Exception {
+    runMigrations(null);
+    try (Connection connection = openConnection()) {
+      UUID owner = insertUser(connection);
+      UUID household = insertHousehold(connection, owner);
+      UUID entry =
+          insertTransaction(
+              connection, household, owner, insertAccount(connection, household, owner));
+      UUID other = insertUser(connection);
+      jdbcUpdate(
+          connection,
+          "INSERT INTO household_members (household_id,user_id,role) VALUES (?,?,'MEMBER')",
+          household,
+          other);
+      UUID otherEntry =
+          insertTransaction(
+              connection, household, other, insertAccount(connection, household, other));
+      UUID work = UUID.randomUUID();
+      jdbcExecute(connection, workInsert(work, household, owner, entry, "a".repeat(64)));
+      assertThatThrownBy(
+              () ->
+                  jdbcExecute(
+                      openConnection(),
+                      workInsert(UUID.randomUUID(), household, owner, entry, "a".repeat(64))))
+          .isInstanceOf(Exception.class);
+      assertThatThrownBy(
+              () ->
+                  jdbcExecute(
+                      openConnection(),
+                      workInsert(UUID.randomUUID(), household, owner, otherEntry, "b".repeat(64))))
+          .isInstanceOf(Exception.class);
+      jdbcExecute(
+          connection, workInsert(UUID.randomUUID(), household, owner, entry, "b".repeat(64)));
+      assertThatThrownBy(
+              () ->
+                  jdbcUpdate(
+                      openConnection(),
+                      "UPDATE categorization_ai_work SET attempts=4 WHERE id=?",
+                      work))
+          .isInstanceOf(Exception.class);
+      assertThatThrownBy(
+              () ->
+                  jdbcUpdate(
+                      openConnection(),
+                      "UPDATE categorization_ai_work SET state='RUNNING' WHERE id=?",
+                      work))
+          .isInstanceOf(Exception.class);
+      assertThat(
+              queryString(
+                  connection,
+                  "SELECT category_origin FROM financial_transactions WHERE id='" + entry + "'"))
+          .isEqualTo("NONE");
+    }
+  }
+
+  private static String workInsert(
+      UUID id, UUID household, UUID owner, UUID entry, String fingerprint) {
+    return "INSERT INTO categorization_ai_work (id,household_id,owner_user_id,transaction_id,"
+        + "transaction_version,evidence_fingerprint,policy_version,state,due_at,created_at,updated_at)"
+        + " VALUES ('"
+        + id
+        + "','"
+        + household
+        + "','"
+        + owner
+        + "','"
+        + entry
+        + "',0,'"
+        + fingerprint
+        + "','AI_POLICY_V1','QUEUED',now(),now(),now())";
+  }
+
   private static String reviewInsert(
       UUID id, UUID household, UUID owner, UUID entry, String status, String fingerprint) {
     return "INSERT INTO categorization_reviews (id, household_id, owner_user_id, transaction_id,"

@@ -107,6 +107,7 @@ interface RouteHandlers {
   reviewsGet?: (view: string | null) => Response | Promise<Response>;
   reviewGet?: (reviewId: string) => Response | Promise<Response>;
   reviewResolve?: (reviewId: string) => Response | Promise<Response>;
+  aiStatusGet?: () => Response | Promise<Response>;
   balancesGet?: () => Response | Promise<Response>;
   membersGet?: () => Response | Promise<Response>;
   settingsGet?: () => Response | Promise<Response>;
@@ -382,6 +383,13 @@ function stubFetch(routes: RouteHandlers) {
       if (url.startsWith(`${REVIEWS_BASE}?`)) {
         const query = new URLSearchParams(url.slice(REVIEWS_BASE.length + 1));
         return routes.reviewsGet?.(query.get('view')) ?? reviewPage([]);
+      }
+      if (url.endsWith('/categorization-ai-work/status')) {
+        // The default deployment runs no AI, so nothing is pending.
+        return (
+          routes.aiStatusGet?.() ??
+          jsonResponse({ enabled: false, pendingCount: 0, failedCount: 0 })
+        );
       }
       if (url === transactionBase && init?.method === 'POST') {
         if (!routes.transactionsPost) {

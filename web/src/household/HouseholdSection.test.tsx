@@ -289,6 +289,14 @@ function stubFetch(routes: RouteHandlers) {
       if (/\/transaction-categories$/.test(url)) {
         return routes.categoriesGet?.() ?? jsonResponse({ items: [] });
       }
+      if (/\/categorization-ai-work\/status$/.test(url)) {
+        // The default deployment runs no AI, so nothing is pending.
+        return jsonResponse({
+          enabled: false,
+          pendingCount: 0,
+          failedCount: 0,
+        });
+      }
       const settingsMatch =
         /^\/api\/households\/([^/]+)\/finance-settings$/.exec(url);
       if (settingsMatch) {

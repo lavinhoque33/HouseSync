@@ -146,6 +146,9 @@ public class SecurityConfiguration {
                         "/api/households/*/categorization-reviews/*")
                     .authenticated()
                     .requestMatchers(
+                        HttpMethod.GET, "/api/households/*/categorization-ai-work/status")
+                    .authenticated()
+                    .requestMatchers(
                         HttpMethod.POST, "/api/households/*/categorization-reviews/*/resolve")
                     .authenticated()
                     .requestMatchers(HttpMethod.POST, "/api/households/*/transactions/*/allocation")

@@ -81,6 +81,10 @@ class SecurityConfigurationTest {
   @MockitoBean private FinancialAccountService financialAccounts;
   @MockitoBean private CategorizationQueryService categorization;
   @MockitoBean private CategorizationReviewService categorizationReviews;
+
+  @MockitoBean
+  private com.housesync.finance.categorization.application.CategorizationAiWorkService aiWork;
+
   @MockitoBean private CategorizationRuleLookup categorizationRuleLookup;
   @MockitoBean private CategorizationRuleService categorizationRules;
   @MockitoBean private FinancialTransactionService financialTransactions;
@@ -148,6 +152,7 @@ class SecurityConfigurationTest {
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
     "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/categorization-ai-work/status",
     "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts",
     "POST,"
         + " /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts/123e4567-e89b-12d3-a456-426614174001/complete",
@@ -319,6 +324,24 @@ class SecurityConfigurationTest {
   @Test
   void anonymousLogoutWithValidCsrfIsSafe() throws Exception {
     mvc.perform(post("/api/auth/logout").with(csrf())).andExpect(status().isNoContent());
+  }
+
+  @Test
+  void aiWorkStatusRequiresAuthenticationAndPreventsCaching() throws Exception {
+    UUID owner = UUID.randomUUID();
+    UUID householdId = UUID.randomUUID();
+    String path = "/api/households/" + householdId + "/categorization-ai-work/status";
+    when(aiWork.status(eq(householdId), eq(owner)))
+        .thenReturn(
+            new com.housesync.finance.categorization.application.CategorizationAiWorkService.Status(
+                true, 2, 1));
+    mvc.perform(get(path))
+        .andExpect(status().isUnauthorized())
+        .andExpect(jsonPath("$.code").value("UNAUTHENTICATED"));
+    mvc.perform(get(path).with(signedInAs(owner)))
+        .andExpect(status().isOk())
+        .andExpect(
+            header().string("Cache-Control", org.hamcrest.Matchers.containsString("no-store")));
   }
 
   @Test

@@ -54,6 +54,7 @@ public class CategorizationReviewService {
   private final CategorizationRuleLookup rules;
   private final EntityManager entityManager;
   private final Clock clock;
+  private final CategorizationAiWorkService aiWork;
 
   public CategorizationReviewService(
       CategorizationReviewRepository reviews,
@@ -63,7 +64,8 @@ public class CategorizationReviewService {
       HouseholdService households,
       EntityManager entityManager,
       Clock clock,
-      CategorizationRuleLookup rules) {
+      CategorizationRuleLookup rules,
+      CategorizationAiWorkService aiWork) {
     this.reviews = reviews;
     this.idempotency = idempotency;
     this.transactions = transactions;
@@ -72,6 +74,7 @@ public class CategorizationReviewService {
     this.entityManager = entityManager;
     this.clock = clock;
     this.rules = rules;
+    this.aiWork = aiWork;
   }
 
   /** Called after the new transaction is inserted, inside the create/confirm transaction. */
@@ -163,7 +166,7 @@ public class CategorizationReviewService {
   @Transactional(propagation = Propagation.MANDATORY)
   public void ledgerChanged(FinancialTransactionEntity entry, boolean descriptionChanged) {
     var open = reviews.findOwnedOpen(entry.getHouseholdId(), entry.getOwnerUserId(), entry.getId());
-    if (open.isEmpty() && !descriptionChanged) return;
+    if (open.isEmpty() && !descriptionChanged && !aiWork.enabled()) return;
     if (entry.getStatus() != TransactionStatus.POSTED
         || entry.getKind() == TransactionKind.REFUND
         || entry.getCategoryOrigin() == CategorizationOrigin.USER
@@ -270,6 +273,7 @@ public class CategorizationReviewService {
                 evidence)
             .isPresent();
     if (open.isPresent()) open.get().close("SUPERSEDED", now());
+    if (candidate.isEmpty() && !autoApplicable) aiWork.enqueue(entry, providerEvidence);
     if (candidate.isEmpty() || seen) return;
     reviews.flush(); // release the partial OPEN index before the successor insert
     reviews.save(
@@ -489,9 +493,13 @@ public class CategorizationReviewService {
         item.getSuggestedCategory(),
         item.getSource(),
         item.getConfidence(),
-        "EXACT_MERCHANT".equals(item.getReasonCode())
-            ? "Merchant pattern matched"
-            : "Category suggestion",
+        switch (item.getReasonCode()) {
+          case "EXACT_MERCHANT" -> "Merchant pattern matched";
+          case "MERCHANT_CONTEXT" -> "Merchant context suggests this category";
+          case "PROVIDER_CONTEXT" -> "Bank category suggests this category";
+          case "TRANSACTION_CONTEXT" -> "Transaction context suggests this category";
+          default -> "Category suggestion";
+        },
         item.getStatus(),
         item.getVersion(),
         item.getCreatedAt(),

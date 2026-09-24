@@ -58,6 +58,14 @@ app:
     sync-max-round-deltas: ${CONNECTED_FINANCE_SYNC_MAX_DELTAS:50000}
     sync-max-round-bytes: ${CONNECTED_FINANCE_SYNC_MAX_BYTES:52428800}
     revocation-poll-ms: 60000
+  categorization-ai:
+    enabled: ${CATEGORIZATION_AI_ENABLED:false}
+    key: ${CATEGORIZATION_AI_KEY:}
+    model: ${CATEGORIZATION_AI_MODEL:}
+    policy: ${CATEGORIZATION_AI_POLICY:}
+    base-url: ${CATEGORIZATION_AI_BASE_URL:https://api.openai.com/v1/chat/completions}
+    timeout-ms: ${CATEGORIZATION_AI_TIMEOUT_MS:5000}
+    poll-ms: ${CATEGORIZATION_AI_POLL_MS:1000}
 
 management:
   endpoints:

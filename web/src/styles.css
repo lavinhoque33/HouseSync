@@ -1388,6 +1388,13 @@ code {
   overflow-wrap: anywhere;
 }
 
+/* Private AI progress and failure notices stack without crowding the queue. */
+.finance-reviews-ai {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
 .finance-review-list {
   list-style: none;
   display: grid;

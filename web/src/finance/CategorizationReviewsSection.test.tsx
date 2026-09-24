@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -113,10 +114,17 @@ interface RouteHandlers {
   listGet?: (
     view: string | null,
     offset: string,
+    url: string,
   ) => Response | Promise<Response>;
   itemGet?: (reviewId: string) => Response | Promise<Response>;
   resolve?: (reviewId: string) => Response | Promise<Response>;
   csrfGet?: () => Response | Promise<Response>;
+  aiStatusGet?: (url: string) => Response | Promise<Response>;
+}
+
+/** The documented disabled shape: no AI capability, nothing pending. */
+function aiStatusDisabled() {
+  return jsonResponse({ enabled: false, pendingCount: 0, failedCount: 0 });
 }
 
 function stubFetch(routes: RouteHandlers) {
@@ -132,23 +140,34 @@ function stubFetch(routes: RouteHandlers) {
           jsonResponse({ token: 'csrf-token-2', headerName: 'X-CSRF-TOKEN' })
         );
       }
-      if (url.startsWith(`${REVIEWS_BASE}/`) && url.endsWith('/resolve')) {
-        const reviewId = decodeURIComponent(
-          url.slice(REVIEWS_BASE.length + 1, -'/resolve'.length),
-        );
-        if (!routes.resolve) throw new Error('unexpected resolve request');
-        return routes.resolve(reviewId);
+      if (url.endsWith('/categorization-ai-work/status')) {
+        // Owner-private AI counters; the default deployment has no AI.
+        return routes.aiStatusGet?.(url) ?? aiStatusDisabled();
       }
-      if (url.startsWith(`${REVIEWS_BASE}/`)) {
-        const reviewId = decodeURIComponent(url.slice(REVIEWS_BASE.length + 1));
-        if (!routes.itemGet) throw new Error('unexpected review item request');
-        return routes.itemGet(reviewId);
-      }
-      if (url.startsWith(`${REVIEWS_BASE}?`)) {
-        const query = new URLSearchParams(url.slice(REVIEWS_BASE.length + 1));
+      const reviewsIndex = url.indexOf('/categorization-reviews');
+      if (reviewsIndex !== -1) {
+        const rest = url.slice(reviewsIndex + '/categorization-reviews'.length);
+        if (rest.endsWith('/resolve')) {
+          const reviewId = decodeURIComponent(
+            rest.slice(1, -'/resolve'.length),
+          );
+          if (!routes.resolve) throw new Error('unexpected resolve request');
+          return routes.resolve(reviewId);
+        }
+        if (rest.startsWith('/')) {
+          const reviewId = decodeURIComponent(rest.slice(1));
+          if (!routes.itemGet) {
+            throw new Error('unexpected review item request');
+          }
+          return routes.itemGet(reviewId);
+        }
+        const query = new URLSearchParams(rest.slice(1));
         return (
-          routes.listGet?.(query.get('view'), query.get('offset') ?? '0') ??
-          page([])
+          routes.listGet?.(
+            query.get('view'),
+            query.get('offset') ?? '0',
+            url,
+          ) ?? page([])
         );
       }
       throw new Error(`unexpected fetch ${url} ${init?.method ?? ''}`);
@@ -163,6 +182,7 @@ interface RenderOptions {
   refreshSignal?: number;
   scopeResetSignal?: number;
   csrf?: CsrfToken | null;
+  household?: Household;
 }
 
 function renderSection(
@@ -176,7 +196,7 @@ function renderSection(
   const onTransactionChanged = vi.fn();
   const element = (overrides: RenderOptions = {}) => (
     <CategorizationReviewsSection
-      household={HOUSEHOLD}
+      household={overrides.household ?? options.household ?? HOUSEHOLD}
       csrf={overrides.csrf ?? options.csrf ?? CSRF}
       onCsrfRefreshed={onCsrfRefreshed}
       onSessionExpired={onSessionExpired}
@@ -1088,5 +1108,511 @@ describe('categorization review queue', () => {
       'SHOPPING',
     );
     expect(listCalls).toBeGreaterThan(1);
+  });
+});
+
+const AI_STATUS_URL = `/api/households/${HOUSEHOLD.id}/categorization-ai-work/status`;
+const AI_REVIEW_ID = '80000000-0000-4000-8000-000000000009';
+
+function aiStatusCalls(calls: Call[]) {
+  return calls.filter((call) =>
+    call.url.endsWith('/categorization-ai-work/status'),
+  );
+}
+
+/** One settled AI suggestion, exactly as the owner-private queue shows it. */
+function aiReview(): CategorizationReview {
+  return review({
+    id: AI_REVIEW_ID,
+    transaction: transaction({ id: OTHER_TX_ID, description: 'Transit pass' }),
+    source: 'AI',
+    confidence: 'MEDIUM',
+    reasonLabel: 'Model suggestion',
+  });
+}
+
+describe('owner-visible AI work status', () => {
+  it('announces pending AI work privately and converges the settled AI suggestion without losing a draft', async () => {
+    let listCalls = 0;
+    let statusCalls = 0;
+    const firstStatus: { release?: (response: Response) => void } = {};
+    const { calls } = renderSection({
+      aiStatusGet: (url) => {
+        expect(url).toBe(AI_STATUS_URL);
+        statusCalls += 1;
+        if (statusCalls === 1) {
+          // Held until the owner's own decision is drafted below, so the
+          // pending backlog and its bounded poll run under the fake clock.
+          return new Promise<Response>((resolve) => {
+            firstStatus.release = resolve;
+          });
+        }
+        return jsonResponse({ enabled: true, pendingCount: 0, failedCount: 0 });
+      },
+      listGet: () => {
+        listCalls += 1;
+        return listCalls === 1
+          ? page([review()], { openCount: 1 })
+          : page([aiReview(), review()], { openCount: 2 });
+      },
+    });
+    expect(
+      await screen.findByText('1 suggestion is waiting for your decision.'),
+    ).toBeInTheDocument();
+
+    vi.useFakeTimers();
+    firstStatus.release?.(
+      jsonResponse({ enabled: true, pendingCount: 1, failedCount: 0 }),
+    );
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    // The pending backlog is owner-visible before the queue is even opened.
+    expect(
+      screen.getByText(
+        /asking an optional AI model for a category suggestion on 1 of your entries/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/nothing changes until you decide/),
+    ).toBeInTheDocument();
+
+    // The manual decision stays available while work is pending, and the
+    // owner starts one that must survive the later convergence.
+    fireEvent.click(
+      screen.getByRole('button', { name: /Review suggested categories/ }),
+    );
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Review the suggestion for Corner Market',
+      }),
+    );
+    expect(
+      screen.getByRole('radio', { name: 'Keep it uncategorized' }),
+    ).toBeEnabled();
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Choose a different category' }),
+    );
+    fireEvent.change(screen.getByLabelText('Category for this decision'), {
+      target: { value: 'SHOPPING' },
+    });
+
+    // Work settles: the bounded poll notices and the private queue converges.
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    vi.useRealTimers();
+
+    expect(
+      screen.queryByText(/asking an optional AI model/),
+    ).not.toBeInTheDocument();
+    expect(
+      await screen.findByText('2 suggestions are waiting for your decision.'),
+    ).toBeInTheDocument();
+    // The unrelated draft survived the asynchronous refresh.
+    expect(screen.getByLabelText('Category for this decision')).toHaveValue(
+      'SHOPPING',
+    );
+    expect(listCalls).toBeGreaterThan(1);
+    // Nothing is polled once no work is pending.
+    expect(aiStatusCalls(calls)).toHaveLength(2);
+
+    // The settled work shows up as a source=AI suggestion in the same queue.
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Review the suggestion for Transit pass',
+      }),
+    );
+    const aiDetail = screen.getByRole('group', {
+      name: /Suggestion for “Transit pass”/,
+    });
+    expect(within(aiDetail).getByText(/AI suggestion/)).toBeInTheDocument();
+    expect(
+      within(aiDetail).getByText(
+        /optional AI model from a normalized description/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(aiDetail).getByText(/Medium confidence band/),
+    ).toBeInTheDocument();
+    expect(within(aiDetail).getByText('Model suggestion')).toBeInTheDocument();
+  });
+
+  it('keeps polling across a queue reload and converges the settled AI suggestion', async () => {
+    let listCalls = 0;
+    let statusCalls = 0;
+    const firstStatus: { release?: (response: Response) => void } = {};
+    const { calls, rerender } = renderSection({
+      aiStatusGet: () => {
+        statusCalls += 1;
+        if (statusCalls === 1) {
+          return new Promise<Response>((resolve) => {
+            firstStatus.release = resolve;
+          });
+        }
+        return jsonResponse(
+          statusCalls === 2
+            ? { enabled: true, pendingCount: 1, failedCount: 0 }
+            : { enabled: true, pendingCount: 0, failedCount: 0 },
+        );
+      },
+      listGet: () => {
+        listCalls += 1;
+        return listCalls < 3
+          ? page([review()], { openCount: 1 })
+          : page([aiReview(), review()], { openCount: 2 });
+      },
+    });
+    expect(
+      await screen.findByText('1 suggestion is waiting for your decision.'),
+    ).toBeInTheDocument();
+
+    vi.useFakeTimers();
+    firstStatus.release?.(
+      jsonResponse({ enabled: true, pendingCount: 1, failedCount: 0 }),
+    );
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(
+      screen.getByText(/category suggestion on 1 of your entries/),
+    ).toBeInTheDocument();
+
+    // A view switch reloads the C queue (a new queue generation) and a
+    // sibling commit re-reads the counters with the queue; neither may strand
+    // the pending poll or discard the read the owner is waiting on.
+    fireEvent.click(
+      screen.getByRole('button', { name: /Review suggested categories/ }),
+    );
+    fireEvent.change(screen.getByLabelText('Show'), {
+      target: { value: 'HISTORY' },
+    });
+    rerender({ refreshSignal: 1 });
+    expect(statusCalls).toBe(2);
+
+    // Work settles, and the poll that survived the reload notices it.
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    vi.useRealTimers();
+
+    expect(statusCalls).toBe(3);
+    expect(aiStatusCalls(calls)).toHaveLength(3);
+    expect(
+      screen.queryByText(/asking an optional AI model/),
+    ).not.toBeInTheDocument();
+    // The settled suggestion converged into the shown page and its count.
+    expect(await screen.findByText('Transit pass')).toBeInTheDocument();
+    expect(
+      screen.getByText('2 suggestions are waiting for your decision.'),
+    ).toBeInTheDocument();
+    expect(listCalls).toBeGreaterThanOrEqual(3);
+  });
+
+  it('publishes a status read that is in flight while the queue reloads', async () => {
+    let statusCalls = 0;
+    const gatedRead: { release?: (response: Response) => void } = {};
+    const { rerender } = renderSection({
+      aiStatusGet: () => {
+        statusCalls += 1;
+        if (statusCalls === 1) return aiStatusDisabled();
+        return new Promise<Response>((resolve) => {
+          gatedRead.release = resolve;
+        });
+      },
+      listGet: () => page([review()], { openCount: 1 }),
+    });
+    expect(
+      await screen.findByText('1 suggestion is waiting for your decision.'),
+    ).toBeInTheDocument();
+
+    // A sibling commit starts a status read; a queue reload (view switch)
+    // commits while that read is still in flight.
+    rerender({ refreshSignal: 1 });
+    expect(statusCalls).toBe(2);
+    fireEvent.click(
+      screen.getByRole('button', { name: /Review suggested categories/ }),
+    );
+    fireEvent.change(screen.getByLabelText('Show'), {
+      target: { value: 'HISTORY' },
+    });
+
+    // The read still publishes, so the owner sees the pending backlog instead
+    // of a panel whose progress was silently discarded by the reload.
+    await act(async () => {
+      gatedRead.release?.(
+        jsonResponse({ enabled: true, pendingCount: 1, failedCount: 0 }),
+      );
+    });
+    expect(
+      screen.getByText(/category suggestion on 1 of your entries/),
+    ).toBeInTheDocument();
+  });
+
+  it('ignores a stale failed status read that lands after a newer success', async () => {
+    let statusCalls = 0;
+    const older: { release?: (response: Response) => void } = {};
+    const { rerender, onSessionExpired } = renderSection({
+      aiStatusGet: () => {
+        statusCalls += 1;
+        if (statusCalls === 1) return aiStatusDisabled();
+        if (statusCalls === 2) {
+          return new Promise<Response>((resolve) => {
+            older.release = resolve;
+          });
+        }
+        return jsonResponse({ enabled: true, pendingCount: 1, failedCount: 0 });
+      },
+      listGet: () => page([review()], { openCount: 1 }),
+    });
+    expect(
+      await screen.findByText('1 suggestion is waiting for your decision.'),
+    ).toBeInTheDocument();
+
+    // An older status read is still in flight when a newer read answers for
+    // the same scope.
+    rerender({ refreshSignal: 1 });
+    expect(statusCalls).toBe(2);
+    rerender({ refreshSignal: 2 });
+    expect(statusCalls).toBe(3);
+    expect(
+      await screen.findByText(/category suggestion on 1 of your entries/),
+    ).toBeInTheDocument();
+
+    // The stale read's expired-session answer arrives last: it must not clear
+    // the panel the newer read already answered.
+    await act(async () => {
+      older.release?.(
+        jsonResponse({ code: 'UNAUTHENTICATED', message: 'Sign in.' }, 401),
+      );
+    });
+    expect(onSessionExpired).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(/category suggestion on 1 of your entries/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('1 suggestion is waiting for your decision.'),
+    ).toBeInTheDocument();
+  });
+
+  it('states a terminal AI failure safely and leaves the manual decision available', async () => {
+    renderSection({
+      aiStatusGet: () =>
+        jsonResponse({ enabled: true, pendingCount: 0, failedCount: 1 }),
+      listGet: () => page([review()], { openCount: 1 }),
+    });
+
+    expect(
+      await screen.findByText(
+        /No AI suggestion could be produced for 1 of your entries/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Nothing was changed — choose a category yourself whenever you are ready/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/asking an optional AI model/),
+    ).not.toBeInTheDocument();
+
+    await openReviewDetail();
+    expect(
+      screen.getByRole('radio', {
+        name: 'Accept the suggestion — Food shopping',
+      }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole('radio', { name: 'Choose a different category' }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole('radio', { name: 'Keep it uncategorized' }),
+    ).toBeEnabled();
+  });
+
+  it('shows no progress and polls nothing while the capability is disabled', async () => {
+    // The fake clock is installed before the panel mounts, so any timer it
+    // arms is visible to the advance below.
+    vi.useFakeTimers();
+    const { calls } = renderSection({
+      aiStatusGet: () => aiStatusDisabled(),
+      listGet: () => page([review()], { openCount: 1 }),
+    });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    expect(
+      screen.getByText('1 suggestion is waiting for your decision.'),
+    ).toBeInTheDocument();
+    await act(() => vi.advanceTimersByTimeAsync(15_000));
+    vi.useRealTimers();
+
+    // One read decides the capability; a disabled deployment is never polled.
+    expect(aiStatusCalls(calls)).toHaveLength(1);
+    expect(
+      screen.queryByText(/asking an optional AI model/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/No AI suggestion/)).not.toBeInTheDocument();
+  });
+
+  it('rejects a drifted status payload without showing progress or touching the queue', async () => {
+    renderSection({
+      aiStatusGet: () =>
+        jsonResponse({
+          enabled: true,
+          pendingCount: 1,
+          failedCount: 0,
+          providerError: 'rate limited by the model provider',
+        }),
+      listGet: () => page([review()], { openCount: 1 }),
+    });
+
+    expect(
+      await screen.findByText('1 suggestion is waiting for your decision.'),
+    ).toBeInTheDocument();
+    // A payload the contract does not describe is never rendered, so no
+    // private provider detail can reach the owner through a drifted body.
+    expect(
+      screen.queryByText(/asking an optional AI model/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/rate limited by the model provider/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    await openReviewDetail();
+    expect(screen.getByText('Merchant pattern matched')).toBeInTheDocument();
+  });
+
+  it('renders no progress for counts this browser cannot represent exactly', async () => {
+    renderSection({
+      aiStatusGet: () =>
+        jsonResponse({
+          enabled: true,
+          pendingCount: Number.MAX_SAFE_INTEGER + 1,
+          failedCount: 1,
+        }),
+      listGet: () => page([review()], { openCount: 1 }),
+    });
+
+    expect(
+      await screen.findByText('1 suggestion is waiting for your decision.'),
+    ).toBeInTheDocument();
+    // An oversized 64-bit count is drift, so neither notice renders and no
+    // imprecise backlog number reaches the owner.
+    expect(
+      screen.queryByText(/asking an optional AI model/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/No AI suggestion/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    await openReviewDetail();
+    expect(screen.getByText('Merchant pattern matched')).toBeInTheDocument();
+  });
+
+  it('keeps the review queue working when the status read fails', async () => {
+    renderSection({
+      aiStatusGet: () =>
+        jsonResponse({ code: 'UNKNOWN_ERROR', message: 'Boom.' }, 500),
+      listGet: () => page([review()], { openCount: 1 }),
+    });
+
+    expect(
+      await screen.findByText('1 suggestion is waiting for your decision.'),
+    ).toBeInTheDocument();
+    // A supplementary status failure is not a queue failure.
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Boom/)).not.toBeInTheDocument();
+
+    await openReviewDetail();
+    expect(screen.getByText('Merchant pattern matched')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save decision' })).toBeEnabled();
+  });
+
+  it('drops the private AI progress and ignores a late status response after a scope clear', async () => {
+    let statusCalls = 0;
+    const gated: { complete?: (response: Response) => void } = {};
+    const { rerender } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      aiStatusGet: () => {
+        statusCalls += 1;
+        if (statusCalls === 1) {
+          return jsonResponse({
+            enabled: true,
+            pendingCount: 2,
+            failedCount: 0,
+          });
+        }
+        return new Promise<Response>((resolve) => {
+          gated.complete = resolve;
+        });
+      },
+    });
+    expect(
+      await screen.findByText(/category suggestions on 2 of your entries/),
+    ).toBeInTheDocument();
+
+    // A sibling commit re-reads the counters, and that read is still in
+    // flight when the whole scope is cleared.
+    rerender({ refreshSignal: 1 });
+    await waitFor(() => expect(statusCalls).toBe(2));
+    rerender({ scopeResetSignal: 1 });
+
+    expect(
+      screen.queryByText(/asking an optional AI model/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Your suggestions are not loaded.'),
+    ).toBeInTheDocument();
+
+    // The late answer cannot publish private progress into the new scope.
+    gated.complete?.(
+      jsonResponse({ enabled: true, pendingCount: 5, failedCount: 1 }),
+    );
+    await act(async () => {});
+    expect(
+      screen.queryByText(/asking an optional AI model/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/No AI suggestions could be produced/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Your suggestions are not loaded.'),
+    ).toBeInTheDocument();
+  });
+
+  it('cannot render another household’s AI result after a switch', async () => {
+    const otherHousehold: Household = {
+      ...HOUSEHOLD,
+      id: 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff',
+    };
+    const gated: { complete?: (response: Response) => void } = {};
+    const first = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      aiStatusGet: () =>
+        new Promise<Response>((resolve) => {
+          gated.complete = resolve;
+        }),
+    });
+
+    // The owner switches households while the first household's status read
+    // is still in flight: the parent remounts the section for the new one.
+    first.view.unmount();
+    const second = renderSection(
+      { listGet: () => page([], { openCount: 0 }) },
+      { household: otherHousehold },
+    );
+    expect(
+      await screen.findByText('No suggestions are waiting for your decision.'),
+    ).toBeInTheDocument();
+
+    gated.complete?.(
+      jsonResponse({ enabled: true, pendingCount: 4, failedCount: 0 }),
+    );
+    await act(async () => {});
+
+    expect(
+      screen.queryByText(/asking an optional AI model/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('Corner Market')).not.toBeInTheDocument();
+    // The new household's reads are scoped to the new household alone.
+    expect(aiStatusCalls(second.calls)).toHaveLength(1);
+    expect(
+      aiStatusCalls(second.calls).every((call) =>
+        call.url.includes(otherHousehold.id),
+      ),
+    ).toBe(true);
   });
 });

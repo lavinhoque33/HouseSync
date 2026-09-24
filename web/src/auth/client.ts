@@ -3526,6 +3526,110 @@ export async function resolveCategorizationReview(
   );
 }
 
+/**
+ * Exactly the documented three-field owner-private AI work status.
+ * It is a counter projection only: no work item id, transaction id,
+ * description, merchant text, provider code, model identity, or failure
+ * detail ever appears here, so a status read can never leak private
+ * categorization evidence. `enabled` is the server's sole authority for
+ * whether AI suggestions run at all; the browser never infers it.
+ */
+export interface CategorizationAiWorkStatus {
+  /** False when the AI fallback is not configured for this deployment. */
+  enabled: boolean;
+  /** Work that is queued, running, or waiting for a bounded retry. */
+  pendingCount: number;
+  /** Work that reached a terminal failure and produced no suggestion. */
+  failedCount: number;
+}
+
+const AI_WORK_STATUS_KEYS = 3;
+
+/**
+ * Strict parser for the AI work status: exactly the three documented fields,
+ * each validated. A missing, extra, or invalid field fails the whole response
+ * rather than reaching the UI, so a half-understood counter can never be
+ * rendered as progress. Counts must be non-negative integers that JavaScript
+ * represents exactly (`Number.isSafeInteger`), never strings, fractions, or
+ * values beyond `Number.MAX_SAFE_INTEGER`: the server owns them as 64-bit
+ * counts, and a count this browser cannot represent precisely is drift, not
+ * progress. The documented disabled shape (`false`/`0`/`0`) and the
+ * pending/failed partition stay server-enforced invariants; the browser never
+ * re-derives them and never invents a count.
+ */
+function parseCategorizationAiWorkStatus(
+  value: unknown,
+): CategorizationAiWorkStatus | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).length !== AI_WORK_STATUS_KEYS ||
+    typeof record.enabled !== 'boolean' ||
+    typeof record.pendingCount !== 'number' ||
+    !Number.isSafeInteger(record.pendingCount) ||
+    record.pendingCount < 0 ||
+    typeof record.failedCount !== 'number' ||
+    !Number.isSafeInteger(record.failedCount) ||
+    record.failedCount < 0
+  ) {
+    return undefined;
+  }
+  return {
+    enabled: record.enabled,
+    pendingCount: record.pendingCount,
+    failedCount: record.failedCount,
+  };
+}
+
+/**
+ * The current viewer's private AI work status in this household.
+ * Finance membership is required; another member receives only their own
+ * counters (zero if they have no AI work), never the owner's. An outsider
+ * receives the same generic 404 as a missing household, so the browser does
+ * not probe for another person's status. A disabled deployment answers exactly
+ * `false`/`0`/`0`.
+ */
+export async function fetchCategorizationAiWorkStatus(
+  householdId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<CategorizationAiWorkStatus> {
+  const response = await apiFetch(
+    `/api/households/${encodeURIComponent(householdId)}/categorization-ai-work/status`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load your category automation status.',
+    );
+  }
+  const status = parseCategorizationAiWorkStatus(
+    await readJson<unknown>(response),
+  );
+  if (!status) {
+    // A drifted counter projection is never rendered as progress: the caller
+    // keeps the last known status and the review queue is untouched.
+    throw new ApiError({
+      status: response.status,
+      code: 'UNKNOWN_ERROR',
+      message:
+        'The server returned an unexpected category automation response.',
+    });
+  }
+  return status;
+}
+
 export async function postTransaction(
   householdId: string,
   input: CreateTransactionInput,

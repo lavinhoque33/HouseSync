@@ -7,10 +7,12 @@ import {
 } from 'react';
 import {
   ApiError,
+  fetchCategorizationAiWorkStatus,
   fetchCategorizationReview,
   fetchCategorizationReviews,
   fetchCsrf,
   resolveCategorizationReview,
+  type CategorizationAiWorkStatus,
   type CategorizationReview,
   type CategorizationReviewAction,
   type CategorizationReviewConfidence,
@@ -90,6 +92,15 @@ interface CategorizationReviewsSectionProps {
 const REVIEW_PAGE_LIMIT = 50;
 
 /**
+ * The bounded wait between private AI work status reads while work is
+ * pending. One timer exists at a time, it is cleared on every scope change
+ * and unmount, and the read it starts is aborted with the same scope, so
+ * settled work is noticed promptly without a busy loop or an orphaned
+ * request. Nothing is polled while the capability is disabled.
+ */
+const AI_STATUS_POLL_MS = 5_000;
+
+/**
  * Calm labels for the two suggestion sources. The source is safe display
  * text; the model identity, policy version, evidence digest, merchant key,
  * and provider codes never exist in this projection.
@@ -109,7 +120,7 @@ const SOURCE_LABELS: Record<CategorizationReviewSource, string> = {
 const SOURCE_EXPLANATIONS: Record<CategorizationReviewSource, string> = {
   HEURISTIC:
     'Matched by HouseSync against a fixed built-in list of recognized merchants, using this entry’s description text. It is a suggestion only.',
-  AI: 'Produced by an optional AI model from a normalized description. It is a suggestion only.',
+  AI: 'Produced by an optional AI model from a normalized description, the entry type, and this entry’s normalized bank category when the bank supplied one. No amount, date, account, or household detail is sent. It is a suggestion only.',
 };
 
 /**
@@ -181,6 +192,14 @@ export function CategorizationReviewsSection({
   const [queueOpen, setQueueOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  /**
+   * The owner-private AI work counters, or null while they are not
+   * loaded. The status is supplementary: a failed or unavailable read leaves
+   * this null (or keeps the last known value) and never touches the queue.
+   */
+  const [aiStatus, setAiStatus] = useState<CategorizationAiWorkStatus | null>(
+    null,
+  );
   const [notice, setNotice] = useState<Notice | null>(null);
   /**
    * The suggestion whose detail is open. It is held separately from the page
@@ -223,6 +242,20 @@ export function CategorizationReviewsSection({
    */
   const openReviewRef = useRef<CategorizationReview | null>(null);
   const pendingResolveRef = useRef<PendingResolve | null>(null);
+  /** Synchronous mirror of the published AI status for the poll comparison. */
+  const aiStatusRef = useRef<CategorizationAiWorkStatus | null>(null);
+  /**
+   * The AI status scope generation. It moves only when the whole panel scope
+   * is cleared (sign-out, confirmed session expiry, household switch, access
+   * loss) or the instance unmounts — never when the C queue reloads. A view
+   * switch, a manual reload, or a sibling refresh bumps the queue generation,
+   * and the pending poll must survive all of them.
+   */
+  const aiScopeRef = useRef(0);
+  /** The newest status read; an older overlapping read never publishes. */
+  const aiReadRef = useRef(0);
+  /** Synchronous mirror of the shown view for timer-driven convergence. */
+  const viewRef = useRef<CategorizationReviewView>('OPEN');
   const noticeRef = useRef<HTMLDivElement>(null);
   const detailRef = useRef<HTMLDivElement>(null);
   const actionsRef = useRef<HTMLFieldSetElement>(null);
@@ -245,6 +278,16 @@ export function CategorizationReviewsSection({
 
   function isCurrent(generation: number): boolean {
     return !unmountedRef.current && genRef.current === generation;
+  }
+
+  /**
+   * The AI status counterpart of `isCurrent`: a status read and the pending
+   * poll answer only to the AI scope generation, so a C queue reload can
+   * neither strand the poll nor discard a status read that is still in
+   * flight.
+   */
+  function isAiCurrent(generation: number): boolean {
+    return !unmountedRef.current && aiScopeRef.current === generation;
   }
 
   /** Sets the selected decision and its synchronous mirror together. */
@@ -282,12 +325,13 @@ export function CategorizationReviewsSection({
   /**
    * Drops every private suggestion value and invalidates in-flight
    * continuations: the retained page, the open detail, the resolution draft,
-   * the retained same-key intent, and the mutation gate all return to their
-   * initial state. Nothing is loading afterwards, so the panel never claims a
-   * request that no longer exists.
+   * the retained same-key intent, the private AI work counters, and the
+   * mutation gate all return to their initial state. Nothing is loading
+   * afterwards, so the panel never claims a request that no longer exists.
    */
   function clearScopedState() {
     genRef.current += 1;
+    aiScopeRef.current += 1;
     moreSeqRef.current += 1;
     resolvingRef.current = false;
     // A focus request that belonged to the cleared scope is dropped with it.
@@ -295,9 +339,12 @@ export function CategorizationReviewsSection({
     for (const owned of ownedRef.current) owned.abort();
     setPage(null);
     setView('OPEN');
+    viewRef.current = 'OPEN';
     setQueueOpen(false);
     setLoading(false);
     setLoadingMore(false);
+    aiStatusRef.current = null;
+    setAiStatus(null);
     setNotice(null);
     showReview(null);
     showDraftAction('ACCEPT_SUGGESTION');
@@ -605,13 +652,88 @@ export function CategorizationReviewsSection({
     ).finally(() => untrack(controller));
   }
 
+  /**
+   * Publishes one AI work status. A pending backlog that just emptied means
+   * asynchronous work settled, so the owner's own waiting page and its
+   * authoritative open count converge through the same background reload a
+   * sibling commit uses: the retained resolution draft, a retained
+   * unknown-outcome intent, and the open detail keep their existing
+   * reconciliation rules and are never clobbered by this convergence.
+   */
+  function publishAiStatus(status: CategorizationAiWorkStatus) {
+    const previous = aiStatusRef.current;
+    aiStatusRef.current = status;
+    setAiStatus(status);
+    if (
+      previous !== null &&
+      previous.pendingCount > 0 &&
+      status.pendingCount === 0
+    ) {
+      startLoad(viewRef.current, true);
+    }
+  }
+
+  /**
+   * Reads the private AI work status once. A scope loss clears the panel as
+   * usual; every other failure is deliberately silent, because supplementary
+   * progress the owner did not ask for must never become a queue-level error.
+   * The last known status is kept instead of being replaced by a guess.
+   *
+   * The read answers only to the AI scope generation and to being the newest
+   * read, so a C queue reload that commits while it is in flight cannot
+   * discard a status the owner is waiting on, and an older overlapping read
+   * cannot overwrite a newer one.
+   */
+  async function loadAiStatus(generation: number, controller: AbortController) {
+    const read = ++aiReadRef.current;
+    try {
+      const status = await fetchCategorizationAiWorkStatus(
+        household.id,
+        controller.signal,
+      );
+      if (
+        !isAiCurrent(generation) ||
+        controller.signal.aborted ||
+        read !== aiReadRef.current
+      ) {
+        return;
+      }
+      publishAiStatus(status);
+    } catch (error) {
+      if (!isAiCurrent(generation) || controller.signal.aborted) return;
+      // A newer read already answered for this scope: its outcome owns the
+      // panel, and a stale 401/404 must never clear what the owner just saw.
+      if (read !== aiReadRef.current) return;
+      const apiError =
+        error instanceof ApiError
+          ? error
+          : new ApiError({
+              status: 0,
+              code: 'NETWORK_ERROR',
+              message: 'Could not reach the server.',
+            });
+      mapScopeErrors(apiError);
+    }
+  }
+
+  function startAiStatusLoad() {
+    const generation = aiScopeRef.current;
+    const controller = new AbortController();
+    track(controller);
+    void loadAiStatus(generation, controller).finally(() =>
+      untrack(controller),
+    );
+  }
+
   useEffect(() => {
     unmountedRef.current = false;
     startLoad('OPEN');
+    startAiStatusLoad();
     const owned = ownedRef.current;
     return () => {
       unmountedRef.current = true;
       genRef.current += 1;
+      aiScopeRef.current += 1;
       for (const tracked of owned) tracked.abort();
     };
     // Household identity is fixed for this keyed component instance; the view
@@ -634,11 +756,93 @@ export function CategorizationReviewsSection({
     ) {
       return;
     }
+    const signalChanged = servedRef.current.signal !== refreshSignal;
     servedRef.current = { view, signal: refreshSignal };
     startLoad(view, true);
+    // A committed sibling change can also start new asynchronous work (an
+    // uncategorized admission with no deterministic match), so the private AI
+    // counters are re-read with the queue. A plain view switch does not.
+    if (signalChanged) startAiStatusLoad();
     // The view and signal alone drive this effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, refreshSignal]);
+
+  // The shown view, mirrored synchronously for the timer-driven convergence
+  // below: a poll cycle that settles work must reload the view the owner is
+  // actually looking at, not the one captured when the timer was armed.
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+
+  const aiPending =
+    aiStatus !== null && aiStatus.enabled && aiStatus.pendingCount > 0;
+
+  // While AI work is pending, one bounded timer re-reads the private status;
+  // the timer is cleared and its in-flight read aborted on every scope change
+  // and unmount, and every cycle is checked against the AI scope generation
+  // that started it — a C queue reload (view switch, manual reload, sibling
+  // refresh) never stops the poll. Nothing is polled while the capability is
+  // disabled, while its status is unknown, or once no work is pending: a
+  // deployment without AI costs exactly the reads the owner's own actions ask
+  // for. A transient status failure keeps the last known counters and the
+  // next cycle retries.
+  useEffect(() => {
+    if (!aiPending) return;
+    const generation = aiScopeRef.current;
+    const controller = new AbortController();
+    track(controller);
+    let stopped = false;
+    let timer: number | null = null;
+    const cycle = async () => {
+      if (stopped || !isAiCurrent(generation)) return;
+      const read = ++aiReadRef.current;
+      try {
+        const status = await fetchCategorizationAiWorkStatus(
+          household.id,
+          controller.signal,
+        );
+        if (stopped || !isAiCurrent(generation) || controller.signal.aborted) {
+          return;
+        }
+        // A newer read (a manual reload, a sibling refresh) already answered
+        // for this scope; the poll keeps its own schedule either way.
+        if (read === aiReadRef.current) publishAiStatus(status);
+      } catch (error) {
+        if (stopped || !isAiCurrent(generation) || controller.signal.aborted) {
+          return;
+        }
+        // A newer read already answered for this scope, so a stale 401/404
+        // neither clears the panel nor is reported; the poll simply keeps its
+        // own schedule below.
+        if (read === aiReadRef.current) {
+          const apiError =
+            error instanceof ApiError
+              ? error
+              : new ApiError({
+                  status: 0,
+                  code: 'NETWORK_ERROR',
+                  message: 'Could not reach the server.',
+                });
+          if (mapScopeErrors(apiError)) return;
+          // A transient status failure changes nothing the owner can see: the
+          // last known counters stay, the queue keeps working, and the next
+          // cycle retries within the same bounded interval.
+        }
+      }
+      if (stopped || !isAiCurrent(generation)) return;
+      timer = window.setTimeout(() => void cycle(), AI_STATUS_POLL_MS);
+    };
+    timer = window.setTimeout(() => void cycle(), AI_STATUS_POLL_MS);
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+      untrack(controller);
+      controller.abort();
+    };
+    // Only the pending flag arms or disarms the timer; the functions it calls
+    // are component-scoped declarations that read refs and the current state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiPending]);
 
   // A parent scope clear drops this panel's private state with the rest of
   // the section: the retained queue, the open detail, the draft, and the
@@ -706,9 +910,14 @@ export function CategorizationReviewsSection({
     }
   }
 
-  /** The notice's own reload control is a manual refresh: it clears notices. */
+  /**
+   * The notice's own reload control is a manual refresh: it clears notices.
+   * It is also the recovery path for a status read that failed, so the
+   * private AI progress is retried with the queue.
+   */
   function refreshReviews() {
     startLoad(view);
+    startAiStatusLoad();
   }
 
   function loadMore() {
@@ -1391,6 +1600,45 @@ export function CategorizationReviewsSection({
                 openCount === 1 ? 'suggestion is' : 'suggestions are'
               } waiting for your decision.`}
       </p>
+      {aiStatus !== null && aiStatus.enabled && (
+        // AI progress is owner-private and supplementary to the queue:
+        // it names no entry, merchant, model, provider, or failure reason,
+        // and it never disables a decision. A pending backlog is announced
+        // while it runs and converges on its own when it settles; a terminal
+        // failure states the safe outcome and leaves the manual choice.
+        <div className="finance-reviews-ai">
+          {aiPending && (
+            <div
+              className="household-notice household-notice--info"
+              role="status"
+              aria-live="polite"
+            >
+              <p>
+                {aiStatus.pendingCount === 1
+                  ? 'HouseSync is asking an optional AI model for a category suggestion on 1 of your entries.'
+                  : `HouseSync is asking an optional AI model for category suggestions on ${aiStatus.pendingCount} of your entries.`}{' '}
+                Suggestions appear in this queue when they are ready, and
+                nothing changes until you decide.
+              </p>
+            </div>
+          )}
+          {aiStatus.failedCount > 0 && (
+            <div
+              className="household-notice household-notice--warning"
+              role="status"
+              aria-live="polite"
+            >
+              <p>
+                {aiStatus.failedCount === 1
+                  ? 'No AI suggestion could be produced for 1 of your entries.'
+                  : `No AI suggestions could be produced for ${aiStatus.failedCount} of your entries.`}{' '}
+                Nothing was changed — choose a category yourself whenever you
+                are ready.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
       <div className="finance-account-actions">
         <button
           type="button"
