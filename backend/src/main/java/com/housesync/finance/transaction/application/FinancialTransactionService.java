@@ -11,6 +11,7 @@ import com.housesync.finance.account.domain.SupportedCurrency;
 import com.housesync.finance.account.persistence.FinancialAccountEntity;
 import com.housesync.finance.account.persistence.FinancialAccountRepository;
 import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAccountNotFoundException;
+import com.housesync.finance.categorization.application.CategorizationReviewService;
 import com.housesync.finance.categorization.application.CategorizationRuleLookup;
 import com.housesync.finance.categorization.application.CategorizationRuleLookup.OwnerRuleMatch;
 import com.housesync.finance.categorization.domain.CategorizationClassifier;
@@ -57,6 +58,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -90,6 +92,7 @@ public class FinancialTransactionService {
   private final CategorizationRuleLookup categorizationRules;
   private final Clock clock;
   private final EntityManager entityManager;
+  private final ObjectProvider<CategorizationReviewService> reviews;
 
   public FinancialTransactionService(
       FinancialTransactionRepository transactions,
@@ -99,7 +102,8 @@ public class FinancialTransactionService {
       HouseholdService households,
       CategorizationRuleLookup categorizationRules,
       Clock clock,
-      EntityManager entityManager) {
+      EntityManager entityManager,
+      ObjectProvider<CategorizationReviewService> reviews) {
     this.transactions = transactions;
     this.idempotency = idempotency;
     this.accounts = accounts;
@@ -108,6 +112,7 @@ public class FinancialTransactionService {
     this.categorizationRules = categorizationRules;
     this.clock = clock;
     this.entityManager = entityManager;
+    this.reviews = reviews;
   }
 
   /** Normalized create input; null keeps the documented omitted-field default. */
@@ -212,6 +217,9 @@ public class FinancialTransactionService {
       categorizeNewEntry(transaction, householdId, actorId, null, null, null, null, now);
     }
     transactions.save(transaction);
+    if (transaction.getCategoryOrigin() == CategorizationOrigin.NONE) {
+      reviews.getObject().suggestNew(transaction, null);
+    }
     idempotency.save(new TransactionIdempotencyEntity(key, fingerprint, transaction.getId(), now));
     if (source != null) {
       // A state-changing refund create moves its source expense version once, so a stale
@@ -309,6 +317,9 @@ public class FinancialTransactionService {
           now);
     }
     transactions.save(transaction);
+    if (transaction.getCategoryOrigin() == CategorizationOrigin.NONE) {
+      reviews.getObject().suggestNew(transaction, admission.observationEvidenceFingerprint());
+    }
     if (source != null) {
       // A state-changing refund admission moves its source expense version once, exactly like a
       // manual refund create.
@@ -382,6 +393,21 @@ public class FinancialTransactionService {
       throw new TransactionVersionConflictException();
     }
     return transaction;
+  }
+
+  /** Canonical household/account/expense lock order for an owner-private review decision. */
+  public FinancialTransactionEntity lockForCategorizationReview(
+      UUID householdId, UUID transactionId, UUID actorId) {
+    FinancialTransactionEntity peek =
+        transactions
+            .findOwnedScoped(householdId, transactionId, actorId)
+            .orElseThrow(TransactionNotFoundException::new);
+    accounts
+        .findOwnedForUpdate(householdId, peek.getAccountId(), actorId)
+        .orElseThrow(FinancialAccountNotFoundException::new);
+    return transactions
+        .findOwnedForUpdate(householdId, transactionId, actorId)
+        .orElseThrow(TransactionNotFoundException::new);
   }
 
   private FinancialTransactionEntity loadConnectedRefundSource(
@@ -603,6 +629,7 @@ public class FinancialTransactionService {
             .ifPresent(allocation -> allocation.revoked(now));
       }
       transaction.voided(now);
+      reviews.getObject().supersede(householdId, actorId, transaction.getId());
       if (source != null) {
         bumpRefundSource(source, now);
       }
@@ -727,6 +754,7 @@ public class FinancialTransactionService {
       // Refunds never reach here: a direct refund category patch is rejected earlier. A voided
       // entry may record provenance only when the effective category value is unchanged.
       transaction.userAssigned(nextCategory, now);
+      reviews.getObject().supersede(householdId, actorId, transaction.getId());
     }
     if (source != null) {
       // A state-changing refund correction bumps its source expense version once.
@@ -741,6 +769,9 @@ public class FinancialTransactionService {
           refund.groupChanged(nextCategory, nextVisibility, now);
         }
       }
+    }
+    if (!values.categoryPresent() && transaction.getKind() != TransactionKind.REFUND) {
+      reviews.getObject().ledgerChanged(transaction, descriptionChanged);
     }
     transactions.saveAndFlush(transaction);
     return toResponse(transaction);
@@ -944,6 +975,7 @@ public class FinancialTransactionService {
       throw new TransactionVersionExhaustedException();
     }
     source.refunded(now);
+    reviews.getObject().ledgerChanged(source, false);
   }
 
   private CreateValues validateCreate(CreateFields raw) {

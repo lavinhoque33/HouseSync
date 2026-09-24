@@ -6,7 +6,10 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -709,6 +712,576 @@ class CategorizationRuleHttpIT {
                 String.class,
                 matchedId))
         .isEqualTo("GROCERIES");
+  }
+
+  @Test
+  void reviewQueueResolvesWithReplayPrivacyAndRefundPropagation() throws Exception {
+    Agent owner = signedInAgent("review-owner");
+    Agent member = signedInAgent("review-member");
+    String household = createHousehold(owner, "Review home");
+    addMember(household, member.userId(), "MEMBER");
+    String account =
+        createAccount(owner, household, UUID.randomUUID(), "Review card", "CASH", "BRL");
+    String path = "/api/households/" + household + "/categorization-reviews";
+    Resp created =
+        owner.createTransaction(
+            household, UUID.randomUUID(), entry(account, "EXPENSE", "-18.00", "BRL", "Netflix"));
+    String sourceId = created(created);
+    assertThat(created.json().path("category").isNull()).isTrue();
+    assertThat(created.json().path("version").asInt()).isZero();
+    Resp page = owner.get(path + "?limit=1");
+    assertThat(page.status).isEqualTo(200);
+    assertThat(page.json().propertyNames())
+        .containsExactly("items", "limit", "offset", "hasMore", "openCount");
+    assertThat(page.json().path("openCount").asInt()).isEqualTo(1);
+    JsonNode item = page.json().path("items").get(0);
+    String reviewId = item.path("id").asText();
+    assertThat(item.propertyNames())
+        .containsExactly(
+            "id",
+            "transaction",
+            "evaluatedTransactionVersion",
+            "suggestedCategory",
+            "source",
+            "confidence",
+            "reasonLabel",
+            "status",
+            "version",
+            "createdAt",
+            "updatedAt");
+    assertThat(item.path("transaction").propertyNames().size()).isEqualTo(16);
+    assertThat(item.path("suggestedCategory").asText()).isEqualTo("SUBSCRIPTIONS");
+    assertThat(item.path("transaction").path("version").asInt()).isZero();
+    assertThat(
+            owner
+                .get(transactionPath(household) + "/" + sourceId + "/categorization")
+                .json()
+                .path("reviewState")
+                .asText())
+        .isEqualTo("OPEN");
+    // A fellow member cannot infer the owner's review from counts or detail, even for a shared
+    // entry.
+    assertThat(member.get(path).json().path("openCount").asInt()).isZero();
+    assertThat(member.get(path + "/" + reviewId).status).isEqualTo(404);
+    assertThat(
+            member.request(
+                    "POST",
+                    path + "/" + reviewId + "/resolve",
+                    "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"ACCEPT_SUGGESTION\"}",
+                    member.csrfToken,
+                    UUID.randomUUID())
+                .status)
+        .isEqualTo(404);
+    Resp refund =
+        owner.createTransaction(
+            household,
+            UUID.randomUUID(),
+            refundEntry(account, sourceId, "3.00", "2026-09-17", "Netflix refund"));
+    String refundId = created(refund);
+    // Refund creation bumps the expense concurrency token but never classifies the refund.
+    assertThat(owner.get(path + "/" + reviewId).json().path("transaction").path("version").asInt())
+        .isEqualTo(1);
+    assertThat(owner.get(path + "/" + reviewId).json().path("version").asInt()).isEqualTo(1);
+    assertThat(owner.get(path + "/" + reviewId).json().path("evaluatedTransactionVersion").asInt())
+        .isEqualTo(1);
+    String stale =
+        "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"ACCEPT_SUGGESTION\"}";
+    assertThat(
+            owner.request(
+                    "POST",
+                    path + "/" + reviewId + "/resolve",
+                    stale,
+                    owner.csrfToken,
+                    UUID.randomUUID())
+                .status)
+        .isEqualTo(409);
+    // A crafted fresh ledger token cannot bypass the review's newly advanced version;
+    // the earlier stale draft conflicts without changing the transaction or review.
+    Resp forged =
+        owner.request(
+            "POST",
+            path + "/" + reviewId + "/resolve",
+            "{\"expectedVersion\":0,\"expectedTransactionVersion\":1,\"action\":\"ACCEPT_SUGGESTION\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(forged.status).isEqualTo(409);
+    assertThat(forged.json().path("code").asText()).isEqualTo("RESOURCE_VERSION_CONFLICT");
+    assertThat(
+            owner.get(transactionPath(household) + "/" + sourceId).json().path("category").isNull())
+        .isTrue();
+    // Direct patch supersedes stale review, and atomically propagates to retained refund.
+    assertThat(
+            owner.patchTransaction(
+                    household, sourceId, "{\"expectedVersion\":1,\"category\":\"ENTERTAINMENT\"}")
+                .status)
+        .isEqualTo(200);
+    assertThat(owner.get(path + "/" + reviewId).json().path("status").asText())
+        .isEqualTo("SUPERSEDED");
+    assertThat(
+            owner.get(transactionPath(household) + "/" + refundId).json().path("category").asText())
+        .isEqualTo("ENTERTAINMENT");
+    assertThat(owner.get(path).json().path("openCount").asInt()).isZero();
+
+    String next =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                entry(account, "EXPENSE", "-9.00", "BRL", "Spotify")));
+    String nextId = owner.get(path).json().path("items").get(0).path("id").asText();
+    UUID key = UUID.randomUUID();
+    String body =
+        "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"ACCEPT_SUGGESTION\"}";
+    Resp resolved =
+        owner.request("POST", path + "/" + nextId + "/resolve", body, owner.csrfToken, key);
+    assertThat(resolved.status).isEqualTo(200);
+    assertThat(resolved.json().path("status").asText()).isEqualTo("ACCEPTED");
+    assertThat(resolved.json().path("transaction").path("category").asText())
+        .isEqualTo("SUBSCRIPTIONS");
+    assertThat(resolved.json().path("transaction").path("version").asInt()).isEqualTo(1);
+    assertThat(
+            owner
+                .request("POST", path + "/" + nextId + "/resolve", body, owner.csrfToken, key)
+                .json()
+                .path("transaction")
+                .path("version")
+                .asInt())
+        .isEqualTo(1);
+    assertThat(
+            owner.request(
+                    "POST",
+                    path + "/" + nextId + "/resolve",
+                    "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"KEEP_UNCATEGORIZED\"}",
+                    owner.csrfToken,
+                    key)
+                .status)
+        .isEqualTo(409);
+    assertThat(owner.get(path + "?view=HISTORY").json().path("openCount").asInt()).isZero();
+    assertThat(owner.get(path + "?view=HISTORY").json().path("items").size()).isEqualTo(2);
+    assertThat(
+            owner
+                .get(transactionPath(household) + "/" + next + "/categorization")
+                .json()
+                .path("origin")
+                .asText())
+        .isEqualTo("USER");
+  }
+
+  @Test
+  void reviewChoicesKeepNullAndVoidCloseWithoutAssignment() throws Exception {
+    Agent owner = signedInAgent("review-choices");
+    String household = createHousehold(owner, "Review choices home");
+    String account =
+        createAccount(owner, household, UUID.randomUUID(), "Choices card", "CASH", "BRL");
+    String queue = "/api/households/" + household + "/categorization-reviews";
+    String first =
+        created(
+            owner.createTransaction(
+                household, UUID.randomUUID(), entry(account, "EXPENSE", "-3.00", "BRL", "Aldi")));
+    String firstReview = owner.get(queue).json().path("items").get(0).path("id").asText();
+    String keep =
+        "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,"
+            + "\"action\":\"KEEP_UNCATEGORIZED\"}";
+    assertThat(
+            owner
+                .request(
+                    "POST",
+                    queue + "/" + firstReview + "/resolve",
+                    keep,
+                    owner.csrfToken,
+                    UUID.randomUUID())
+                .json()
+                .path("status")
+                .asText())
+        .isEqualTo("KEPT");
+    assertThat(
+            owner
+                .get(transactionPath(household) + "/" + first + "/categorization")
+                .json()
+                .path("origin")
+                .asText())
+        .isEqualTo("USER");
+    assertThat(owner.get(transactionPath(household) + "/" + first).json().path("category").isNull())
+        .isTrue();
+
+    String choice =
+        created(
+            owner.createTransaction(
+                household, UUID.randomUUID(), entry(account, "EXPENSE", "-4.00", "BRL", "Uber")));
+    String choiceReview = owner.get(queue).json().path("items").get(0).path("id").asText();
+    assertThat(
+            owner
+                .request(
+                    "POST",
+                    queue + "/" + choiceReview + "/resolve",
+                    "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,"
+                        + "\"action\":\"CHOOSE_CATEGORY\",\"category\":\"TRAVEL\"}",
+                    owner.csrfToken,
+                    UUID.randomUUID())
+                .json()
+                .path("transaction")
+                .path("category")
+                .asText())
+        .isEqualTo("TRAVEL");
+    assertThat(
+            owner
+                .get(transactionPath(household) + "/" + choice + "/categorization")
+                .json()
+                .path("origin")
+                .asText())
+        .isEqualTo("USER");
+    String voided =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                entry(account, "EXPENSE", "-6.00", "BRL", "Spotify")));
+    String voidReview = owner.get(queue).json().path("items").get(0).path("id").asText();
+    assertThat(
+            owner.patchTransaction(
+                    household, voided, "{\"expectedVersion\":0,\"status\":\"VOIDED\"}")
+                .status)
+        .isEqualTo(200);
+    assertThat(owner.get(queue + "/" + voidReview).json().path("status").asText())
+        .isEqualTo("SUPERSEDED");
+    assertThat(owner.get(queue).json().path("openCount").asInt()).isZero();
+    assertThat(
+            owner.request(
+                    "POST",
+                    queue + "/" + voidReview + "/resolve",
+                    "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"ACCEPT_SUGGESTION\"}",
+                    owner.csrfToken,
+                    UUID.randomUUID())
+                .status)
+        .isEqualTo(409);
+  }
+
+  @Test
+  void reviewReplayRequiresCurrentMembershipEvenForItsOriginalOwner() throws Exception {
+    Agent householdOwner = signedInAgent("review-household-owner");
+    Agent member = signedInAgent("review-replay-member");
+    String household = createHousehold(householdOwner, "Retained review home");
+    addMember(household, member.userId(), "MEMBER");
+    String account =
+        createAccount(member, household, UUID.randomUUID(), "Member card", "CASH", "BRL");
+    created(
+        member.createTransaction(
+            household, UUID.randomUUID(), entry(account, "EXPENSE", "-11.00", "BRL", "Netflix")));
+    String path = "/api/households/" + household + "/categorization-reviews";
+    String review = member.get(path).json().path("items").get(0).path("id").asText();
+    UUID key = UUID.randomUUID();
+    String body =
+        "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"ACCEPT_SUGGESTION\"}";
+    assertThat(
+            member.request("POST", path + "/" + review + "/resolve", body, member.csrfToken, key)
+                .status)
+        .isEqualTo(200);
+    assertThat(
+            jdbc.update(
+                "DELETE FROM household_members WHERE household_id = ?::uuid"
+                    + " AND user_id = ?::uuid",
+                household,
+                member.userId()))
+        .isEqualTo(1);
+    assertThat(
+            member.request("POST", path + "/" + review + "/resolve", body, member.csrfToken, key)
+                .status)
+        .isEqualTo(404);
+    assertThat(householdOwner.get(path).json().path("items").size()).isZero();
+    addMember(household, member.userId(), "MEMBER");
+    Resp replay =
+        member.request("POST", path + "/" + review + "/resolve", body, member.csrfToken, key);
+    assertThat(replay.status).isEqualTo(200);
+    assertThat(replay.json().path("status").asText()).isEqualTo("ACCEPTED");
+    assertThat(replay.json().path("transaction").path("version").asInt()).isEqualTo(1);
+  }
+
+  @Test
+  void keepCurrentRecordsUserDecisionOnAutomatedCategoryWithoutApplyingSuggestion()
+      throws Exception {
+    Agent owner = signedInAgent("review-keep-current");
+    String household = createHousehold(owner, "Keep current home");
+    String account = createAccount(owner, household, UUID.randomUUID(), "Rule card", "CASH", "BRL");
+    String source =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                "{\"accountId\":\""
+                    + account
+                    + "\",\"kind\":\"EXPENSE\","
+                    + "\"money\":{\"amount\":\"-12.00\",\"currency\":\"BRL\"},"
+                    + "\"occurredOn\":\"2026-09-16\",\"description\":\"Corner Market\","
+                    + "\"category\":\"GROCERIES\"}"));
+    assertThat(
+            owner.request(
+                    "POST",
+                    transactionPath(household) + "/" + source + "/categorization-rule",
+                    "{\"expectedTransactionVersion\":0}",
+                    owner.csrfToken,
+                    UUID.randomUUID())
+                .status)
+        .isEqualTo(201);
+    String matched =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                entry(account, "EXPENSE", "-8.00", "BRL", "Corner Market")));
+    assertThat(
+            owner
+                .get(transactionPath(household) + "/" + matched + "/categorization")
+                .json()
+                .path("origin")
+                .asText())
+        .isEqualTo("OWNER_RULE");
+    String policy = "ai-seeded-test-v1";
+    String evaluatedEvidence =
+        HexFormat.of()
+            .formatHex(
+                MessageDigest.getInstance("SHA-256")
+                    .digest(
+                        ("EXPENSE\0Corner Market\0null\0" + policy)
+                            .getBytes(StandardCharsets.UTF_8)));
+    String review = UUID.randomUUID().toString();
+    // A later suggestion producer can coexist with a prior automated effective assignment.
+    // Seed only its persisted OPEN item; the route below is the real PostgreSQL HTTP use case.
+    assertThat(
+            jdbc.update(
+                "INSERT INTO categorization_reviews"
+                    + " (id, household_id, owner_user_id, transaction_id, suggested_category, source,"
+                    + " confidence, reason_code, policy_version, evidence_fingerprint,"
+                    + " evaluated_transaction_version, status, version, created_at, updated_at)"
+                    + " VALUES (?::uuid, ?::uuid, ?::uuid, ?::uuid, 'DINING', 'AI', 'LOW',"
+                    + " 'MODEL_SUGGESTION', ?, ?, 0, 'OPEN', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                review,
+                household,
+                owner.userId(),
+                matched,
+                policy,
+                evaluatedEvidence))
+        .isEqualTo(1);
+    String queue = "/api/households/" + household + "/categorization-reviews";
+    Resp invalidKeep =
+        owner.request(
+            "POST",
+            queue + "/" + review + "/resolve",
+            "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,"
+                + "\"action\":\"KEEP_UNCATEGORIZED\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(invalidKeep.status).isEqualTo(400);
+    assertThat(owner.get(queue + "/" + review).json().path("status").asText()).isEqualTo("OPEN");
+    assertThat(
+            owner.get(transactionPath(household) + "/" + matched).json().path("category").asText())
+        .isEqualTo("GROCERIES");
+    assertThat(owner.get(transactionPath(household) + "/" + matched).json().path("version").asInt())
+        .isZero();
+    Resp kept =
+        owner.request(
+            "POST",
+            queue + "/" + review + "/resolve",
+            "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"KEEP_CURRENT\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(kept.status).isEqualTo(200);
+    assertThat(kept.json().path("status").asText()).isEqualTo("KEPT");
+    assertThat(kept.json().path("version").asInt()).isEqualTo(1);
+    assertThat(kept.json().path("transaction").path("category").asText()).isEqualTo("GROCERIES");
+    assertThat(kept.json().path("transaction").path("version").asInt()).isEqualTo(1);
+    assertThat(
+            owner
+                .get(transactionPath(household) + "/" + matched + "/categorization")
+                .json()
+                .path("origin")
+                .asText())
+        .isEqualTo("USER");
+    assertThat(owner.get(queue).json().path("openCount").asInt()).isZero();
+  }
+
+  @Test
+  void sharingRebasesOpenReviewAndRefetchedVersionsResolve() throws Exception {
+    Agent owner = signedInAgent("review-share-rebase");
+    Agent member = signedInAgent("review-share-reader");
+    String household = createHousehold(owner, "Share rebase home");
+    addMember(household, member.userId(), "MEMBER");
+    String account =
+        createAccount(owner, household, UUID.randomUUID(), "Share card", "CASH", "BRL");
+    String transaction =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                entry(account, "EXPENSE", "-14.00", "BRL", "Trader Joe's")));
+    String queue = "/api/households/" + household + "/categorization-reviews";
+    String review = owner.get(queue).json().path("items").get(0).path("id").asText();
+    assertThat(
+            owner.patchTransaction(
+                    household, transaction, "{\"expectedVersion\":0,\"visibility\":\"HOUSEHOLD\"}")
+                .status)
+        .isEqualTo(200);
+    JsonNode refreshed = owner.get(queue + "/" + review).json();
+    assertThat(refreshed.path("status").asText()).isEqualTo("OPEN");
+    assertThat(refreshed.path("version").asInt()).isEqualTo(1);
+    assertThat(refreshed.path("evaluatedTransactionVersion").asInt()).isEqualTo(1);
+    assertThat(refreshed.path("transaction").path("version").asInt()).isEqualTo(1);
+    assertThat(
+            owner.request(
+                    "POST",
+                    queue + "/" + review + "/resolve",
+                    "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"ACCEPT_SUGGESTION\"}",
+                    owner.csrfToken,
+                    UUID.randomUUID())
+                .status)
+        .isEqualTo(409);
+    Resp accepted =
+        owner.request(
+            "POST",
+            queue + "/" + review + "/resolve",
+            "{\"expectedVersion\":1,\"expectedTransactionVersion\":1,\"action\":\"ACCEPT_SUGGESTION\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(accepted.status).isEqualTo(200);
+    assertThat(accepted.json().path("status").asText()).isEqualTo("ACCEPTED");
+    assertThat(accepted.json().path("version").asInt()).isEqualTo(2);
+    assertThat(accepted.json().path("transaction").path("version").asInt()).isEqualTo(2);
+    assertThat(accepted.json().path("transaction").path("category").asText())
+        .isEqualTo("GROCERIES");
+    assertThat(
+            member
+                .get(transactionPath(household) + "/" + transaction)
+                .json()
+                .path("category")
+                .asText())
+        .isEqualTo("GROCERIES");
+    assertThat(member.get(queue + "/" + review).status).isEqualTo(404);
+  }
+
+  @Test
+  void allocationAndRefundVersionBumpsKeepReviewActionableWithoutExtraLedgerBumps()
+      throws Exception {
+    Agent owner = signedInAgent("review-group-rebase");
+    Agent member = signedInAgent("review-group-member");
+    String household = createHousehold(owner, "Group rebase home");
+    addMember(household, member.userId(), "MEMBER");
+    String account =
+        createAccount(owner, household, UUID.randomUUID(), "Group card", "CASH", "BRL");
+    String expense =
+        created(
+            owner.createTransaction(
+                household, UUID.randomUUID(), entry(account, "EXPENSE", "-12.00", "BRL", "Aldi")));
+    String queue = "/api/households/" + household + "/categorization-reviews";
+    String review = owner.get(queue).json().path("items").get(0).path("id").asText();
+    assertThat(
+            owner.patchTransaction(
+                    household, expense, "{\"expectedVersion\":0,\"visibility\":\"HOUSEHOLD\"}")
+                .status)
+        .isEqualTo(200);
+    String allocation = transactionPath(household) + "/" + expense + "/allocation";
+    Resp allocated =
+        owner.request(
+            "POST",
+            allocation,
+            "{\"expectedVersion\":1,\"participantUserIds\":[\""
+                + owner.userId()
+                + "\",\""
+                + member.userId()
+                + "\"]}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(allocated.status).isEqualTo(201);
+    assertThat(owner.get(queue + "/" + review).json().path("version").asInt()).isEqualTo(2);
+    assertThat(
+            owner.request(
+                    "PATCH",
+                    allocation,
+                    "{\"expectedVersion\":2,\"status\":\"REVOKED\"}",
+                    owner.csrfToken,
+                    null)
+                .status)
+        .isEqualTo(200);
+    String refund =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                refundEntry(account, expense, "2.00", "2026-09-17", "Aldi return")));
+    JsonNode refreshed = owner.get(queue + "/" + review).json();
+    assertThat(refreshed.path("version").asInt()).isEqualTo(4);
+    assertThat(refreshed.path("evaluatedTransactionVersion").asInt()).isEqualTo(4);
+    assertThat(refreshed.path("transaction").path("version").asInt()).isEqualTo(4);
+    assertThat(
+            owner.request(
+                    "POST",
+                    queue + "/" + review + "/resolve",
+                    "{\"expectedVersion\":0,\"expectedTransactionVersion\":4,\"action\":\"ACCEPT_SUGGESTION\"}",
+                    owner.csrfToken,
+                    UUID.randomUUID())
+                .status)
+        .isEqualTo(409);
+    Resp resolved =
+        owner.request(
+            "POST",
+            queue + "/" + review + "/resolve",
+            "{\"expectedVersion\":4,\"expectedTransactionVersion\":4,\"action\":\"ACCEPT_SUGGESTION\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(resolved.status).isEqualTo(200);
+    assertThat(resolved.json().path("version").asInt()).isEqualTo(5);
+    assertThat(resolved.json().path("transaction").path("version").asInt()).isEqualTo(5);
+    assertThat(
+            owner.get(transactionPath(household) + "/" + refund).json().path("category").asText())
+        .isEqualTo("GROCERIES");
+  }
+
+  @Test
+  void descriptionChangesSupersedeOldEvidenceAndCoalesceNewCandidate() throws Exception {
+    Agent owner = signedInAgent("review-description");
+    String household = createHousehold(owner, "Evidence rebase home");
+    String account =
+        createAccount(owner, household, UUID.randomUUID(), "Evidence card", "CASH", "BRL");
+    String transaction =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                entry(account, "EXPENSE", "-8.00", "BRL", "Netflix")));
+    String queue = "/api/households/" + household + "/categorization-reviews";
+    String oldReview = owner.get(queue).json().path("items").get(0).path("id").asText();
+    assertThat(
+            owner.patchTransaction(
+                    household,
+                    transaction,
+                    "{\"expectedVersion\":0,\"description\":\"Netflix #19\"}")
+                .status)
+        .isEqualTo(200);
+    assertThat(owner.get(queue + "/" + oldReview).json().path("status").asText())
+        .isEqualTo("SUPERSEDED");
+    assertThat(owner.get(queue).json().path("openCount").asInt()).isZero();
+    assertThat(
+            owner.patchTransaction(
+                    household, transaction, "{\"expectedVersion\":1,\"description\":\"Spotify\"}")
+                .status)
+        .isEqualTo(200);
+    JsonNode newItem = owner.get(queue).json().path("items").get(0);
+    assertThat(newItem.path("id").asText()).isNotEqualTo(oldReview);
+    assertThat(newItem.path("suggestedCategory").asText()).isEqualTo("SUBSCRIPTIONS");
+    assertThat(newItem.path("evaluatedTransactionVersion").asInt()).isEqualTo(2);
+    assertThat(
+            owner.patchTransaction(
+                    household, transaction, "{\"expectedVersion\":2,\"description\":\"Spotify\"}")
+                .status)
+        .isEqualTo(200);
+    assertThat(owner.get(queue).json().path("items").get(0).path("id").asText())
+        .isEqualTo(newItem.path("id").asText());
+    assertThat(owner.get(queue).json().path("items").get(0).path("version").asInt()).isZero();
+    assertThat(
+            owner
+                .get(transactionPath(household) + "/" + transaction)
+                .json()
+                .path("category")
+                .isNull())
+        .isTrue();
   }
 
   /** Exact signed entry body; money is a string and defaults stay implicit. */

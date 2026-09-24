@@ -362,6 +362,125 @@ class CategorizationRuleSchemaIT {
     }
   }
 
+  @Test
+  void reviewsEnforceOneOpenOwnerReferenceAndDurableReplayKey() throws Exception {
+    runMigrations(null);
+    try (Connection connection = openConnection()) {
+      UUID owner = insertUser(connection);
+      UUID household = insertHousehold(connection, owner);
+      UUID entry =
+          insertTransaction(
+              connection, household, owner, insertAccount(connection, household, owner));
+      UUID other = insertUser(connection);
+      jdbcUpdate(
+          connection,
+          "INSERT INTO household_members (household_id, user_id, role) VALUES (?, ?, 'MEMBER')",
+          household,
+          other);
+      UUID otherEntry =
+          insertTransaction(
+              connection, household, other, insertAccount(connection, household, other));
+      UUID first = UUID.randomUUID();
+      String initial = reviewInsert(first, household, owner, entry, "OPEN", "a".repeat(64));
+      jdbcExecute(connection, initial);
+      assertThatThrownBy(
+              () ->
+                  jdbcExecute(
+                      openConnection(),
+                      reviewInsert(
+                          UUID.randomUUID(), household, owner, entry, "OPEN", "b".repeat(64))))
+          .isInstanceOf(Exception.class);
+      // A forged same-household owner reference cannot attach to a different owner's ledger.
+      assertThatThrownBy(
+              () ->
+                  jdbcExecute(
+                      openConnection(),
+                      reviewInsert(
+                          UUID.randomUUID(),
+                          household,
+                          owner,
+                          otherEntry,
+                          "ACCEPTED",
+                          "b".repeat(64))))
+          .isInstanceOf(Exception.class);
+      jdbcUpdate(
+          connection,
+          "UPDATE categorization_reviews SET status = 'SUPERSEDED', version = 1,"
+              + " updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          first);
+      jdbcExecute(
+          connection,
+          reviewInsert(UUID.randomUUID(), household, owner, entry, "OPEN", "b".repeat(64)));
+      // History cannot silently duplicate an evaluated evidence revision.
+      assertThatThrownBy(
+              () ->
+                  jdbcExecute(
+                      openConnection(),
+                      reviewInsert(
+                          UUID.randomUUID(),
+                          household,
+                          owner,
+                          entry,
+                          "SUPERSEDED",
+                          "a".repeat(64))))
+          .isInstanceOf(Exception.class);
+      assertThat(
+              queryString(
+                  connection,
+                  "SELECT count(*) FROM categorization_reviews WHERE"
+                      + " household_id = '"
+                      + household
+                      + "' AND owner_user_id = '"
+                      + owner
+                      + "' AND status = 'OPEN'"))
+          .isEqualTo("1");
+      UUID key = UUID.randomUUID();
+      jdbcUpdate(
+          connection,
+          "INSERT INTO categorization_review_idempotency_keys"
+              + " (actor_user_id, household_id, idempotency_key, request_fingerprint, review_id, created_at)"
+              + " VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+          owner,
+          household,
+          key,
+          "f".repeat(64),
+          first);
+      assertThatThrownBy(
+              () ->
+                  jdbcUpdate(
+                      openConnection(),
+                      "INSERT INTO categorization_review_idempotency_keys"
+                          + " (actor_user_id, household_id, idempotency_key, request_fingerprint, review_id, created_at)"
+                          + " VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                      owner,
+                      household,
+                      key,
+                      "e".repeat(64),
+                      first))
+          .isInstanceOf(Exception.class);
+    }
+  }
+
+  private static String reviewInsert(
+      UUID id, UUID household, UUID owner, UUID entry, String status, String fingerprint) {
+    return "INSERT INTO categorization_reviews (id, household_id, owner_user_id, transaction_id,"
+        + " suggested_category, source, confidence, reason_code, policy_version,"
+        + " evidence_fingerprint, evaluated_transaction_version, status, version, created_at, updated_at)"
+        + " VALUES ('"
+        + id
+        + "', '"
+        + household
+        + "', '"
+        + owner
+        + "', '"
+        + entry
+        + "', 'GROCERIES', 'HEURISTIC', 'HIGH', 'EXACT_MERCHANT', 'exact-merchant-v1', '"
+        + fingerprint
+        + "', 0, '"
+        + status
+        + "', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
+  }
+
   private static String ruleInsert(
       UUID householdId,
       UUID ownerId,

@@ -188,6 +188,27 @@ function syncStateLabel(connection: FinancialConnection): string | null {
 }
 
 /**
+ * The message a confirmation rejection deserves on the category control, or
+ * undefined when it belongs anywhere else. A rejection the server attributed
+ * to another field — or to any other code — is never shown here, and the
+ * fallback names no submitted token: a raw enum value never reaches prose.
+ */
+function categoryRejectionError(
+  apiError: ApiError,
+  submittedCategory: string,
+): string | undefined {
+  if (apiError.code !== 'VALIDATION_FAILED') return undefined;
+  const named = apiError.fieldErrors?.category;
+  if (named !== undefined && named.length > 0) return named;
+  // An unattributed rejection with no other field error can only be the
+  // category the owner chose from the bounded taxonomy; anything the server
+  // pinned elsewhere keeps its own handling.
+  if (submittedCategory.length === 0) return undefined;
+  if (Object.keys(apiError.fieldErrors ?? {}).length > 0) return undefined;
+  return 'That category could not be saved. Pick a category from the list and try again.';
+}
+
+/**
  * Reconciliation panel for one needs-review row. Everything shown
  * stays in this owner-only inbox: the ledger summary is the owner's own
  * entry and the bank revision never leaves this view. Resolution never
@@ -602,6 +623,11 @@ export function BankActivitySection({
     {},
   );
   const [confirmDraft, setConfirmDraft] = useState<ConfirmDraft | null>(null);
+  // A confirmation the server rejected on the category control: the message
+  // lives beside that select, and the typed draft stays open for correction.
+  const [confirmCategoryError, setConfirmCategoryError] = useState<
+    string | undefined
+  >(undefined);
   const [refundOptions, setRefundOptions] = useState<Transaction[] | null>(
     null,
   );
@@ -649,6 +675,7 @@ export function BankActivitySection({
   const replaceDraftsRef = useRef<Record<string, ReplaceDraft>>({});
   const noticeRef = useRef<HTMLDivElement>(null);
   const confirmHeadingRef = useRef<HTMLHeadingElement>(null);
+  const confirmCategoryRef = useRef<HTMLSelectElement>(null);
   const resolveHeadingRef = useRef<HTMLHeadingElement>(null);
   const replaceHeadingRef = useRef<HTMLHeadingElement>(null);
   const loadGenerationRef = useRef(0);
@@ -955,11 +982,15 @@ export function BankActivitySection({
     draftsRef.current[activity.id] = draft;
     draftEvidenceRef.current[activity.id] = evidence;
     setConfirmDraft(draft);
+    setConfirmCategoryError(undefined);
     setRefundOptions(null);
     setNotice(null);
   }
 
   function updateDraft(patch: Partial<ConfirmDraft>) {
+    // Every edit supersedes the last rejection, so a bound category error
+    // never lingers once the owner changes the draft.
+    setConfirmCategoryError(undefined);
     setConfirmDraft((currentDraft) => {
       if (!currentDraft) return currentDraft;
       const next = { ...currentDraft, ...patch };
@@ -995,6 +1026,11 @@ export function BankActivitySection({
     } finally {
       ownedRef.current.delete(controller);
     }
+  }
+
+  function closeConfirm() {
+    setConfirmCategoryError(undefined);
+    setConfirmDraft(null);
   }
 
   async function submitConfirm() {
@@ -1040,6 +1076,7 @@ export function BankActivitySection({
       if (!current(generation)) return;
       delete draftsRef.current[draft.activityId];
       delete draftEvidenceRef.current[draft.activityId];
+      setConfirmCategoryError(undefined);
       setConfirmDraft(null);
       applyDecision(decision);
       showNotice(
@@ -1055,6 +1092,28 @@ export function BankActivitySection({
       if (error instanceof ApiError) {
         if (handleAuthFailure(error, generation)) return;
         if (staleDecisionRecovery(error, draft.activityId)) return;
+        const categoryError = categoryRejectionError(error, draft.category);
+        if (categoryError !== undefined) {
+          // Bind the rejection to the control the owner must correct: the
+          // draft stays open with every typed value, and focus returns to
+          // the category select instead of the section notice.
+          setConfirmCategoryError(categoryError);
+          showNotice(
+            'error',
+            'Check the highlighted category.',
+            error.correlationId,
+          );
+          // The notice and the field both re-render after this failure; two
+          // frames place focus on the control that needs correction, after
+          // the notice's own announcement focus.
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              if (unmountedRef.current) return;
+              confirmCategoryRef.current?.focus();
+            }),
+          );
+          return;
+        }
         showNotice(
           'error',
           error.message || 'That bank activity could not be confirmed.',
@@ -2121,22 +2180,40 @@ export function BankActivitySection({
                     />
                   </label>
                   {categories.length > 0 && (
-                    <label>
-                      Category
-                      <select
-                        value={confirmDraft.category}
-                        onChange={(event) =>
-                          updateDraft({ category: event.target.value })
-                        }
-                      >
-                        <option value="">Uncategorized</option>
-                        {categories.map((category) => (
-                          <option key={category.code} value={category.code}>
-                            {category.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    <>
+                      <label>
+                        Category
+                        <select
+                          ref={confirmCategoryRef}
+                          value={confirmDraft.category}
+                          aria-invalid={Boolean(confirmCategoryError)}
+                          aria-describedby={
+                            confirmCategoryError
+                              ? `confirm-category-error-${activity.id}`
+                              : undefined
+                          }
+                          onChange={(event) =>
+                            updateDraft({ category: event.target.value })
+                          }
+                        >
+                          <option value="">Uncategorized</option>
+                          {categories.map((category) => (
+                            <option key={category.code} value={category.code}>
+                              {category.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {confirmCategoryError && (
+                        <p
+                          id={`confirm-category-error-${activity.id}`}
+                          className="household-error"
+                          role="alert"
+                        >
+                          {confirmCategoryError}
+                        </p>
+                      )}
+                    </>
                   )}
                   {confirmDraft.kind === 'REFUND' && (
                     <>
@@ -2196,7 +2273,7 @@ export function BankActivitySection({
                       type="button"
                       className="household-button household-button--secondary"
                       disabled={decisionBusy}
-                      onClick={() => setConfirmDraft(null)}
+                      onClick={closeConfirm}
                     >
                       Cancel
                     </button>

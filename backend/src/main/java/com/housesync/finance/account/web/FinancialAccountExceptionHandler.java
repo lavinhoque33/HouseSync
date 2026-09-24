@@ -4,6 +4,8 @@ import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAcc
 import com.housesync.finance.account.web.FinancialAccountExceptions.IdempotencyConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionConflictException;
 import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVersionExhaustedException;
+import com.housesync.finance.categorization.web.CategorizationReviewNotFoundException;
+import com.housesync.finance.categorization.web.CategorizationReviewVersionConflictException;
 import com.housesync.finance.categorization.web.CategorizationRuleExceptions.CategoryRuleConflictException;
 import com.housesync.finance.categorization.web.CategorizationRuleExceptions.RuleIdempotencyConflictException;
 import com.housesync.finance.categorization.web.CategorizationRuleExceptions.RuleNotFoundException;
@@ -404,6 +406,27 @@ public class FinancialAccountExceptionHandler {
         HttpStatus.NOT_FOUND,
         ErrorCodes.BANK_ACTIVITY_NOT_FOUND,
         "Bank activity was not found.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(CategorizationReviewNotFoundException.class)
+  public ResponseEntity<ApiError> reviewNotFound(CategorizationReviewNotFoundException failure) {
+    return error(
+        HttpStatus.NOT_FOUND,
+        ErrorCodes.CATEGORY_REVIEW_NOT_FOUND,
+        "Categorization review was not found.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(CategorizationReviewVersionConflictException.class)
+  public ResponseEntity<ApiError> reviewVersionConflict(
+      CategorizationReviewVersionConflictException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RESOURCE_VERSION_CONFLICT,
+        "The categorization review changed. Refresh it before deciding.",
         null,
         failure);
   }

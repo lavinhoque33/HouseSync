@@ -379,6 +379,289 @@ class ConnectedFinanceCategorizationRuleIT extends ConnectedFinanceITSupport {
         .isEqualByComparingTo("-12.34");
   }
 
+  @Test
+  void connectedReviewCoalescesEvidenceChangesWithoutReopeningBankReconciliation()
+      throws Exception {
+    Agent owner = signedInAgent("review-evidence");
+    String household = createHousehold(owner, "Review evidence home");
+    ConnectedLink link = linkAndSelect(owner, household, true, false);
+    PlaidAdapter.ProviderTransaction first =
+        categorizedTransaction(
+            link, "tx-review-1", "12.34", "2026-09-12", "Netflix", "merchant-1", null, null);
+    importPage(owner, household, link, List.of(first));
+    String observation =
+        findItem(
+                owner.get("/api/households/" + household + "/bank-activity").json(),
+                item -> "POSTED".equals(item.path("state").asText()))
+            .path("id")
+            .asText();
+    Resp confirmed =
+        owner.request(
+            "POST",
+            "/api/households/" + household + "/bank-activity/" + observation + "/confirm",
+            "{\"expectedVersion\":0,\"kind\":\"EXPENSE\",\"description\":\"Netflix\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(confirmed.status()).isEqualTo(201);
+    String transaction = confirmed.json().path("transactionId").asText();
+    String queue = "/api/households/" + household + "/categorization-reviews";
+    String review = owner.get(queue).json().path("items").get(0).path("id").asText();
+    assertThat(owner.get(queue).json().path("openCount").asInt()).isEqualTo(1);
+    assertThat(category(transaction)).isNull();
+    assertThat(origin(transaction)).isEqualTo("NONE");
+    importPage(owner, household, link, List.of(first));
+    assertThat(owner.get(queue).json().path("items").get(0).path("id").asText()).isEqualTo(review);
+    PlaidAdapter.ProviderTransaction changed =
+        categorizedTransaction(
+            link, "tx-review-1", "12.34", "2026-09-12", "Netflix", "merchant-2", null, null);
+    importPage(owner, household, link, List.of(changed));
+    JsonNode current = owner.get(queue).json().path("items").get(0);
+    assertThat(current.path("id").asText()).isNotEqualTo(review);
+    assertThat(current.path("suggestedCategory").asText()).isEqualTo("SUBSCRIPTIONS");
+    assertThat(owner.get(queue + "/" + review).json().path("status").asText())
+        .isEqualTo("SUPERSEDED");
+    assertThat(owner.get(queue).json().path("openCount").asInt()).isEqualTo(1);
+    assertThat(observationJson(owner, household, observation).path("changeState").isNull())
+        .isTrue();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT version FROM financial_transactions WHERE id = ?::uuid",
+                Integer.class,
+                transaction))
+        .isZero();
+    assertThat(category(transaction)).isNull();
+    // USER correction closes the newest item; later provider-only evidence cannot reopen it.
+    Resp corrected =
+        owner.request(
+            "PATCH",
+            "/api/households/" + household + "/transactions/" + transaction,
+            "{\"expectedVersion\":0,\"category\":\"ENTERTAINMENT\"}",
+            owner.csrfToken,
+            null);
+    assertThat(corrected.status()).isEqualTo(200);
+    importPage(
+        owner,
+        household,
+        link,
+        List.of(
+            categorizedTransaction(
+                link, "tx-review-1", "12.34", "2026-09-12", "Netflix", "merchant-3", null, null)));
+    assertThat(owner.get(queue).json().path("openCount").asInt()).isZero();
+    assertThat(category(transaction)).isEqualTo("ENTERTAINMENT");
+    assertThat(origin(transaction)).isEqualTo("USER");
+  }
+
+  @Test
+  void resolutionRejectsCurrentObservationEvidenceDriftEvenWithoutLedgerVersionChange()
+      throws Exception {
+    Agent owner = signedInAgent("review-drift");
+    String household = createHousehold(owner, "Review drift home");
+    ConnectedLink link = linkAndSelect(owner, household, true, false);
+    importPage(
+        owner,
+        household,
+        link,
+        List.of(
+            categorizedTransaction(
+                link,
+                "tx-review-drift",
+                "12.34",
+                "2026-09-12",
+                "Netflix",
+                "merchant-original",
+                null,
+                null)));
+    String observation =
+        findItem(
+                owner.get("/api/households/" + household + "/bank-activity").json(),
+                item -> "POSTED".equals(item.path("state").asText()))
+            .path("id")
+            .asText();
+    Resp confirmed =
+        owner.request(
+            "POST",
+            "/api/households/" + household + "/bank-activity/" + observation + "/confirm",
+            "{\"expectedVersion\":0,\"kind\":\"EXPENSE\",\"description\":\"Netflix\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(confirmed.status()).isEqualTo(201);
+    String transaction = confirmed.json().path("transactionId").asText();
+    String queue = "/api/households/" + household + "/categorization-reviews";
+    String review = owner.get(queue).json().path("items").get(0).path("id").asText();
+    // A real PostgreSQL metadata update outside the suggestion callback models an interrupted
+    // or delayed sync. The ledger/review versions are unchanged: evidence alone must reject it.
+    String priorEvidence =
+        jdbc.queryForObject(
+            "SELECT categorization_evidence_fingerprint FROM connection_observations"
+                + " WHERE id = ?::uuid",
+            String.class,
+            observation);
+    assertThat(priorEvidence).isNotNull();
+    assertThat(
+            jdbc.update(
+                "UPDATE connection_observations"
+                    + " SET categorization_evidence_fingerprint = ? WHERE id = ?::uuid",
+                "f".repeat(64),
+                observation))
+        .isEqualTo(1);
+    Resp rejected =
+        owner.request(
+            "POST",
+            queue + "/" + review + "/resolve",
+            "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"ACCEPT_SUGGESTION\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(rejected.status()).isEqualTo(409);
+    assertThat(rejected.json().path("code").asText()).isEqualTo("RESOURCE_VERSION_CONFLICT");
+    assertThat(owner.get(queue + "/" + review).json().path("status").asText()).isEqualTo("OPEN");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT version FROM financial_transactions WHERE id = ?::uuid",
+                Integer.class,
+                transaction))
+        .isZero();
+    assertThat(category(transaction)).isNull();
+    assertThat(origin(transaction)).isEqualTo("NONE");
+    // Once the current evidence agrees again, the original decision remains recoverable.
+    assertThat(
+            jdbc.update(
+                "UPDATE connection_observations"
+                    + " SET categorization_evidence_fingerprint = ? WHERE id = ?::uuid",
+                priorEvidence,
+                observation))
+        .isEqualTo(1);
+    Resp resolved =
+        owner.request(
+            "POST",
+            queue + "/" + review + "/resolve",
+            "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"ACCEPT_SUGGESTION\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(resolved.status()).isEqualTo(200);
+    assertThat(category(transaction)).isEqualTo("SUBSCRIPTIONS");
+  }
+
+  @Test
+  void removedAdmittedObservationClosesReviewWithoutRewritingLedgerOrBankDecision()
+      throws Exception {
+    Agent owner = signedInAgent("review-removed");
+    String household = createHousehold(owner, "Removed review home");
+    ConnectedLink link = linkAndSelect(owner, household, true, false);
+    importPage(
+        owner,
+        household,
+        link,
+        List.of(
+            categorizedTransaction(
+                link,
+                "tx-review-removed",
+                "12.34",
+                "2026-09-12",
+                "Netflix",
+                "merchant-before",
+                null,
+                null)));
+    String observation =
+        findItem(
+                owner.get("/api/households/" + household + "/bank-activity").json(),
+                item -> "POSTED".equals(item.path("state").asText()))
+            .path("id")
+            .asText();
+    Resp confirmed =
+        owner.request(
+            "POST",
+            "/api/households/" + household + "/bank-activity/" + observation + "/confirm",
+            "{\"expectedVersion\":0,\"kind\":\"EXPENSE\",\"description\":\"Netflix\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(confirmed.status()).isEqualTo(201);
+    String transaction = confirmed.json().path("transactionId").asText();
+    String queue = "/api/households/" + household + "/categorization-reviews";
+    String review = owner.get(queue).json().path("items").get(0).path("id").asText();
+    assertThat(owner.get(queue).json().path("openCount").asInt()).isEqualTo(1);
+
+    fake.enqueueSyncPage(
+        link.accessToken(),
+        new PlaidAdapter.SyncPage(
+            List.of(),
+            List.of("tx-review-removed"),
+            "cursor-removed-" + UUID.randomUUID(),
+            false,
+            true));
+    demandAndProcess(link);
+    JsonNode closed = owner.get(queue + "/" + review).json();
+    assertThat(closed.path("status").asText()).isEqualTo("SUPERSEDED");
+    assertThat(closed.path("version").asInt()).isEqualTo(1);
+    assertThat(owner.get(queue).json().path("openCount").asInt()).isZero();
+    assertThat(category(transaction)).isNull();
+    assertThat(origin(transaction)).isEqualTo("NONE");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT version FROM financial_transactions WHERE id = ?::uuid",
+                Integer.class,
+                transaction))
+        .isZero();
+    assertThat(
+            owner
+                .request(
+                    "POST",
+                    queue + "/" + review + "/resolve",
+                    "{\"expectedVersion\":0,\"expectedTransactionVersion\":0,\"action\":\"ACCEPT_SUGGESTION\"}",
+                    owner.csrfToken,
+                    UUID.randomUUID())
+                .status())
+        .isEqualTo(409);
+
+    // The same removal delta is idempotent for both bank and categorization review state.
+    fake.enqueueSyncPage(
+        link.accessToken(),
+        new PlaidAdapter.SyncPage(
+            List.of(),
+            List.of("tx-review-removed"),
+            "cursor-replayed-removal-" + UUID.randomUUID(),
+            false,
+            true));
+    demandAndProcess(link);
+    assertThat(owner.get(queue + "/" + review).json().path("version").asInt()).isEqualTo(1);
+    assertThat(owner.get(queue).json().path("openCount").asInt()).isZero();
+
+    Resp kept =
+        owner.request(
+            "POST",
+            "/api/households/" + household + "/bank-activity/" + observation + "/resolve",
+            "{\"expectedVersion\":2,\"expectedLedgerVersion\":0,\"action\":\"KEEP_LEDGER\"}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(kept.status()).isEqualTo(200);
+    assertThat(category(transaction)).isNull();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT version FROM financial_transactions WHERE id = ?::uuid",
+                Integer.class,
+                transaction))
+        .isZero();
+
+    importPage(
+        owner,
+        household,
+        link,
+        List.of(
+            categorizedTransaction(
+                link,
+                "tx-review-removed",
+                "12.34",
+                "2026-09-12",
+                "Netflix",
+                "merchant-after",
+                null,
+                null)));
+    JsonNode successor = owner.get(queue).json().path("items").get(0);
+    assertThat(successor.path("id").asText()).isNotEqualTo(review);
+    assertThat(successor.path("suggestedCategory").asText()).isEqualTo("SUBSCRIPTIONS");
+    assertThat(owner.get(queue).json().path("openCount").asInt()).isEqualTo(1);
+    assertThat(category(transaction)).isNull();
+  }
+
   private String category(String transactionId) {
     return jdbc.queryForObject(
         "SELECT category FROM financial_transactions WHERE id = ?::uuid",

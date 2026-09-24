@@ -26,6 +26,28 @@ const LEDGER_ID = '55555555-5555-4555-8555-555555555555';
 const NEEDS_REVIEW_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const LOCAL_ACCOUNT_ID = '44444444-4444-4444-8444-444444444444';
 
+// The bounded taxonomy the confirm form renders: the documented 16 tokens with
+// their server-returned labels, so the category control exists for a test that
+// opts into it.
+const CATEGORY_ITEMS = [
+  { code: 'HOUSING', label: 'Housing' },
+  { code: 'GROCERIES', label: 'Food shopping' },
+  { code: 'DINING', label: 'Dining' },
+  { code: 'UTILITIES', label: 'Utilities' },
+  { code: 'TRANSPORTATION', label: 'Transportation' },
+  { code: 'SHOPPING', label: 'Shopping' },
+  { code: 'ENTERTAINMENT', label: 'Entertainment' },
+  { code: 'HEALTHCARE', label: 'Healthcare' },
+  { code: 'TRAVEL', label: 'Travel' },
+  { code: 'EDUCATION', label: 'Education' },
+  { code: 'PERSONAL', label: 'Personal' },
+  { code: 'HOUSEHOLD_SUPPLIES', label: 'Household supplies' },
+  { code: 'SUBSCRIPTIONS', label: 'Subscriptions' },
+  { code: 'INCOME', label: 'Income' },
+  { code: 'TRANSFERS', label: 'Transfers' },
+  { code: 'MISCELLANEOUS', label: 'Miscellaneous' },
+];
+
 function jsonResponse(body: unknown, status = 200) {
   return Response.json(body, { status });
 }
@@ -109,8 +131,10 @@ interface Harness {
   setBankActivityGate: (gate: Promise<void> | null) => void;
   setLedgerTransaction: (transaction: unknown | null) => void;
   setAllocation: (allocation: unknown | null) => void;
+  setCategories: (items: unknown[]) => void;
   failNextResolveWith: (code: string, status?: number) => void;
   failNextConfirmWith: (code: string, status?: number) => void;
+  failNextConfirmValidation: (fieldErrors: Record<string, string>) => void;
   failNextDismissWith: (code: string, status?: number) => void;
 }
 
@@ -123,8 +147,15 @@ function stubFetch(): Harness {
   let ledgerDetail: unknown | null = ledgerTransaction();
   let allocationDetail: unknown | null = null;
   let nextResolveFailure: { code: string; status: number } | null = null;
-  let nextConfirmFailure: { code: string; status: number } | null = null;
+  let nextConfirmFailure: {
+    body: Record<string, unknown>;
+    status: number;
+  } | null = null;
   let nextDismissFailure: { code: string; status: number } | null = null;
+  // The taxonomy is optional enrichment for the confirm form: absent here
+  // means the endpoint fails, so only a test that opts in renders the
+  // category control.
+  let categoryItems: unknown[] | null = null;
   let nextSyncState = 'IDLE';
   let nextHistoryReady = true;
   let bankActivityGate: Promise<void> | null = null;
@@ -217,10 +248,7 @@ function stubFetch(): Harness {
         if (url.endsWith('/confirm') && nextConfirmFailure) {
           const failure = nextConfirmFailure;
           nextConfirmFailure = null;
-          return jsonResponse(
-            { code: failure.code, message: 'Conflict.' },
-            failure.status,
-          );
+          return jsonResponse(failure.body, failure.status);
         }
         if (url.endsWith('/dismiss') && nextDismissFailure) {
           const failure = nextDismissFailure;
@@ -328,7 +356,10 @@ function stubFetch(): Harness {
         });
       }
       if (url.startsWith(`${base}/transaction-categories`)) {
-        return jsonResponse({ code: 'UNKNOWN_ERROR' }, 500);
+        if (categoryItems === null) {
+          return jsonResponse({ code: 'UNKNOWN_ERROR' }, 500);
+        }
+        return jsonResponse({ items: categoryItems });
       }
       if (url.includes('/financial-connections/') && url.endsWith('/sync')) {
         if (syncRateLimited) {
@@ -430,11 +461,25 @@ function stubFetch(): Harness {
     setAllocation: (next) => {
       allocationDetail = next;
     },
+    setCategories: (next) => {
+      categoryItems = next;
+    },
     failNextResolveWith: (code, status = 409) => {
       nextResolveFailure = { code, status };
     },
     failNextConfirmWith: (code, status = 409) => {
-      nextConfirmFailure = { code, status };
+      nextConfirmFailure = { body: { code, message: 'Conflict.' }, status };
+    },
+    failNextConfirmValidation: (fieldErrors) => {
+      nextConfirmFailure = {
+        body: {
+          code: 'VALIDATION_FAILED',
+          message: 'Check the highlighted fields.',
+          correlationId: 'corr-confirm-category',
+          fieldErrors,
+        },
+        status: 400,
+      };
     },
     failNextDismissWith: (code, status = 409) => {
       nextDismissFailure = { code, status };
@@ -446,9 +491,16 @@ function renderSection(
   options: {
     refreshSignal?: number;
     onLedgerChanged?: () => void;
+    /**
+     * The taxonomy the section loads once on mount, so the confirm form
+     * renders its category control. Omitted keeps the documented failure:
+     * the inbox renders without categories.
+     */
+    categories?: unknown[];
   } = {},
 ) {
   const harness = stubFetch();
+  if (options.categories) harness.setCategories(options.categories);
   const onCsrfRefreshed = vi.fn();
   const onSessionExpired = vi.fn();
   const onHouseholdAccessChanged = vi.fn();
@@ -490,6 +542,13 @@ async function findItemByAmount(amount: string): Promise<HTMLElement> {
     if (item.textContent?.includes(amount)) return item;
   }
   throw new Error(`no bank activity item for ${amount}`);
+}
+
+function idempotencyKeyOf(
+  call: { init?: RequestInit | undefined } | undefined,
+): string | undefined {
+  const headers = call?.init?.headers as Record<string, string> | undefined;
+  return headers?.['Idempotency-Key'];
 }
 
 beforeEach(() => {
@@ -677,7 +736,169 @@ describe('BankActivitySection', () => {
         description: 'Typed coffee',
         category: null,
       });
+      // Durable same-key retry intent: the refetched version travels under
+      // the draft's original key, so an answer lost in flight replays
+      // instead of admitting the entry twice.
+      expect(idempotencyKeyOf(confirms[0])).toEqual(expect.any(String));
+      expect(idempotencyKeyOf(confirms[1])).toBe(idempotencyKeyOf(confirms[0]));
     });
+  });
+
+  it('binds a rejected confirmation category to the control and keeps the draft', async () => {
+    const { harness } = renderSection({ categories: CATEGORY_ITEMS });
+    const posted = await findItemByAmount('-12.34');
+    fireEvent.click(
+      within(posted).getByRole('button', { name: /^Confirm bank activity/ }),
+    );
+    const form = await screen.findByRole('group', { name: /to your ledger/ });
+    fireEvent.change(within(form).getByLabelText('Description'), {
+      target: { value: 'Coffee Shop edited' },
+    });
+    fireEvent.change(within(form).getByLabelText('Category'), {
+      target: { value: 'DINING' },
+    });
+
+    harness.failNextConfirmValidation({
+      category: 'That category is not accepted.',
+    });
+    fireEvent.click(
+      within(form).getByRole('button', { name: 'Add to ledger' }),
+    );
+
+    // The server's field message is bound to the control it names instead of
+    // living only in a section-level notice that points at no field.
+    const inlineError = await screen.findByText(
+      'That category is not accepted.',
+    );
+    const select = within(form).getByLabelText('Category');
+    expect(select).toHaveAttribute('aria-invalid', 'true');
+    expect(select.getAttribute('aria-describedby')).toBe(inlineError.id);
+    // The typed draft stays open with every value the owner entered.
+    expect(select).toHaveValue('DINING');
+    expect(within(form).getByLabelText('Description')).toHaveValue(
+      'Coffee Shop edited',
+    );
+    expect(
+      screen.getByText('Reference: corr-confirm-category'),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(select).toHaveFocus());
+    // Nothing was admitted: the row is still awaiting confirmation.
+    expect(
+      within(await findItemByAmount('-12.34')).getByRole('button', {
+        name: /^Confirm bank activity/,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it('clears the bound confirmation category error once another category is chosen', async () => {
+    const { harness } = renderSection({ categories: CATEGORY_ITEMS });
+    const posted = await findItemByAmount('-12.34');
+    fireEvent.click(
+      within(posted).getByRole('button', { name: /^Confirm bank activity/ }),
+    );
+    const form = await screen.findByRole('group', { name: /to your ledger/ });
+    fireEvent.change(within(form).getByLabelText('Category'), {
+      target: { value: 'DINING' },
+    });
+    harness.failNextConfirmValidation({
+      category: 'That category is not accepted.',
+    });
+    fireEvent.click(
+      within(form).getByRole('button', { name: 'Add to ledger' }),
+    );
+    expect(
+      await screen.findByText('That category is not accepted.'),
+    ).toBeInTheDocument();
+
+    // Choosing again supersedes the rejection, so the stale message never
+    // lingers beside a value the server has not seen yet.
+    const select = within(form).getByLabelText('Category');
+    fireEvent.change(select, { target: { value: 'GROCERIES' } });
+    expect(screen.queryByText('That category is not accepted.')).toBeNull();
+    expect(select).toHaveAttribute('aria-invalid', 'false');
+    expect(select).not.toHaveAttribute('aria-describedby');
+
+    // The corrected choice is what the retry sends, under the draft's key.
+    fireEvent.click(
+      within(form).getByRole('button', { name: 'Add to ledger' }),
+    );
+    await waitFor(() => {
+      const confirms = harness.calls.filter((call) =>
+        call.url.endsWith(`/bank-activity/${POSTED_ID}/confirm`),
+      );
+      expect(confirms).toHaveLength(2);
+      expect(JSON.parse(String(confirms[1]?.init?.body))).toEqual({
+        expectedVersion: 0,
+        kind: 'EXPENSE',
+        description: 'Coffee Shop',
+        category: 'GROCERIES',
+      });
+      expect(idempotencyKeyOf(confirms[1])).toBe(idempotencyKeyOf(confirms[0]));
+    });
+    expect(
+      await screen.findByText(/Added to your private ledger/),
+    ).toBeInTheDocument();
+  });
+
+  it('binds an unattributed category rejection without echoing the token', async () => {
+    const { harness } = renderSection({ categories: CATEGORY_ITEMS });
+    const posted = await findItemByAmount('-12.34');
+    fireEvent.click(
+      within(posted).getByRole('button', { name: /^Confirm bank activity/ }),
+    );
+    const form = await screen.findByRole('group', { name: /to your ledger/ });
+    fireEvent.change(within(form).getByLabelText('Category'), {
+      target: { value: 'DINING' },
+    });
+
+    // A rejection that names no field, arriving while the draft carries a
+    // category from the bounded taxonomy, can only be about that choice.
+    harness.failNextConfirmValidation({});
+    fireEvent.click(
+      within(form).getByRole('button', { name: 'Add to ledger' }),
+    );
+
+    const message = await screen.findByText(
+      'That category could not be saved. Pick a category from the list and try again.',
+    );
+    const select = within(form).getByLabelText('Category');
+    expect(select.getAttribute('aria-describedby')).toBe(message.id);
+    expect(select).toHaveValue('DINING');
+    await waitFor(() => expect(select).toHaveFocus());
+  });
+
+  it('keeps a rejection the server pinned to another field off the category control', async () => {
+    const { harness } = renderSection({ categories: CATEGORY_ITEMS });
+    const posted = await findItemByAmount('-12.34');
+    fireEvent.click(
+      within(posted).getByRole('button', { name: /^Confirm bank activity/ }),
+    );
+    const form = await screen.findByRole('group', { name: /to your ledger/ });
+    fireEvent.change(within(form).getByLabelText('Category'), {
+      target: { value: 'DINING' },
+    });
+
+    harness.failNextConfirmValidation({
+      description: 'That description is not accepted.',
+    });
+    fireEvent.click(
+      within(form).getByRole('button', { name: 'Add to ledger' }),
+    );
+
+    // The existing path is untouched: the section notice carries the server
+    // message and the category control claims nothing it was not told.
+    expect(
+      await screen.findByText('Check the highlighted fields.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        'That category could not be saved. Pick a category from the list and try again.',
+      ),
+    ).toBeNull();
+    expect(within(form).getByLabelText('Category')).toHaveAttribute(
+      'aria-invalid',
+      'false',
+    );
   });
 
   it('refetches after a stale dismiss so the retry uses the current version', async () => {

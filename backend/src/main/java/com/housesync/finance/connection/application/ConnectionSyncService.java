@@ -4,6 +4,7 @@ import com.housesync.finance.account.web.FinancialAccountExceptions.ResourceVers
 import com.housesync.finance.activity.domain.ObservationNormalizer;
 import com.housesync.finance.activity.persistence.ConnectionObservationEntity;
 import com.housesync.finance.activity.persistence.ConnectionObservationRepository;
+import com.housesync.finance.categorization.application.CategorizationReviewService;
 import com.housesync.finance.connection.config.ConnectedFinanceProperties;
 import com.housesync.finance.connection.crypto.ConnectionCrypto;
 import com.housesync.finance.connection.persistence.ConnectionAccountMappingEntity;
@@ -76,6 +77,12 @@ public class ConnectionSyncService extends ConnectedFinanceBase {
   private final RevocationRetryPolicy retryPolicy;
   private final ConnectionLinkAttemptRepository attempts;
   private final String workerOwnerId;
+  private CategorizationReviewService categorizationReviews;
+
+  @Autowired
+  void setCategorizationReviews(CategorizationReviewService reviews) {
+    this.categorizationReviews = reviews;
+  }
 
   private final Semaphore globalPermits = new Semaphore(2);
   private final Set<UUID> inFlightConnections = ConcurrentHashMap.newKeySet();
@@ -676,6 +683,10 @@ public class ConnectionSyncService extends ConnectedFinanceBase {
                 now));
       } else if (!"REMOVED".equals(existing.getState())) {
         existing.removed(now);
+        if (categorizationReviews != null) {
+          categorizationReviews.observationBecameIneligible(
+              connection.getHouseholdId(), connection.getOwnerUserId(), existing.getId());
+        }
       }
       return;
     }
@@ -735,6 +746,8 @@ public class ConnectionSyncService extends ConnectedFinanceBase {
               delta.getCategorizationEvidenceFingerprint(),
               now));
     } else {
+      String previousEvidence = existing.getCategorizationEvidenceFingerprint();
+      boolean wasPosted = "POSTED".equals(existing.getState());
       boolean materialChange =
           !Objects.equals(existing.getProviderRevision(), delta.getProviderRevision())
               || !existing.getState().equals(delta.getState());
@@ -756,6 +769,23 @@ public class ConnectionSyncService extends ConnectedFinanceBase {
           delta.getCategorizationEvidenceFingerprint(),
           materialChange,
           now);
+      if (categorizationReviews != null
+          && "POSTED".equals(existing.getState())
+          && (!wasPosted
+              || !Objects.equals(previousEvidence, delta.getCategorizationEvidenceFingerprint()))) {
+        categorizationReviews.changedObservationEvidence(
+            connection.getHouseholdId(),
+            connection.getOwnerUserId(),
+            existing.getId(),
+            delta.getCategorizationEvidenceFingerprint(),
+            delta.getProviderMerchantIdentityDigest(),
+            delta.getPfcPrimaryCode(),
+            delta.getPfcDetailCode());
+      }
+      if (categorizationReviews != null && wasPosted && !"POSTED".equals(existing.getState())) {
+        categorizationReviews.observationBecameIneligible(
+            connection.getHouseholdId(), connection.getOwnerUserId(), existing.getId());
+      }
     }
     // Explicit pending predecessor only: no heuristic matching when the provider omits it.
     if (delta.getPendingPredecessorDigest() != null) {

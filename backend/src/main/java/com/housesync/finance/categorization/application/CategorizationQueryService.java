@@ -20,28 +20,29 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>The seventh field, {@code ruleEligible}, reports whether the owner may explicitly
  * learn an exact rule from this entry right now. It is evaluated live for the current actor and
  * transaction — posted non-refund USER origin with a non-null category, a safe server-derived match
- * key, and no active rule for that key — and the derived key itself never leaves the server.
+ * key, and no active rule for that key — and the derived key itself never leaves the server. The
+ * review state reflects a current owner-scoped OPEN review without exposing its candidate here.
  */
 @Service
 public class CategorizationQueryService {
-
-  /** No review queue exists yet, so no transaction can ever be open for review. */
-  private static final String REVIEW_STATE_NONE = "NONE";
 
   private final FinancialTransactionRepository transactions;
   private final HouseholdService households;
   private final CategorizationRuleService rules;
   private final BankActivityService bankActivity;
+  private final CategorizationReviewService reviews;
 
   public CategorizationQueryService(
       FinancialTransactionRepository transactions,
       HouseholdService households,
       CategorizationRuleService rules,
-      BankActivityService bankActivity) {
+      BankActivityService bankActivity,
+      CategorizationReviewService reviews) {
     this.transactions = transactions;
     this.households = households;
     this.rules = rules;
     this.bankActivity = bankActivity;
+    this.reviews = reviews;
   }
 
   @Transactional(readOnly = true)
@@ -53,13 +54,14 @@ public class CategorizationQueryService {
         .findOwnedScoped(householdId, transactionId, actorId)
         .map(
             transaction ->
-                CategorizationQueryService.toResponse(
+                toResponse(
                     transaction,
                     rules.ruleEligible(
                         householdId,
                         actorId,
                         transaction,
-                        retainedMerchantIdentityDigest(householdId, transactionId, actorId))))
+                        retainedMerchantIdentityDigest(householdId, transactionId, actorId)),
+                    reviews.hasOpen(householdId, actorId, transactionId)))
         .orElseGet(
             () -> {
               // Separates the resource 404 from the household 404 for a non-member without
@@ -84,7 +86,7 @@ public class CategorizationQueryService {
 
   /** Safe provenance projection; the exact seven-field contract with no internal references. */
   private static CategorizationResponse toResponse(
-      FinancialTransactionEntity transaction, boolean ruleEligible) {
+      FinancialTransactionEntity transaction, boolean ruleEligible, boolean hasOpenReview) {
     CategorizationOrigin origin = transaction.getCategoryOrigin();
     return new CategorizationResponse(
         transaction.getId(),
@@ -92,7 +94,7 @@ public class CategorizationQueryService {
         transaction.getCategory(),
         origin.name(),
         transaction.getCategoryAssignedAt(),
-        REVIEW_STATE_NONE,
+        hasOpenReview ? "OPEN" : "NONE",
         ruleEligible);
   }
 }

@@ -1366,6 +1366,108 @@ code {
   margin: 0;
 }
 
+.finance-reviews {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  min-width: 0;
+  margin-top: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 30%, white);
+  border-radius: 1rem;
+  background: #f7f8f3;
+}
+
+.finance-reviews > * {
+  min-width: 0;
+}
+
+.finance-reviews h5 {
+  margin: 0;
+  color: var(--color-ink);
+  overflow-wrap: anywhere;
+}
+
+.finance-review-list {
+  list-style: none;
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+}
+
+.finance-review-card {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2);
+  border-left: 4px solid var(--color-accent);
+  border-radius: 0.85rem;
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(35 63 42 / 7%);
+}
+
+.finance-review-card > * {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.finance-review-detail {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-top: var(--space-1);
+  border-top: 1px solid var(--color-line);
+}
+
+.finance-review-detail > * {
+  min-width: 0;
+}
+
+.finance-review-detail h6 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.finance-review-actions {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-1) var(--space-2) var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  min-width: 0;
+}
+
+.finance-review-actions legend {
+  font-weight: 650;
+  font-size: 0.9rem;
+  padding-inline: 0.25rem;
+}
+
+.finance-review-actions .household-hint {
+  margin: 0;
+}
+
+/* Every resolution choice is a full 44px target with a persistent label, so
+   the four decisions stay reachable by touch, keyboard, and 200% text. */
+.finance-review-option {
+  display: grid;
+  grid-template-columns: 1.35rem minmax(0, 1fr);
+  align-items: start;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding-block: 0.35rem;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.finance-review-option input {
+  width: 1.35rem;
+  height: 1.35rem;
+  margin: 0;
+}
+
 .finance-allocation-form {
   display: grid;
   gap: var(--space-2);
@@ -1616,9 +1718,23 @@ code {
 @media (max-width: 420px) {
   .finance-accounts,
   .finance-transactions,
-  .finance-rules {
+  .finance-rules,
+  .finance-reviews {
     display: flex;
     flex-direction: column;
+  }
+
+  .finance-review-actions {
+    padding-inline: 0;
+    border-inline: 0;
+  }
+
+  .finance-review-option {
+    gap: 0.25rem;
+  }
+
+  .finance-review-option span {
+    overflow-wrap: anywhere;
   }
 
   .shell,
@@ -1636,7 +1752,9 @@ code {
   .finance-pending-request,
   .finance-transactions,
   .finance-rules,
+  .finance-reviews,
   .finance-rule-card,
+  .finance-review-card,
   .finance-transaction-card,
   .finance-detail-panel,
   .finance-refund-context,
@@ -1672,6 +1790,29 @@ code {
 
   .finance-create-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 360px) {
+  .auth-card,
+  .household-card,
+  .finance-transactions,
+  .finance-review-card {
+    padding-inline: 8px;
+  }
+
+  .finance-reviews {
+    margin-inline: -8px;
+    padding-inline: 8px;
+  }
+
+  .finance-review-actions,
+  .finance-review-option {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .finance-review-option {
+    gap: 0.15rem;
   }
 }
 

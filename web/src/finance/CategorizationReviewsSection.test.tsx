@@ -1,0 +1,1092 @@
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import type {
+  CategorizationReview,
+  CsrfToken,
+  Household,
+  Transaction,
+  TransactionCategory,
+} from '../auth/client';
+import { CategorizationReviewsSection } from './CategorizationReviewsSection';
+
+const CSRF: CsrfToken = { token: 'csrf-token-1', headerName: 'X-CSRF-TOKEN' };
+const HOUSEHOLD: Household = {
+  id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+  name: 'Elm Street home',
+  role: 'MEMBER',
+  createdAt: '2026-09-13T01:30:00Z',
+};
+const OWNER_ID = '30000000-0000-4000-8000-000000000001';
+const ACCOUNT_ID = '10000000-0000-4000-8000-000000000001';
+const REVIEW_ID = '80000000-0000-4000-8000-000000000001';
+const OTHER_REVIEW_ID = '80000000-0000-4000-8000-000000000002';
+const TX_ID = '40000000-0000-4000-8000-000000000001';
+const OTHER_TX_ID = '40000000-0000-4000-8000-000000000002';
+const REVIEWS_BASE = `/api/households/${HOUSEHOLD.id}/categorization-reviews`;
+
+const CATEGORIES: TransactionCategory[] = [
+  { code: 'HOUSING', label: 'Housing' },
+  { code: 'GROCERIES', label: 'Food shopping' },
+  { code: 'DINING', label: 'Dining' },
+  { code: 'UTILITIES', label: 'Utilities' },
+  { code: 'TRANSPORTATION', label: 'Transportation' },
+  { code: 'SHOPPING', label: 'Shopping' },
+  { code: 'ENTERTAINMENT', label: 'Entertainment' },
+  { code: 'HEALTHCARE', label: 'Healthcare' },
+  { code: 'TRAVEL', label: 'Travel' },
+  { code: 'EDUCATION', label: 'Education' },
+  { code: 'PERSONAL', label: 'Personal' },
+  { code: 'HOUSEHOLD_SUPPLIES', label: 'Household supplies' },
+  { code: 'SUBSCRIPTIONS', label: 'Subscriptions' },
+  { code: 'INCOME', label: 'Income' },
+  { code: 'TRANSFERS', label: 'Transfers' },
+  { code: 'MISCELLANEOUS', label: 'Miscellaneous' },
+];
+
+function transaction(overrides: Partial<Transaction> = {}): Transaction {
+  return {
+    id: TX_ID,
+    householdId: HOUSEHOLD.id,
+    ownerUserId: OWNER_ID,
+    accountId: ACCOUNT_ID,
+    kind: 'EXPENSE',
+    money: { amount: '-12.34', currency: 'USD' },
+    occurredOn: '2026-09-22',
+    description: 'Corner Market',
+    category: null,
+    visibility: 'PRIVATE',
+    source: 'CONNECTED',
+    status: 'POSTED',
+    refundOfTransactionId: null,
+    version: 0,
+    createdAt: '2026-09-22T11:00:00Z',
+    updatedAt: '2026-09-22T11:00:00Z',
+    ...overrides,
+  };
+}
+
+function review(
+  overrides: Partial<CategorizationReview> = {},
+): CategorizationReview {
+  return {
+    id: REVIEW_ID,
+    transaction: transaction(),
+    evaluatedTransactionVersion: 0,
+    suggestedCategory: 'GROCERIES',
+    source: 'HEURISTIC',
+    confidence: 'HIGH',
+    reasonLabel: 'Merchant pattern matched',
+    status: 'OPEN',
+    version: 0,
+    createdAt: '2026-09-22T12:00:00Z',
+    updatedAt: '2026-09-22T12:00:00Z',
+    ...overrides,
+  };
+}
+
+function jsonResponse(body: unknown, status = 200) {
+  return Response.json(body, { status });
+}
+
+function page(
+  items: CategorizationReview[],
+  overrides: { openCount?: number; hasMore?: boolean } = {},
+) {
+  return jsonResponse({
+    items,
+    limit: 50,
+    offset: 0,
+    hasMore: overrides.hasMore ?? false,
+    openCount: overrides.openCount ?? items.length,
+  });
+}
+
+type Call = { url: string; init?: RequestInit | undefined };
+
+interface RouteHandlers {
+  listGet?: (
+    view: string | null,
+    offset: string,
+  ) => Response | Promise<Response>;
+  itemGet?: (reviewId: string) => Response | Promise<Response>;
+  resolve?: (reviewId: string) => Response | Promise<Response>;
+  csrfGet?: () => Response | Promise<Response>;
+}
+
+function stubFetch(routes: RouteHandlers) {
+  const calls: Call[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      calls.push({ url, init });
+      if (url === '/api/auth/csrf') {
+        return (
+          routes.csrfGet?.() ??
+          jsonResponse({ token: 'csrf-token-2', headerName: 'X-CSRF-TOKEN' })
+        );
+      }
+      if (url.startsWith(`${REVIEWS_BASE}/`) && url.endsWith('/resolve')) {
+        const reviewId = decodeURIComponent(
+          url.slice(REVIEWS_BASE.length + 1, -'/resolve'.length),
+        );
+        if (!routes.resolve) throw new Error('unexpected resolve request');
+        return routes.resolve(reviewId);
+      }
+      if (url.startsWith(`${REVIEWS_BASE}/`)) {
+        const reviewId = decodeURIComponent(url.slice(REVIEWS_BASE.length + 1));
+        if (!routes.itemGet) throw new Error('unexpected review item request');
+        return routes.itemGet(reviewId);
+      }
+      if (url.startsWith(`${REVIEWS_BASE}?`)) {
+        const query = new URLSearchParams(url.slice(REVIEWS_BASE.length + 1));
+        return (
+          routes.listGet?.(query.get('view'), query.get('offset') ?? '0') ??
+          page([])
+        );
+      }
+      throw new Error(`unexpected fetch ${url} ${init?.method ?? ''}`);
+    }),
+  );
+  return calls;
+}
+
+interface RenderOptions {
+  authorityConfirmed?: boolean;
+  categories?: TransactionCategory[] | null;
+  refreshSignal?: number;
+  scopeResetSignal?: number;
+  csrf?: CsrfToken | null;
+}
+
+function renderSection(
+  routes: RouteHandlers = {},
+  options: RenderOptions = {},
+) {
+  const calls = stubFetch(routes);
+  const onCsrfRefreshed = vi.fn();
+  const onSessionExpired = vi.fn();
+  const onHouseholdAccessChanged = vi.fn();
+  const onTransactionChanged = vi.fn();
+  const element = (overrides: RenderOptions = {}) => (
+    <CategorizationReviewsSection
+      household={HOUSEHOLD}
+      csrf={overrides.csrf ?? options.csrf ?? CSRF}
+      onCsrfRefreshed={onCsrfRefreshed}
+      onSessionExpired={onSessionExpired}
+      onHouseholdAccessChanged={onHouseholdAccessChanged}
+      authorityConfirmed={
+        overrides.authorityConfirmed ?? options.authorityConfirmed ?? true
+      }
+      categories={
+        overrides.categories !== undefined
+          ? overrides.categories
+          : options.categories !== undefined
+            ? options.categories
+            : CATEGORIES
+      }
+      refreshSignal={overrides.refreshSignal ?? options.refreshSignal ?? 0}
+      scopeResetSignal={
+        overrides.scopeResetSignal ?? options.scopeResetSignal ?? 0
+      }
+      onTransactionChanged={onTransactionChanged}
+    />
+  );
+  const view = render(element());
+  return {
+    calls,
+    view,
+    onCsrfRefreshed,
+    onSessionExpired,
+    onHouseholdAccessChanged,
+    onTransactionChanged,
+    rerender: (overrides: RenderOptions = {}) => {
+      view.rerender(element(overrides));
+    },
+  };
+}
+
+function resolveCalls(calls: Call[]) {
+  return calls.filter((call) => call.url.endsWith('/resolve'));
+}
+
+function bodyOf(call: Call | undefined): unknown {
+  return JSON.parse(String(call?.init?.body));
+}
+
+function headerOf(call: Call | undefined, name: string): string | undefined {
+  const headers = call?.init?.headers as
+    Record<string, string> | undefined | Headers;
+  if (!headers) return undefined;
+  if (headers instanceof Headers) return headers.get(name) ?? undefined;
+  return headers[name];
+}
+
+/** Opens the queue and the one suggestion it holds. */
+async function openReviewDetail() {
+  fireEvent.click(
+    await screen.findByRole('button', { name: /Review suggested categories/ }),
+  );
+  fireEvent.click(
+    screen.getByRole('button', {
+      name: 'Review the suggestion for Corner Market',
+    }),
+  );
+}
+
+describe('categorization review queue', () => {
+  it('exposes one private entry point with the owner open count and loads no queue rows until opened', async () => {
+    const { calls } = renderSection({
+      listGet: () =>
+        page(
+          [
+            review(),
+            review({
+              id: OTHER_REVIEW_ID,
+              transaction: transaction({
+                id: OTHER_TX_ID,
+                description: 'Transit pass',
+              }),
+            }),
+          ],
+          { openCount: 2 },
+        ),
+    });
+
+    expect(
+      await screen.findByText('2 suggestions are waiting for your decision.'),
+    ).toBeInTheDocument();
+    const entry = screen.getByRole('button', {
+      name: 'Review suggested categories (2 waiting)',
+    });
+    expect(entry).toHaveAttribute('aria-expanded', 'false');
+    // The count comes from one owner-scoped page request, not one per row.
+    const listCalls = calls.filter((call) => call.url.startsWith(REVIEWS_BASE));
+    expect(listCalls).toHaveLength(1);
+    expect(listCalls[0]?.url).toBe(
+      `${REVIEWS_BASE}?limit=50&offset=0&view=OPEN`,
+    );
+    expect(screen.queryByText('Corner Market')).not.toBeInTheDocument();
+
+    fireEvent.click(entry);
+    expect(entry).toHaveAttribute('aria-expanded', 'true');
+    expect(await screen.findByText('Corner Market')).toBeInTheDocument();
+  });
+
+  it('separates the recorded category from the suggestion and offers exactly the four decisions', async () => {
+    const { calls } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+    });
+    await openReviewDetail();
+
+    const detail = screen.getByRole('group', {
+      name: /Suggestion for “Corner Market”/,
+    });
+    expect(within(detail).getByText('Recorded category')).toBeInTheDocument();
+    expect(
+      within(detail).getByText(/this entry has no category yet/),
+    ).toBeInTheDocument();
+    expect(within(detail).getByText('Food shopping')).toBeInTheDocument();
+    expect(
+      within(detail).getByText('Merchant pattern matched'),
+    ).toBeInTheDocument();
+    expect(
+      within(detail).getByText(/Built-in merchant match/),
+    ).toBeInTheDocument();
+    expect(
+      within(detail).getByText(/fixed built-in list of recognized merchants/),
+    ).toBeInTheDocument();
+    expect(
+      within(detail).getByText(/High confidence band/),
+    ).toBeInTheDocument();
+    // Confidence is explained as a band, never as certainty or a probability.
+    expect(within(detail).getByText(/not certainty/)).toBeInTheDocument();
+
+    const options = within(detail).getAllByRole('radio');
+    expect(options).toHaveLength(4);
+    expect(
+      within(detail).getByRole('radio', {
+        name: 'Accept the suggestion — Food shopping',
+      }),
+    ).toBeChecked();
+    expect(
+      within(detail).getByRole('radio', { name: 'Keep it uncategorized' }),
+    ).toBeEnabled();
+    expect(
+      within(detail).getByRole('radio', {
+        name: /Keep the recorded category/,
+      }),
+    ).toBeDisabled();
+    // Nothing is applied by opening the queue.
+    expect(resolveCalls(calls)).toHaveLength(0);
+  });
+
+  it('applies an accepted suggestion with both versions and converges the feed, list, and count', async () => {
+    const resolved = review({
+      status: 'ACCEPTED',
+      version: 1,
+      transaction: transaction({ category: 'GROCERIES', version: 1 }),
+    });
+    let listCalls = 0;
+    const { calls, onTransactionChanged } = renderSection({
+      listGet: () => {
+        listCalls += 1;
+        return listCalls === 1
+          ? page([review()], { openCount: 1 })
+          : page([], { openCount: 0 });
+      },
+      resolve: () => jsonResponse(resolved),
+    });
+    await openReviewDetail();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+
+    await waitFor(() => expect(resolveCalls(calls)).toHaveLength(1));
+    const decision = resolveCalls(calls)[0];
+    expect(decision?.init?.method).toBe('POST');
+    expect(decision?.url).toBe(`${REVIEWS_BASE}/${REVIEW_ID}/resolve`);
+    expect(bodyOf(decision)).toEqual({
+      expectedVersion: 0,
+      expectedTransactionVersion: 0,
+      action: 'ACCEPT_SUGGESTION',
+    });
+    expect(headerOf(decision, 'Idempotency-Key')).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(headerOf(decision, 'X-CSRF-TOKEN')).toBe('csrf-token-1');
+
+    expect(
+      await screen.findByText(
+        /Decision saved\. Corner Market is now Food shopping/,
+      ),
+    ).toBeInTheDocument();
+    expect(onTransactionChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ id: TX_ID, category: 'GROCERIES', version: 1 }),
+    );
+    // The waiting list and the private count converge on the committed state.
+    expect(
+      await screen.findByText('No suggestions are waiting for your decision.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', {
+        name: 'Review the suggestion for Corner Market',
+      }),
+    ).not.toBeInTheDocument();
+    expect(listCalls).toBeGreaterThan(1);
+  });
+
+  it('never rewrites a preserved keep choice when a refresh makes it inapplicable', async () => {
+    let listCalls = 0;
+    const { calls, rerender } = renderSection({
+      listGet: () => {
+        listCalls += 1;
+        return listCalls === 1
+          ? page(
+              [review({ transaction: transaction({ category: 'DINING' }) })],
+              { openCount: 1 },
+            )
+          : page(
+              [
+                review({
+                  version: 2,
+                  evaluatedTransactionVersion: 1,
+                  transaction: transaction({ category: null, version: 1 }),
+                }),
+              ],
+              { openCount: 1 },
+            );
+      },
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', {
+        name: 'Keep the recorded category — Dining',
+      }),
+    );
+
+    // A background refresh reports that the entry no longer has a category.
+    rerender({ refreshSignal: 1 });
+    await waitFor(() =>
+      expect(
+        screen.getByRole('radio', {
+          name: 'Keep the recorded category — Uncategorized',
+        }),
+      ).toBeDisabled(),
+    );
+
+    // The preserved decision is never silently turned into a different one:
+    // the choice stays selected and an explicit new choice is required.
+    expect(
+      screen.getByRole('radio', {
+        name: 'Keep the recorded category — Uncategorized',
+      }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole('radio', {
+        name: 'Accept the suggestion — Food shopping',
+      }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByText(
+        /this entry has no category to keep now\. Choose the decision you want/,
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This entry has no recorded category, so there is nothing to keep.',
+    );
+    expect(calls.filter((call) => call.url.endsWith('/resolve'))).toHaveLength(
+      0,
+    );
+  });
+
+  it('moves focus into the detail on open, back to the row on close, and onto the outcome notice after a resolution', async () => {
+    const { calls } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      resolve: () => jsonResponse(review({ status: 'KEPT', version: 1 })),
+    });
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /Review suggested categories/,
+      }),
+    );
+    const trigger = screen.getByRole('button', {
+      name: 'Review the suggestion for Corner Market',
+    });
+    fireEvent.click(trigger);
+    const detail = screen.getByRole('group', {
+      name: /Suggestion for “Corner Market”/,
+    });
+    await waitFor(() => expect(detail).toHaveFocus());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', {
+          name: 'Review the suggestion for Corner Market',
+        }),
+      ).toHaveFocus(),
+    );
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Review the suggestion for Corner Market',
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Keep it uncategorized' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    await waitFor(() => expect(resolveCalls(calls)).toHaveLength(1));
+    const notice = await screen.findByText(/Decision saved/);
+    // The stable outcome notice owns focus after a resolution.
+    await waitFor(() =>
+      expect(notice.closest('[role="status"]')).toHaveFocus(),
+    );
+  });
+
+  it('requires a taxonomy choice for a chosen category and sends exactly that decision', async () => {
+    const { calls } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      resolve: () =>
+        jsonResponse(
+          review({
+            status: 'CHOSEN',
+            version: 1,
+            transaction: transaction({ category: 'DINING', version: 1 }),
+          }),
+        ),
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Choose a different category' }),
+    );
+    const select = screen.getByLabelText('Category for this decision');
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    expect(
+      await screen.findByText('Choose a category for this decision.'),
+    ).toBeInTheDocument();
+    expect(resolveCalls(calls)).toHaveLength(0);
+    await waitFor(() => expect(select).toHaveFocus());
+
+    fireEvent.change(select, { target: { value: 'DINING' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    await waitFor(() => expect(resolveCalls(calls)).toHaveLength(1));
+    expect(bodyOf(resolveCalls(calls)[0])).toEqual({
+      expectedVersion: 0,
+      expectedTransactionVersion: 0,
+      action: 'CHOOSE_CATEGORY',
+      category: 'DINING',
+    });
+  });
+
+  it('sends the three-field keep-uncategorized decision for an entry with no category', async () => {
+    const { calls } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      resolve: () => jsonResponse(review({ status: 'KEPT', version: 1 })),
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Keep it uncategorized' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+
+    await waitFor(() => expect(resolveCalls(calls)).toHaveLength(1));
+    expect(bodyOf(resolveCalls(calls)[0])).toEqual({
+      expectedVersion: 0,
+      expectedTransactionVersion: 0,
+      action: 'KEEP_UNCATEGORIZED',
+    });
+    expect(
+      await screen.findByText(/your decision; automation will not replace it/),
+    ).toBeInTheDocument();
+  });
+
+  it('offers keep-current only for an entry that has a category and preserves it on save', async () => {
+    const categorized = review({
+      transaction: transaction({ category: 'DINING' }),
+    });
+    const { calls } = renderSection({
+      listGet: () => page([categorized], { openCount: 1 }),
+      resolve: () =>
+        jsonResponse(
+          review({
+            status: 'KEPT',
+            version: 1,
+            transaction: transaction({ category: 'DINING', version: 1 }),
+          }),
+        ),
+    });
+    await openReviewDetail();
+
+    expect(
+      screen.getByRole('radio', {
+        name: 'Keep the recorded category — Dining',
+      }),
+    ).toBeEnabled();
+    const keepUncategorized = screen.getByRole('radio', {
+      name: 'Keep it uncategorized',
+    });
+    expect(keepUncategorized).toBeDisabled();
+    expect(
+      screen.getByText(
+        'This entry already has a category, so it cannot be kept uncategorized.',
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole('radio', {
+        name: 'Keep the recorded category — Dining',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    await waitFor(() => expect(resolveCalls(calls)).toHaveLength(1));
+    expect(bodyOf(resolveCalls(calls)[0])).toEqual({
+      expectedVersion: 0,
+      expectedTransactionVersion: 0,
+      action: 'KEEP_CURRENT',
+    });
+  });
+
+  it('refetches a stale suggestion on a version conflict, keeps the chosen draft, and retries with the fresh versions', async () => {
+    const fresh = review({
+      version: 3,
+      evaluatedTransactionVersion: 2,
+      transaction: transaction({ version: 2 }),
+    });
+    const { calls } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      itemGet: (reviewId) => {
+        expect(reviewId).toBe(REVIEW_ID);
+        return jsonResponse(fresh);
+      },
+      resolve: () =>
+        jsonResponse(
+          { code: 'RESOURCE_VERSION_CONFLICT', message: 'Changed.' },
+          409,
+        ),
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Choose a different category' }),
+    );
+    const select = screen.getByLabelText('Category for this decision');
+    fireEvent.change(select, { target: { value: 'SHOPPING' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+
+    expect(
+      await screen.findByText(
+        /changed on the server. The latest state was reloaded/,
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        calls.some((call) => call.url === `${REVIEWS_BASE}/${REVIEW_ID}`),
+      ).toBe(true),
+    );
+    // The draft choice survives the conflict and the refetch, and the reloaded
+    // versions are what the next decision is guarded by.
+    expect(screen.getByLabelText('Category for this decision')).toHaveValue(
+      'SHOPPING',
+    );
+    expect(screen.queryByText(/Decision saved/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    await waitFor(() => expect(resolveCalls(calls)).toHaveLength(2));
+    expect(bodyOf(resolveCalls(calls)[1])).toEqual({
+      expectedVersion: 3,
+      expectedTransactionVersion: 2,
+      action: 'CHOOSE_CATEGORY',
+      category: 'SHOPPING',
+    });
+  });
+
+  it('binds and focuses the affected control when the server rejects the decision', async () => {
+    const { calls } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      resolve: () =>
+        jsonResponse(
+          {
+            code: 'VALIDATION_FAILED',
+            message: 'The request was rejected.',
+            fieldErrors: { category: 'Choose a supported category.' },
+          },
+          400,
+        ),
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Choose a different category' }),
+    );
+    const select = screen.getByLabelText('Category for this decision');
+    fireEvent.change(select, { target: { value: 'DINING' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+
+    expect(
+      await screen.findByText('Choose a supported category.'),
+    ).toBeInTheDocument();
+    expect(select).toHaveAttribute('aria-invalid', 'true');
+    await waitFor(() => expect(select).toHaveFocus());
+    // The rejected choice is retained, so the owner fixes and resends it.
+    expect(select).toHaveValue('DINING');
+    expect(resolveCalls(calls)).toHaveLength(1);
+  });
+
+  it('retains the exact same-key decision on an unknown outcome and proves it with a same-key retry', async () => {
+    let resolveAttempts = 0;
+    const { calls } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      resolve: () => {
+        resolveAttempts += 1;
+        if (resolveAttempts === 1) {
+          throw new TypeError('Failed to fetch');
+        }
+        return jsonResponse(
+          review({
+            status: 'KEPT',
+            version: 1,
+            transaction: transaction({ version: 1 }),
+          }),
+        );
+      },
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Keep it uncategorized' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+
+    const pending = await screen.findByRole('group', {
+      name: 'Unresolved category review decision',
+    });
+    expect(within(pending).getByText(/Corner Market/)).toBeInTheDocument();
+    const first = resolveCalls(calls)[0];
+    expect(headerOf(first, 'Idempotency-Key')).toBeTruthy();
+
+    fireEvent.click(
+      within(pending).getByRole('button', { name: 'Retry this decision' }),
+    );
+    await waitFor(() => expect(resolveAttempts).toBe(2));
+    const retry = resolveCalls(calls)[1];
+    expect(headerOf(retry, 'Idempotency-Key')).toBe(
+      headerOf(first, 'Idempotency-Key'),
+    );
+    expect(bodyOf(retry)).toEqual(bodyOf(first));
+    // The retained intent is only cleared by a known outcome.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('group', {
+          name: 'Unresolved category review decision',
+        }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(await screen.findByText(/Decision saved/)).toBeInTheDocument();
+  });
+
+  it('never claims success or failure when a 200 response drifts from the contract', async () => {
+    const { calls } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      resolve: () =>
+        jsonResponse(
+          review({
+            status: 'SETTLED' as CategorizationReview['status'],
+          }),
+        ),
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Keep it uncategorized' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+
+    expect(
+      await screen.findByRole('group', {
+        name: 'Unresolved category review decision',
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Decision saved/)).not.toBeInTheDocument();
+    // The exact intent is retained for a same-key retry.
+    expect(resolveCalls(calls)).toHaveLength(1);
+    expect(
+      await screen.findByText(
+        /The decision has an unknown outcome\. Retry the exact same decision with its original key/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('closes the decision form honestly when a refresh reports the open suggestion as resolved', async () => {
+    let listCalls = 0;
+    const { rerender } = renderSection({
+      listGet: () => {
+        listCalls += 1;
+        return listCalls === 1
+          ? page([review()], { openCount: 1 })
+          : page([], { openCount: 0 });
+      },
+      itemGet: () =>
+        jsonResponse(
+          review({
+            status: 'KEPT',
+            version: 3,
+            transaction: transaction({ version: 2 }),
+          }),
+        ),
+    });
+    await openReviewDetail();
+    expect(
+      screen.getByRole('button', { name: 'Save decision' }),
+    ).toBeInTheDocument();
+
+    rerender({ refreshSignal: 1 });
+
+    expect(
+      await screen.findByText(
+        /no longer waiting for review, so the decision form was closed/,
+      ),
+    ).toBeInTheDocument();
+    // Nothing claims that this browser's decision is what resolved it.
+    expect(
+      screen.queryByText(/Your earlier decision is recorded/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Save decision' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('group', {
+        name: /Suggestion for “Corner Market”/,
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows the current state without claiming an unproven outcome when the suggestion is no longer open', async () => {
+    let resolveAttempts = 0;
+    const decidedElsewhere = review({
+      status: 'CHOSEN',
+      version: 4,
+      transaction: transaction({ category: 'DINING', version: 3 }),
+    });
+    const { calls } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      itemGet: () => jsonResponse(decidedElsewhere),
+      resolve: () => {
+        resolveAttempts += 1;
+        throw new TypeError('Failed to fetch');
+      },
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Keep it uncategorized' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    const pending = await screen.findByRole('group', {
+      name: 'Unresolved category review decision',
+    });
+
+    fireEvent.click(
+      within(pending).getByRole('button', { name: 'Reload the queue' }),
+    );
+
+    expect(
+      await screen.findByText(
+        /no longer waiting for review, so it left the waiting list/,
+      ),
+    ).toBeInTheDocument();
+    // The read cannot attribute that state to this intent, so nothing is
+    // claimed and the retained decision stays available for the one proof.
+    expect(
+      screen.queryByText(/Your earlier decision is recorded/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('group', {
+        name: 'Unresolved category review decision',
+      }),
+    ).toBeInTheDocument();
+    // There is no open suggestion left to decide on.
+    expect(
+      screen.queryByRole('group', {
+        name: /Suggestion for “Corner Market”/,
+      }),
+    ).not.toBeInTheDocument();
+    expect(resolveAttempts).toBe(1);
+    expect(calls.filter((call) => call.url.endsWith('/resolve'))).toHaveLength(
+      1,
+    );
+  });
+
+  it('drops every private row and ignores an in-flight response after a scope clear', async () => {
+    const pending: { complete?: (response: Response) => void } = {};
+    let listCalls = 0;
+    const { rerender } = renderSection({
+      listGet: () => {
+        listCalls += 1;
+        if (listCalls === 1) return page([review()], { openCount: 1 });
+        return new Promise<Response>((resolve) => {
+          pending.complete = resolve;
+        });
+      },
+    });
+    await openReviewDetail();
+    expect(await screen.findByText('Corner Market')).toBeInTheDocument();
+
+    // A reload is in flight when the scope is cleared.
+    rerender({ refreshSignal: 1 });
+    await waitFor(() => expect(listCalls).toBe(2));
+    rerender({ scopeResetSignal: 1 });
+
+    expect(screen.queryByText('Corner Market')).not.toBeInTheDocument();
+    expect(screen.queryByText('Food shopping')).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Your suggestions are not loaded.'),
+    ).toBeInTheDocument();
+
+    // The response that was already in flight is dropped with the scope: a
+    // late answer can never publish private suggestions into a cleared panel.
+    pending.complete?.(page([review()], { openCount: 4 }));
+    await waitFor(() =>
+      expect(screen.queryByText('Corner Market')).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText('Your suggestions are not loaded.'),
+    ).toBeInTheDocument();
+  });
+
+  it('treats an expired session on a decision as a session loss and clears the queue', async () => {
+    const { onSessionExpired } = renderSection({
+      listGet: () => page([review()], { openCount: 1 }),
+      resolve: () =>
+        jsonResponse({ code: 'UNAUTHENTICATED', message: 'Sign in.' }, 401),
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Keep it uncategorized' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('Corner Market')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Food shopping/)).not.toBeInTheDocument();
+  });
+
+  it('reports lost household access instead of rendering an empty queue', async () => {
+    const { onHouseholdAccessChanged } = renderSection({
+      listGet: () =>
+        jsonResponse({ code: 'HOUSEHOLD_NOT_FOUND', message: 'Gone.' }, 404),
+    });
+
+    await waitFor(() =>
+      expect(onHouseholdAccessChanged).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Your suggestions are not loaded.'),
+    ).toBeInTheDocument();
+  });
+
+  it('drops a suggestion that is gone on resolve and reloads the queue without claiming success', async () => {
+    let listCalls = 0;
+    const { calls } = renderSection({
+      listGet: () => {
+        listCalls += 1;
+        return listCalls === 1
+          ? page([review()], { openCount: 1 })
+          : page([], { openCount: 0 });
+      },
+      resolve: () =>
+        jsonResponse(
+          { code: 'CATEGORY_REVIEW_NOT_FOUND', message: 'Gone.' },
+          404,
+        ),
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Keep it uncategorized' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+
+    expect(
+      await screen.findByText(
+        'That suggestion is no longer available to you. The queue was reloaded.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Decision saved/)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', {
+          name: 'Review the suggestion for Corner Market',
+        }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(listCalls).toBeGreaterThan(1);
+    expect(resolveCalls(calls)).toHaveLength(1);
+  });
+
+  it('treats the shared privacy-preserving 404 as an unavailable suggestion too', async () => {
+    let listCalls = 0;
+    const { calls } = renderSection({
+      listGet: () => {
+        listCalls += 1;
+        return listCalls === 1
+          ? page([review()], { openCount: 1 })
+          : page([], { openCount: 0 });
+      },
+      resolve: () =>
+        jsonResponse(
+          { code: 'TRANSACTION_NOT_FOUND', message: 'Unavailable.' },
+          404,
+        ),
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Keep it uncategorized' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+
+    expect(
+      await screen.findByText(
+        'That suggestion is no longer available to you. The queue was reloaded.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Decision saved/)).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', {
+          name: 'Review the suggestion for Corner Market',
+        }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(resolveCalls(calls)).toHaveLength(1);
+  });
+
+  it('lists resolved suggestions as history without offering a decision form', async () => {
+    const { calls } = renderSection({
+      listGet: (view) =>
+        view === 'HISTORY'
+          ? page(
+              [
+                review({
+                  status: 'KEPT',
+                  version: 1,
+                  transaction: transaction({ category: 'DINING', version: 1 }),
+                }),
+              ],
+              { openCount: 0 },
+            )
+          : page([review()], { openCount: 1 }),
+    });
+    await openReviewDetail();
+
+    fireEvent.change(screen.getByLabelText('Show'), {
+      target: { value: 'HISTORY' },
+    });
+
+    expect(
+      await screen.findByRole('button', {
+        name: 'See the resolution for Corner Market',
+      }),
+    ).toBeInTheDocument();
+    expect(calls.some((call) => call.url.includes('view=HISTORY'))).toBe(true);
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'See the resolution for Corner Market',
+      }),
+    );
+    const detail = screen.getByRole('group', {
+      name: /Suggestion for “Corner Market”/,
+    });
+    expect(
+      within(detail).getByText(
+        /This suggestion was resolved \(You kept your own decision for this entry\)/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(detail).queryByRole('button', { name: 'Save decision' }),
+    ).not.toBeInTheDocument();
+    expect(within(detail).queryAllByRole('radio')).toHaveLength(0);
+  });
+
+  it('converges the count on a parent refresh signal without discarding a chosen category draft', async () => {
+    let listCalls = 0;
+    const { rerender } = renderSection({
+      listGet: () => {
+        listCalls += 1;
+        return listCalls === 1
+          ? page([review()], { openCount: 1 })
+          : page([review()], { openCount: 2 });
+      },
+    });
+    await openReviewDetail();
+
+    fireEvent.click(
+      screen.getByRole('radio', { name: 'Choose a different category' }),
+    );
+    fireEvent.change(screen.getByLabelText('Category for this decision'), {
+      target: { value: 'SHOPPING' },
+    });
+
+    rerender({ refreshSignal: 1 });
+
+    expect(
+      await screen.findByText('2 suggestions are waiting for your decision.'),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Category for this decision')).toHaveValue(
+      'SHOPPING',
+    );
+    expect(listCalls).toBeGreaterThan(1);
+  });
+});

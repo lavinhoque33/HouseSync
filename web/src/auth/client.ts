@@ -81,6 +81,7 @@ export type ApiErrorCode =
   | 'TRANSACTION_VOIDED'
   | 'CATEGORY_RULE_NOT_FOUND'
   | 'CATEGORY_RULE_CONFLICT'
+  | 'CATEGORY_REVIEW_NOT_FOUND'
   | 'ALLOCATION_NOT_FOUND'
   | 'ALLOCATION_CONFLICT'
   | 'FINANCE_BUSY'
@@ -160,6 +161,7 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'TRANSACTION_VOIDED',
     'CATEGORY_RULE_NOT_FOUND',
     'CATEGORY_RULE_CONFLICT',
+    'CATEGORY_REVIEW_NOT_FOUND',
     'ALLOCATION_NOT_FOUND',
     'ALLOCATION_CONFLICT',
     'FINANCE_BUSY',
@@ -2438,7 +2440,11 @@ export interface TransactionPage {
 export type CategorizationOrigin =
   'NONE' | 'LEGACY' | 'USER' | 'OWNER_RULE' | 'PROVIDER' | 'INHERITED';
 
-/** `OPEN` only exists once review items are persisted; until then the state is `NONE`. */
+/**
+ * Whether the owner currently has an open review item for this entry.
+ * Suggestions are persisted, so `OPEN` is live; `NONE` covers every entry
+ * with no current suggestion.
+ */
 export type CategorizationReviewState = 'NONE' | 'OPEN';
 
 /**
@@ -3157,6 +3163,366 @@ export async function patchCategorizationRule(
     response,
     response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
     'The rule could not be updated.',
+  );
+}
+
+/**
+ * What produced a review suggestion. `HEURISTIC` is the deterministic,
+ * server-owned classifier; `AI` is the optional fallback adapter.
+ * The browser only ever renders the classified source, never a model name,
+ * policy version, evidence digest, or provider code.
+ */
+export type CategorizationReviewSource = 'HEURISTIC' | 'AI';
+
+/**
+ * The three documented confidence bands. A band is a coarse hint about how
+ * the suggestion was derived, never a probability and never an authority:
+ * every suggestion needs an explicit owner decision either way.
+ */
+export type CategorizationReviewConfidence = 'HIGH' | 'MEDIUM' | 'LOW';
+
+/**
+ * A review item's lifecycle. `OPEN` is the only status that can be resolved;
+ * `ACCEPTED`, `CHOSEN`, and `KEPT` record which owner action resolved it, and
+ * `SUPERSEDED` records work the owner's own decision or a direct category
+ * change made obsolete.
+ */
+export type CategorizationReviewStatus =
+  'OPEN' | 'ACCEPTED' | 'CHOSEN' | 'KEPT' | 'SUPERSEDED';
+
+/**
+ * Exactly the documented eleven-field owner-private review item. The nested
+ * `transaction` is the unchanged exact 16-field transaction DTO, so a review
+ * never widens or weakens the shared transaction parser. `suggestedCategory`
+ * is a server taxonomy token and stays strictly distinct from the effective
+ * `transaction.category`: the suggestion is advisory, the effective category
+ * is the fact.
+ */
+export interface CategorizationReview {
+  id: string;
+  transaction: Transaction;
+  evaluatedTransactionVersion: number;
+  suggestedCategory: string;
+  source: CategorizationReviewSource;
+  confidence: CategorizationReviewConfidence;
+  reasonLabel: string;
+  status: CategorizationReviewStatus;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Exactly `{items, limit, offset, hasMore, openCount}`. `openCount` is the
+ * current owner's total open count in this household and is independent of
+ * the requested view, so the entry point can show the real backlog without
+ * paging through history.
+ */
+export interface CategorizationReviewPage {
+  items: CategorizationReview[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  openCount: number;
+}
+
+/** `OPEN` (default) lists waiting suggestions; `HISTORY` lists resolved ones. */
+export type CategorizationReviewView = 'OPEN' | 'HISTORY';
+
+export interface CategorizationReviewQuery {
+  /** Documented bound: 1-100. */
+  limit: number;
+  /** Documented bound: 0-10000. */
+  offset: number;
+  /** Omitted means the documented default, `OPEN`. */
+  view?: CategorizationReviewView | undefined;
+}
+
+/** The four documented resolution actions. */
+export type CategorizationReviewAction =
+  | 'ACCEPT_SUGGESTION'
+  | 'CHOOSE_CATEGORY'
+  | 'KEEP_CURRENT'
+  | 'KEEP_UNCATEGORIZED';
+
+/**
+ * The two accepted resolve bodies: exactly `expectedVersion`,
+ * `expectedTransactionVersion`, and `action`, with `category` present only
+ * for `CHOOSE_CATEGORY`. Both versions travel together because the server
+ * rechecks the review version and the evaluated transaction version before
+ * applying one atomic user decision.
+ */
+export type ResolveCategorizationReviewInput =
+  | {
+      expectedVersion: number;
+      expectedTransactionVersion: number;
+      action: 'ACCEPT_SUGGESTION' | 'KEEP_CURRENT' | 'KEEP_UNCATEGORIZED';
+    }
+  | {
+      expectedVersion: number;
+      expectedTransactionVersion: number;
+      action: 'CHOOSE_CATEGORY';
+      category: string;
+    };
+
+const REVIEW_ITEM_KEYS = 11;
+
+function isCategorizationReviewSource(
+  value: unknown,
+): value is CategorizationReviewSource {
+  return value === 'HEURISTIC' || value === 'AI';
+}
+
+function isCategorizationReviewConfidence(
+  value: unknown,
+): value is CategorizationReviewConfidence {
+  return value === 'HIGH' || value === 'MEDIUM' || value === 'LOW';
+}
+
+function isCategorizationReviewStatus(
+  value: unknown,
+): value is CategorizationReviewStatus {
+  return (
+    value === 'OPEN' ||
+    value === 'ACCEPTED' ||
+    value === 'CHOSEN' ||
+    value === 'KEPT' ||
+    value === 'SUPERSEDED'
+  );
+}
+
+/**
+ * Strict parser for one owner-private review item: exactly the eleven
+ * documented fields, the nested transaction through the unchanged 16-field
+ * parser, a server taxonomy token for the suggestion, a known source,
+ * confidence band, and status, and a bounded non-empty reason label. A
+ * missing, extra, or unknown value fails the whole response rather than
+ * reaching the UI, so no half-understood suggestion is ever rendered as a
+ * fact and no raw evidence code is ever shown as prose.
+ */
+function parseCategorizationReview(
+  value: unknown,
+): CategorizationReview | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).length !== REVIEW_ITEM_KEYS ||
+    typeof record.id !== 'string' ||
+    !UUID_PATTERN.test(record.id) ||
+    typeof record.evaluatedTransactionVersion !== 'number' ||
+    !Number.isInteger(record.evaluatedTransactionVersion) ||
+    record.evaluatedTransactionVersion < 0 ||
+    record.evaluatedTransactionVersion > 2147483647 ||
+    !isCategoryToken(record.suggestedCategory) ||
+    !isCategorizationReviewSource(record.source) ||
+    !isCategorizationReviewConfidence(record.confidence) ||
+    typeof record.reasonLabel !== 'string' ||
+    record.reasonLabel.length === 0 ||
+    !isCategorizationReviewStatus(record.status) ||
+    typeof record.version !== 'number' ||
+    !Number.isInteger(record.version) ||
+    record.version < 0 ||
+    record.version > 2147483647 ||
+    typeof record.createdAt !== 'string' ||
+    !INSTANT_PATTERN.test(record.createdAt) ||
+    Number.isNaN(Date.parse(record.createdAt)) ||
+    typeof record.updatedAt !== 'string' ||
+    !INSTANT_PATTERN.test(record.updatedAt) ||
+    Number.isNaN(Date.parse(record.updatedAt))
+  ) {
+    return undefined;
+  }
+  const transaction = parseTransaction(record.transaction);
+  if (!transaction) return undefined;
+  return {
+    id: record.id,
+    transaction,
+    evaluatedTransactionVersion: record.evaluatedTransactionVersion,
+    suggestedCategory: record.suggestedCategory,
+    source: record.source,
+    confidence: record.confidence,
+    reasonLabel: record.reasonLabel,
+    status: record.status,
+    version: record.version,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function unexpectedReviewResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message:
+      'The server returned an unexpected categorization review response.',
+  });
+}
+
+function reviewPath(householdId: string, reviewId?: string): string {
+  const base = `/api/households/${encodeURIComponent(householdId)}/categorization-reviews`;
+  return reviewId === undefined
+    ? base
+    : `${base}/${encodeURIComponent(reviewId)}`;
+}
+
+/**
+ * The current actor's own private review page, ordered by the server
+ * (`createdAt DESC, id DESC`). `openCount` always describes the owner's open
+ * backlog regardless of the requested view, so a history page still carries
+ * the real count. No other owner's suggestion is ever reachable here, and
+ * nothing in this response may be shown to another member.
+ */
+export async function fetchCategorizationReviews(
+  householdId: string,
+  query: CategorizationReviewQuery,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<CategorizationReviewPage> {
+  const parameters = new URLSearchParams();
+  parameters.set('limit', String(query.limit));
+  parameters.set('offset', String(query.offset));
+  if (query.view) parameters.set('view', query.view);
+  const response = await apiFetch(
+    `${reviewPath(householdId)}?${parameters.toString()}`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load your category suggestions.',
+    );
+  }
+  const body = await readJson<unknown>(response);
+  if (
+    typeof body !== 'object' ||
+    body === null ||
+    Array.isArray(body) ||
+    Object.keys(body).length !== 5
+  ) {
+    throw unexpectedReviewResponse(response.status);
+  }
+  const page = body as Record<string, unknown>;
+  if (
+    // Exactly the five documented page fields; a missing openCount would
+    // force the UI to guess the backlog, which it never does.
+    !Array.isArray(page.items) ||
+    typeof page.limit !== 'number' ||
+    !Number.isInteger(page.limit) ||
+    typeof page.offset !== 'number' ||
+    !Number.isInteger(page.offset) ||
+    typeof page.hasMore !== 'boolean' ||
+    typeof page.openCount !== 'number' ||
+    !Number.isInteger(page.openCount) ||
+    page.openCount < 0
+  ) {
+    throw unexpectedReviewResponse(response.status);
+  }
+  const items: CategorizationReview[] = [];
+  for (const value of page.items) {
+    const review = parseCategorizationReview(value);
+    if (!review) throw unexpectedReviewResponse(response.status);
+    items.push(review);
+  }
+  return {
+    items,
+    limit: page.limit,
+    offset: page.offset,
+    hasMore: page.hasMore,
+    openCount: page.openCount,
+  };
+}
+
+/**
+ * One owner-private review item by id. A missing, hidden, or another owner's
+ * item answers the same generic 404 (`CATEGORY_REVIEW_NOT_FOUND`), so a 404
+ * is "not available to you" and never evidence about someone else's data.
+ * An item that describes a different review id is drift and fails.
+ */
+export async function fetchCategorizationReview(
+  householdId: string,
+  reviewId: string,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<CategorizationReview> {
+  const response = await apiFetch(
+    reviewPath(householdId, reviewId),
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load this category suggestion.',
+    );
+  }
+  const review = parseCategorizationReview(await readJson<unknown>(response));
+  if (!review || review.id !== reviewId) {
+    throw unexpectedReviewResponse(response.status);
+  }
+  return review;
+}
+
+/**
+ * Applies exactly one owner decision to one open review item and returns the
+ * resolved item with the committed current transaction. The durable
+ * `Idempotency-Key` makes an unknown outcome recoverable: replaying the same
+ * key with the same body answers 200 with the already-committed
+ * representation instead of applying a second decision. Both expected
+ * versions are sent together, so a stale review or a transaction that moved
+ * underneath it is rejected rather than silently overwritten.
+ */
+export async function resolveCategorizationReview(
+  householdId: string,
+  reviewId: string,
+  input: ResolveCategorizationReviewInput,
+  idempotencyKey: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<CategorizationReview> {
+  const response = await apiFetch(
+    `${reviewPath(householdId, reviewId)}/resolve`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        ...unsafeHeaders(csrf),
+        'Idempotency-Key': idempotencyKey,
+      },
+      cache: 'no-store',
+      body: JSON.stringify(input),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status === 200) {
+    const review = parseCategorizationReview(await readJson<unknown>(response));
+    if (!review || review.id !== reviewId) {
+      throw unexpectedReviewResponse(response.status);
+    }
+    return review;
+  }
+  throw await parseErrorResponse(
+    response,
+    response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+    'The review decision could not be saved.',
   );
 }
 

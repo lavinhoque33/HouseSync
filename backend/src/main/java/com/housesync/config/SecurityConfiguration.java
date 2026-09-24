@@ -140,6 +140,14 @@ public class SecurityConfiguration {
                     .authenticated()
                     .requestMatchers(HttpMethod.PATCH, "/api/households/*/categorization-rules/*")
                     .authenticated()
+                    .requestMatchers(
+                        HttpMethod.GET,
+                        "/api/households/*/categorization-reviews",
+                        "/api/households/*/categorization-reviews/*")
+                    .authenticated()
+                    .requestMatchers(
+                        HttpMethod.POST, "/api/households/*/categorization-reviews/*/resolve")
+                    .authenticated()
                     .requestMatchers(HttpMethod.POST, "/api/households/*/transactions/*/allocation")
                     .authenticated()
                     .requestMatchers(

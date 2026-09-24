@@ -47,6 +47,7 @@ import {
 } from './money';
 import { previewEqualShares, sortCanonicalUserIds } from './allocation';
 import { categoryLabel } from './categories';
+import { CategorizationReviewsSection } from './CategorizationReviewsSection';
 import { CategorizationRulesSection } from './CategorizationRulesSection';
 import { MemberBalancesSection } from './MemberBalancesSection';
 import { ReportingSettingsSection } from './ReportingSettingsSection';
@@ -386,6 +387,11 @@ export function TransactionsSection({
     useState<PendingRuleCreate | null>(null);
   const [ruleCreating, setRuleCreating] = useState(false);
   const [rulesRefresh, setRulesRefresh] = useState(0);
+  // Reviews: every commit that can create, supersede, or resolve an
+  // owner-private suggestion (a manual entry, a category correction, a void,
+  // or a connected admission) bumps this signal so the review queue and its
+  // open count converge without remounting the section.
+  const [reviewsRefresh, setReviewsRefresh] = useState(0);
   // Bumped by every scope clear so the private rule panel drops its own
   // retained list and in-flight requests with the rest of the section.
   const [scopeReset, setScopeReset] = useState(0);
@@ -896,6 +902,10 @@ export function TransactionsSection({
       // stale, and the probe below repopulates only live entries.
       setAllocationByTransaction({});
       reloadViews(views, true, true);
+      // A confirmed connected entry can be classified by the deterministic
+      // classifier, so the owner's private review count and queue converge
+      // alongside the feed. Dismissals never reach here.
+      setReviewsRefresh((value) => value + 1);
       // A confirmed entry can move household spending exactly like a manual
       // mutation, so the dashboard refetches the shown period too.
       setReportingRefresh((value) => value + 1);
@@ -1023,6 +1033,39 @@ export function TransactionsSection({
 
   function bumpBalances() {
     setBalancesRefresh((value) => value + 1);
+  }
+
+  /**
+   * Converges the visible feeds and the open detail panel on a transaction
+   * whose category a review decision just committed. The category is
+   * descriptive, so member balances and exact spending totals stay exactly as
+   * they are (they are category-agnostic), and unrelated create, edit, split,
+   * and review drafts stay untouched. The committed representation lands
+   * immediately, and the authoritative feed reload that follows corrects
+   * ordering or paging the local update cannot.
+   */
+  function handleReviewedTransaction(transaction: Transaction) {
+    setOwnTransactions((current) =>
+      current === null
+        ? current
+        : current.map((value) =>
+            value.id === transaction.id ? transaction : value,
+          ),
+    );
+    setHouseholdTransactions((current) =>
+      current === null
+        ? current
+        : current.map((value) =>
+            value.id === transaction.id ? transaction : value,
+          ),
+    );
+    setDetail((current) =>
+      current?.id === transaction.id ? transaction : current,
+    );
+    // Owner-only provenance follows the committed decision, so the panel
+    // explains the new origin without being reopened.
+    if (detail?.id === transaction.id) void loadProvenance(transaction);
+    reloadViews(loadedViews(), false, true);
   }
 
   /**
@@ -1308,6 +1351,9 @@ export function TransactionsSection({
       // A posted refund changes the source expense's cumulative refunded
       // magnitude and therefore derived balances.
       if (created.kind === 'REFUND') bumpBalances();
+      // A new entry without an explicit category is classified on commit and
+      // may open a suggestion, so the private review count converges too.
+      setReviewsRefresh((value) => value + 1);
       reloadTransactions(true);
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
@@ -1615,6 +1661,10 @@ export function TransactionsSection({
       // A money correction of a refund or expense changes derived
       // balances; description/date/category changes do not.
       if (changedMoney) bumpBalances();
+      // Every committed correction moves the entry's version, and a category
+      // or description change can supersede an open suggestion, so the
+      // private review queue and its count converge on the committed state.
+      setReviewsRefresh((value) => value + 1);
       reloadTransactions(true);
       if (detail?.id === updated.id) {
         void loadProvenance(updated);
@@ -1817,6 +1867,9 @@ export function TransactionsSection({
         text: `Transaction voided. It stays listed as voided and stops counting toward spending.`,
       });
       bumpBalances();
+      // A void supersedes an open suggestion for the entry, so the private
+      // review count converges on the committed state.
+      setReviewsRefresh((value) => value + 1);
       reloadTransactions(true);
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
@@ -4279,6 +4332,18 @@ export function TransactionsSection({
         refreshSignal={rulesRefresh}
         scopeResetSignal={scopeReset}
       />
+      <CategorizationReviewsSection
+        household={household}
+        csrf={csrf}
+        onCsrfRefreshed={onCsrfRefreshed}
+        onSessionExpired={onSessionExpired}
+        onHouseholdAccessChanged={onHouseholdAccessChanged}
+        authorityConfirmed={authorityConfirmed}
+        categories={categories}
+        refreshSignal={reviewsRefresh}
+        scopeResetSignal={scopeReset}
+        onTransactionChanged={handleReviewedTransaction}
+      />
       <MemberBalancesSection
         household={household}
         currentUserId={currentUserId}
@@ -4356,6 +4421,17 @@ export function TransactionsSection({
                     rule.
                   </p>
                 </div>
+              )}
+              {freshState.reviewState === 'OPEN' && (
+                // The owner-only resource reports a suggestion for
+                // this entry. Only that fact appears here — the suggestion,
+                // its reason, and the decision all live in the private review
+                // queue below, where "Keep uncategorized" is an explicit
+                // decision rather than a missing one.
+                <p className="household-hint">
+                  HouseSync has a category suggestion for this entry. It is
+                  waiting for your decision under “Category reviews”.
+                </p>
               )}
             </>
           ) : detailProvenance.status === 'loading' ? (

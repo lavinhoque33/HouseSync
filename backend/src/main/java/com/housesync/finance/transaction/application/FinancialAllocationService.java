@@ -6,6 +6,7 @@ import static com.housesync.finance.transaction.domain.AllocationSharesPolicy.eq
 import com.housesync.finance.account.domain.SupportedCurrency;
 import com.housesync.finance.account.persistence.FinancialAccountRepository;
 import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAccountNotFoundException;
+import com.housesync.finance.categorization.application.CategorizationReviewService;
 import com.housesync.finance.transaction.domain.AllocationStatus;
 import com.housesync.finance.transaction.domain.TransactionKind;
 import com.housesync.finance.transaction.domain.TransactionStatus;
@@ -52,6 +53,7 @@ import java.util.TreeMap;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -82,6 +84,7 @@ public class FinancialAllocationService {
   private final FinancialAccountRepository accounts;
   private final HouseholdService households;
   private final Clock clock;
+  private final ObjectProvider<CategorizationReviewService> categorizationReviews;
 
   public FinancialAllocationService(
       FinancialTransactionRepository transactions,
@@ -90,7 +93,8 @@ public class FinancialAllocationService {
       FinancialAllocationIdempotencyRepository idempotency,
       FinancialAccountRepository accounts,
       HouseholdService households,
-      Clock clock) {
+      Clock clock,
+      ObjectProvider<CategorizationReviewService> categorizationReviews) {
     this.transactions = transactions;
     this.allocations = allocations;
     this.participants = participants;
@@ -98,6 +102,7 @@ public class FinancialAllocationService {
     this.accounts = accounts;
     this.households = households;
     this.clock = clock;
+    this.categorizationReviews = categorizationReviews;
   }
 
   /** Normalized create input; duplicate and malformed participants are rejected up front. */
@@ -214,6 +219,7 @@ public class FinancialAllocationService {
     // A state-changing allocation create moves the expense version once, so stale expense
     // forms and concurrent allocation changes conflict on the next attempt.
     expense.allocationChanged(now);
+    categorizationReviews.getObject().ledgerChanged(expense, false);
     transactions.flush();
     allocations.flush();
     idempotency.flush();
@@ -283,6 +289,7 @@ public class FinancialAllocationService {
     // Revocation moves the expense version once, so a stale revoke call or a stale
     // recreation attempt conflicts instead of acting on moved state.
     expense.allocationChanged(now);
+    categorizationReviews.getObject().ledgerChanged(expense, false);
     transactions.saveAndFlush(expense);
     allocations.save(allocation);
     allocations.flush();

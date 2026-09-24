@@ -10,6 +10,7 @@ import { StrictMode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   CategorizationOrigin,
+  CategorizationReview,
   CategorizationRule,
   CategorizationState,
   FinancialAccount,
@@ -103,6 +104,9 @@ interface RouteHandlers {
   ) => Response | Promise<Response>;
   rulePost?: (transactionId: string) => Response | Promise<Response>;
   rulePatch?: (ruleId: string) => Response | Promise<Response>;
+  reviewsGet?: (view: string | null) => Response | Promise<Response>;
+  reviewGet?: (reviewId: string) => Response | Promise<Response>;
+  reviewResolve?: (reviewId: string) => Response | Promise<Response>;
   balancesGet?: () => Response | Promise<Response>;
   membersGet?: () => Response | Promise<Response>;
   settingsGet?: () => Response | Promise<Response>;
@@ -157,6 +161,38 @@ function rule(overrides: Partial<CategorizationRule> = {}): CategorizationRule {
 
 const emptyRulePage = () =>
   jsonResponse({ items: [], limit: 50, offset: 0, hasMore: false });
+
+const REVIEW_ID = '80000000-0000-4000-8000-000000000001';
+const REVIEWS_BASE = `/api/households/${HOUSEHOLD.id}/categorization-reviews`;
+
+/** Exactly the eleven documented owner-private review fields. */
+function review(
+  overrides: Partial<CategorizationReview> = {},
+): CategorizationReview {
+  return {
+    id: REVIEW_ID,
+    transaction: transaction(),
+    evaluatedTransactionVersion: 0,
+    suggestedCategory: 'GROCERIES',
+    source: 'HEURISTIC',
+    confidence: 'HIGH',
+    reasonLabel: 'Merchant pattern matched',
+    status: 'OPEN',
+    version: 0,
+    createdAt: '2026-09-22T12:00:00Z',
+    updatedAt: '2026-09-22T12:00:00Z',
+    ...overrides,
+  };
+}
+
+const reviewPage = (items: CategorizationReview[], openCount = items.length) =>
+  jsonResponse({ items, limit: 50, offset: 0, hasMore: false, openCount });
+
+const reviewCalls = (calls: Call[]) =>
+  calls.filter(({ url }) => url.startsWith(`${REVIEWS_BASE}?`));
+
+const resolveCalls = (calls: Call[]) =>
+  calls.filter(({ url }) => url.endsWith(`${REVIEW_ID}/resolve`));
 
 const ALLOCATION_NOT_FOUND = () =>
   jsonResponse(
@@ -326,6 +362,26 @@ function stubFetch(routes: RouteHandlers) {
           throw new Error('unexpected PATCH categorization-rule');
         }
         return routes.rulePatch(ruleId);
+      }
+      if (url.startsWith(`${REVIEWS_BASE}/`) && url.endsWith('/resolve')) {
+        const reviewId = decodeURIComponent(
+          url.slice(REVIEWS_BASE.length + 1, -'/resolve'.length),
+        );
+        if (!routes.reviewResolve) {
+          throw new Error('unexpected POST categorization-review resolve');
+        }
+        return routes.reviewResolve(reviewId);
+      }
+      if (url.startsWith(`${REVIEWS_BASE}/`)) {
+        const reviewId = decodeURIComponent(url.slice(REVIEWS_BASE.length + 1));
+        if (!routes.reviewGet) {
+          throw new Error('unexpected GET categorization-review');
+        }
+        return routes.reviewGet(reviewId);
+      }
+      if (url.startsWith(`${REVIEWS_BASE}?`)) {
+        const query = new URLSearchParams(url.slice(REVIEWS_BASE.length + 1));
+        return routes.reviewsGet?.(query.get('view')) ?? reviewPage([]);
       }
       if (url === transactionBase && init?.method === 'POST') {
         if (!routes.transactionsPost) {
@@ -4695,6 +4751,39 @@ describe('categorization provenance', () => {
     expect(within(panel).getByText('2026-09-22T12:00:00Z')).toBeInTheDocument();
   });
 
+  it('points the owner at the review queue when a suggestion is open for the open entry', async () => {
+    renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () => transactionPage([transaction()]),
+      transactionGet: () => jsonResponse(transaction()),
+      categorizationGet: (transactionId) =>
+        jsonResponse(
+          categorizationState({
+            transactionId,
+            category: null,
+            origin: 'NONE',
+            reviewState: 'OPEN',
+          }),
+        ),
+      reviewsGet: () => reviewPage([review()], 1),
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    expect(
+      await within(panel).findByText(
+        /HouseSync has a category suggestion for this entry\. It is waiting for your decision under “Category reviews”\./,
+      ),
+    ).toBeInTheDocument();
+    // Only the existence of the suggestion is disclosed here; the suggestion
+    // itself stays owner-private behind the queue.
+    expect(within(panel).queryByText(/Food shopping/)).toBeNull();
+  });
+
   it('never probes provenance for another member’s shared entry', async () => {
     const { calls } = renderSection({
       transactionsGet: (view: 'OWN' | 'HOUSEHOLD') =>
@@ -5563,5 +5652,209 @@ describe('explicit future-match learning', () => {
       within(panel).queryByRole('button', { name: 'Use for future matches' }),
     ).toBeNull();
     expect(rulePostCalls(calls)).toHaveLength(0);
+  });
+});
+
+describe('category review queue integration', () => {
+  const EDIT_CATEGORY = `#edit-transaction-category-${EXPENSE_ID}`;
+  const NEW_DESCRIPTION = `#new-transaction-description-${HOUSEHOLD.id}`;
+
+  it('exposes the owner-private review count as one entry point without probing provenance per row', async () => {
+    const { calls } = renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () => transactionPage([transaction()]),
+      reviewsGet: () => reviewPage([review()], 1),
+    });
+    await screen.findByText('Groceries');
+
+    expect(
+      await screen.findByText('1 suggestion is waiting for your decision.'),
+    ).toBeInTheDocument();
+    const entry = screen.getByRole('button', {
+      name: 'Review suggested categories (1 waiting)',
+    });
+    expect(entry).toHaveAttribute(
+      'aria-controls',
+      `finance-reviews-queue-${HOUSEHOLD.id}`,
+    );
+    // A visible feed row is never a review or provenance probe.
+    expect(categorizationCalls(calls)).toHaveLength(0);
+    expect(reviewCalls(calls)).toHaveLength(1);
+
+    fireEvent.click(entry);
+    expect(
+      await screen.findByText(/Recorded: Uncategorized/),
+    ).toBeInTheDocument();
+    expect(categorizationCalls(calls)).toHaveLength(0);
+  });
+
+  it('refreshes the private review count after a committed category correction', async () => {
+    const { calls } = renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () => transactionPage([transaction()]),
+      reviewsGet: () => reviewPage([review()], 1),
+      transactionsPatch: () =>
+        jsonResponse(transaction({ category: 'DINING', version: 1 })),
+    });
+    await screen.findByText('Groceries');
+    await waitFor(() => expect(reviewCalls(calls)).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Groceries' }));
+    fireEvent.change(
+      await screen.findByLabelText('Category', { selector: EDIT_CATEGORY }),
+      { target: { value: 'DINING' } },
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save correction' }));
+
+    expect(
+      await screen.findByText(/Transaction corrected/),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(reviewCalls(calls).length).toBeGreaterThanOrEqual(2),
+    );
+  });
+
+  it('refreshes the private review count after a void', async () => {
+    const { calls } = renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () => transactionPage([transaction()]),
+      reviewsGet: () => reviewPage([review()], 1),
+      transactionsPatch: () =>
+        jsonResponse(transaction({ status: 'VOIDED', version: 1 })),
+    });
+    await screen.findByText('Groceries');
+    await waitFor(() => expect(reviewCalls(calls)).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Void Groceries' }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Void transaction' }),
+    );
+
+    expect(await screen.findByText(/Transaction voided/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(reviewCalls(calls).length).toBeGreaterThanOrEqual(2),
+    );
+  });
+
+  it('refreshes the private review count when a sibling connected admission commits', async () => {
+    const { calls, rerenderWithLedgerSignal } = renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () => transactionPage([transaction()]),
+      reviewsGet: () => reviewPage([review()], 1),
+    });
+    await screen.findByText('Groceries');
+    await waitFor(() => expect(reviewCalls(calls)).toHaveLength(1));
+
+    rerenderWithLedgerSignal(1);
+
+    await waitFor(() =>
+      expect(reviewCalls(calls).length).toBeGreaterThanOrEqual(2),
+    );
+  });
+
+  it('converges the feed, the open detail, and provenance after a resolution without touching category-agnostic totals or the entry draft', async () => {
+    let committedCategory: string | null = null;
+    let committedVersion = 0;
+    const { calls } = renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: () =>
+        transactionPage([
+          transaction({
+            category: committedCategory,
+            version: committedVersion,
+          }),
+        ]),
+      transactionGet: () =>
+        jsonResponse(
+          transaction({
+            category: committedCategory,
+            version: committedVersion,
+          }),
+        ),
+      categorizationGet: (transactionId) =>
+        jsonResponse(
+          categorizationState({
+            transactionId,
+            transactionVersion: committedVersion,
+            category: committedCategory,
+            origin: committedCategory === null ? 'NONE' : 'USER',
+          }),
+        ),
+      reviewsGet: () =>
+        reviewPage(
+          committedCategory === null ? [review()] : [],
+          committedCategory === null ? 1 : 0,
+        ),
+      reviewResolve: () => {
+        committedCategory = 'GROCERIES';
+        committedVersion = 1;
+        return jsonResponse(
+          review({
+            status: 'ACCEPTED',
+            version: 1,
+            transaction: transaction({
+              category: 'GROCERIES',
+              version: 1,
+            }),
+          }),
+        );
+      },
+    });
+    await screen.findByText('Groceries');
+    const balancesBefore = calls.filter(({ url }) =>
+      url.endsWith('/member-balances'),
+    ).length;
+    const summaryBefore = calls.filter(({ url }) =>
+      url.includes('/spending-summary?'),
+    ).length;
+
+    // An unrelated manual-entry draft in the same section.
+    fireEvent.change(
+      screen.getByLabelText('Description', { selector: NEW_DESCRIPTION }),
+      { target: { value: 'Draft lunch' } },
+    );
+    // The owner's details for the same entry are open when the decision lands.
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
+    expect(within(panel).getByText('Uncategorized')).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /Review suggested categories/ }),
+    );
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Review the suggestion for Groceries',
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+
+    expect(await screen.findByText(/Decision saved/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(panel).getByText('Food shopping')).toBeInTheDocument(),
+    );
+    // The committed decision is re-read as owner-only provenance, and the
+    // feed was reloaded from the server.
+    expect(categorizationCalls(calls).length).toBeGreaterThanOrEqual(2);
+    await waitFor(() => expect(resolveCalls(calls)).toHaveLength(1));
+    expect(JSON.parse(String(resolveCalls(calls)[0]?.init?.body))).toEqual({
+      expectedVersion: 0,
+      expectedTransactionVersion: 0,
+      action: 'ACCEPT_SUGGESTION',
+    });
+    // Category-agnostic projections are deliberately untouched.
+    expect(
+      calls.filter(({ url }) => url.endsWith('/member-balances')).length,
+    ).toBe(balancesBefore);
+    expect(
+      calls.filter(({ url }) => url.includes('/spending-summary?')).length,
+    ).toBe(summaryBefore);
+    // The unrelated entry draft survives the background convergence.
+    expect(
+      screen.getByLabelText('Description', { selector: NEW_DESCRIPTION }),
+    ).toHaveValue('Draft lunch');
   });
 });

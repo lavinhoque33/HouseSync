@@ -20,6 +20,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.housesync.finance.account.application.FinancialAccountService;
 import com.housesync.finance.activity.application.BankActivityService;
 import com.housesync.finance.categorization.application.CategorizationQueryService;
+import com.housesync.finance.categorization.application.CategorizationReviewService;
 import com.housesync.finance.categorization.application.CategorizationRuleLookup;
 import com.housesync.finance.categorization.application.CategorizationRuleService;
 import com.housesync.finance.connection.application.ConnectionLifecycleService;
@@ -79,6 +80,7 @@ class SecurityConfigurationTest {
   @MockitoBean private InvitationService invitations;
   @MockitoBean private FinancialAccountService financialAccounts;
   @MockitoBean private CategorizationQueryService categorization;
+  @MockitoBean private CategorizationReviewService categorizationReviews;
   @MockitoBean private CategorizationRuleLookup categorizationRuleLookup;
   @MockitoBean private CategorizationRuleService categorizationRules;
   @MockitoBean private FinancialTransactionService financialTransactions;
