@@ -1608,7 +1608,7 @@ code {
 
 @media (max-width: 620px) {
   .finance-detail-list > div {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.15rem;
   }
 }
