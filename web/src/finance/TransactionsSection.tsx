@@ -59,6 +59,7 @@ import { RepaymentsSection } from './RepaymentsSection';
 import { SettlementSuggestionsSection } from './SettlementSuggestionsSection';
 import { ReportingSettingsSection } from './ReportingSettingsSection';
 import { SpendingDashboardSection } from './SpendingDashboardSection';
+import { ContributionSummarySection } from './ContributionSummarySection';
 import {
   isFutureDateInZone,
   resolveCalculationZone,
@@ -463,6 +464,11 @@ export function TransactionsSection({
   // refetches the spending dashboard after relevant mutations.
   const [reportingZone, setReportingZone] = useState('Etc/UTC');
   const [reportingRefresh, setReportingRefresh] = useState(0);
+  // A revoked share vanishes from a newly authorized feed rather than
+  // returning an incremented version. Retain only the previous first page.
+  const householdFirstPageRef = useRef<Map<string, number> | null>(null);
+  const householdProjectionChangedRef = useRef(false);
+  const reportingRefreshedGenerationRef = useRef(-1);
 
   const csrfRef = useRef(csrf);
   const generationRef = useRef(0);
@@ -622,6 +628,29 @@ export function TransactionsSection({
       setOwnHasMore(page.hasMore);
       setOwnNextOffset(page.offset + page.limit);
     } else {
+      if (page.offset === 0) {
+        const projection = new Map<string, number>();
+        for (const row of rows) {
+          if (
+            row.visibility === 'HOUSEHOLD' &&
+            row.status === 'POSTED' &&
+            (row.kind === 'EXPENSE' || row.kind === 'REFUND')
+          ) {
+            projection.set(row.id, row.version);
+          }
+        }
+        const previous = householdFirstPageRef.current;
+        if (
+          previous !== null &&
+          (projection.size !== previous.size ||
+            [...projection].some(
+              ([id, version]) => previous.get(id) !== version,
+            ))
+        ) {
+          householdProjectionChangedRef.current = true;
+        }
+        householdFirstPageRef.current = projection;
+      }
       setHouseholdTransactions(rows);
       setHouseholdHasMore(page.hasMore);
       setHouseholdNextOffset(page.offset + page.limit);
@@ -839,6 +868,7 @@ export function TransactionsSection({
    */
   function reloadTransactions(preserveNotice = false) {
     reloadViews(loadedViews(), false, preserveNotice);
+    reportingRefreshedGenerationRef.current = generationRef.current;
     // Every committed transaction/share/refund mutation can move household
     // spending, so the dashboard refetches the shown period alongside the
     // feeds. Manual feed refreshes keep their own scope; the dashboard has
@@ -982,6 +1012,9 @@ export function TransactionsSection({
     setOwnTransactions(null);
     setOwnHasMore(false);
     setHouseholdTransactions(null);
+    householdFirstPageRef.current = null;
+    householdProjectionChangedRef.current = false;
+    reportingRefreshedGenerationRef.current = -1;
     setHouseholdHasMore(false);
     setPendingCreate(null);
     setRefundSource(null);
@@ -1164,6 +1197,7 @@ export function TransactionsSection({
       // stale, and the probe below repopulates only live entries.
       setAllocationByTransaction({});
       reloadViews(views, true, true);
+      reportingRefreshedGenerationRef.current = generationRef.current;
       // A confirmed connected entry can be classified by the deterministic
       // classifier, so the owner's private review count and queue converge
       // alongside the feed. Dismissals never reach here.
@@ -1500,7 +1534,18 @@ export function TransactionsSection({
             : opened,
         );
     }
+    const projectionChanged = householdProjectionChangedRef.current;
+    householdProjectionChangedRef.current = false;
+    const reportAlreadyRefreshed =
+      reportingRefreshedGenerationRef.current === generation;
+    reportingRefreshedGenerationRef.current = -1;
     if (balancesChanged) bumpBalances();
+    if ((balancesChanged || projectionChanged) && !reportAlreadyRefreshed) {
+      // A vanished household row cannot appear in `latest` with a newer
+      // version, but it changes spending and contributions. One refresh
+      // handles all rows in this authorized feed/detail commit.
+      setReportingRefresh((value) => value + 1);
+    }
     if (probeIds.length === 0) return;
     for (const id of probeIds)
       allocationProbeVersionRef.current[id] =
@@ -5167,6 +5212,15 @@ export function TransactionsSection({
         refreshSignal={reportingRefresh}
         onSessionExpired={onSessionExpired}
         onHouseholdAccessChanged={onHouseholdAccessChanged}
+      />
+      <ContributionSummarySection
+        household={household}
+        reportingZone={reportingZone}
+        refreshSignal={reportingRefresh}
+        membershipRefreshSignal={membershipRefreshSignal}
+        onSessionExpired={onSessionExpired}
+        onHouseholdAccessChanged={onHouseholdAccessChanged}
+        nowProvider={nowProvider}
       />
     </section>
   );

@@ -3,6 +3,7 @@ import {
   ApiError,
   fetchFinanceSettings,
   fetchSpendingSummary,
+  fetchContributionSummary,
   patchFinanceSettings,
 } from '../auth/client';
 
@@ -427,5 +428,122 @@ describe('spending summary typed client', () => {
       timedOut: true,
     });
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
+describe('contribution summary strict client', () => {
+  const snapshot = 'a'.repeat(64);
+  const item = {
+    userId: '11111111-2222-4333-8444-555555555555',
+    membershipStatus: 'DEPARTED',
+    expensePaid: '0.00',
+    refundReceived: '1.00',
+    netPaid: '-1.00',
+    allocatedCost: '-0.70',
+  };
+  function response(overrides: Record<string, unknown> = {}) {
+    return {
+      from: '2026-09-01',
+      to: '2026-10-01',
+      reportingTimeZone: 'Etc/UTC',
+      currency: 'USD',
+      snapshot,
+      totals: {
+        expenseTotal: '0.00',
+        refundTotal: '1.00',
+        netSpending: '-1.00',
+        allocatedCostTotal: '-0.70',
+        unallocatedNet: '-0.30',
+      },
+      items: [item],
+      limit: 50,
+      offset: 0,
+      hasMore: false,
+      ...overrides,
+    };
+  }
+  it('accepts refund-only signed costs and requests a no-store snapshot-bound page', async () => {
+    const calls = stubFetch(() =>
+      jsonResponse(response({ offset: 1, items: [] })),
+    );
+    const page = await fetchContributionSummary(
+      HOUSEHOLD_ID,
+      '2026-09-01',
+      '2026-10-01',
+      'USD',
+      { offset: 1, snapshot },
+    );
+    expect(page.totals.unallocatedNet).toBe('-0.30');
+    expect(calls[0]?.url).toContain(`offset=1&snapshot=${snapshot}`);
+    expect(calls[0]?.init?.cache).toBe('no-store');
+  });
+  it('rejects extra/private columns, mismatched arithmetic, malformed pages and snapshot drift', async () => {
+    const malformed = [
+      response({ repaymentCount: 1 }),
+      response({ items: [{ ...item, repaymentSent: '2.70' }] }),
+      response({ items: [{ ...item, netPaid: '1.00' }] }),
+      response({ items: [{ ...item, expensePaid: '-0.00' }] }),
+      response({ items: [{ ...item, allocatedCost: '-0.7' }] }),
+      response({ items: [{ ...item, membershipStatus: 'UNKNOWN' }] }),
+      response({ items: [item, item] }),
+      response({ items: [{ ...item, userId: 'BAD' }] }),
+      response({
+        items: [
+          {
+            ...item,
+            expensePaid: '0.00',
+            refundReceived: '0.00',
+            netPaid: '0.00',
+            allocatedCost: '0.00',
+          },
+        ],
+      }),
+      response({ totals: { ...response().totals, unallocatedNet: '-0.20' } }),
+      response({ snapshot: 'B'.repeat(64) }),
+      response({ hasMore: true }),
+      response({ limit: 100 }),
+      response({ offset: 1 }),
+      response({ reportingTimeZone: 'EST' }),
+      response({ from: '2026-08-01' }),
+    ];
+    for (const body of malformed) {
+      stubFetch(() => jsonResponse(body));
+      await expect(
+        fetchContributionSummary(
+          HOUSEHOLD_ID,
+          '2026-09-01',
+          '2026-10-01',
+          'USD',
+        ),
+      ).rejects.toMatchObject({
+        status: 200,
+        code: 'UNKNOWN_ERROR',
+        message:
+          'The server returned an unexpected contribution-summary response.',
+      });
+    }
+  });
+  it('preserves the safe 409 code for an invalidated continuation', async () => {
+    stubFetch(() =>
+      jsonResponse(
+        {
+          code: 'CONTRIBUTION_SNAPSHOT_STALE',
+          message: 'Snapshot changed.',
+        },
+        409,
+      ),
+    );
+    await expect(
+      fetchContributionSummary(
+        HOUSEHOLD_ID,
+        '2026-09-01',
+        '2026-10-01',
+        'USD',
+        { offset: 50, snapshot },
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: 'CONTRIBUTION_SNAPSHOT_STALE',
+    });
   });
 });

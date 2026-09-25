@@ -107,6 +107,7 @@ export type ApiErrorCode =
   | 'REPAYMENT_NOT_FOUND'
   | 'REPAYMENT_CONFLICT'
   | 'SETTLEMENT_SNAPSHOT_STALE'
+  | 'CONTRIBUTION_SNAPSHOT_STALE'
   | 'BANK_ACTIVITY_NOT_FOUND'
   | 'OBSERVATION_NOT_POSTED'
   | 'OBSERVATION_ALREADY_CONFIRMED'
@@ -189,6 +190,7 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'REPAYMENT_NOT_FOUND',
     'REPAYMENT_CONFLICT',
     'SETTLEMENT_SNAPSHOT_STALE',
+    'CONTRIBUTION_SNAPSHOT_STALE',
     'FINANCE_BUSY',
     'BANK_ACTIVITY_NOT_FOUND',
     'OBSERVATION_NOT_POSTED',
@@ -4679,6 +4681,250 @@ export async function fetchSpendingSummary(
   const summary = parseSpendingSummary(await readJson<unknown>(response));
   if (!summary) throw unexpectedSpendingSummaryResponse(response.status);
   return summary;
+}
+
+export interface ContributionItem {
+  userId: string;
+  membershipStatus: 'CURRENT' | 'DEPARTED';
+  expensePaid: string;
+  refundReceived: string;
+  netPaid: string;
+  allocatedCost: string;
+}
+
+export interface ContributionSummary {
+  from: string;
+  to: string;
+  reportingTimeZone: string;
+  currency: FinancialAccountCurrency;
+  snapshot: string;
+  totals: {
+    expenseTotal: string;
+    refundTotal: string;
+    netSpending: string;
+    allocatedCostTotal: string;
+    unallocatedNet: string;
+  };
+  items: ContributionItem[];
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+function exactKeys(record: Record<string, unknown>, keys: string[]): boolean {
+  return (
+    Object.keys(record).length === keys.length &&
+    keys.every((key) => Object.hasOwn(record, key))
+  );
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function parseContributionSummary(
+  value: unknown,
+  from: string,
+  to: string,
+  currency: FinancialAccountCurrency,
+  offset: number,
+  limit: number,
+  requestedSnapshot?: string,
+): ContributionSummary | undefined {
+  const record = objectRecord(value);
+  if (
+    !record ||
+    !exactKeys(record, [
+      'from',
+      'to',
+      'reportingTimeZone',
+      'currency',
+      'snapshot',
+      'totals',
+      'items',
+      'limit',
+      'offset',
+      'hasMore',
+    ]) ||
+    record.from !== from ||
+    record.to !== to ||
+    !isReportBoundaryDate(from) ||
+    !isReportBoundaryDate(to) ||
+    from >= to ||
+    typeof record.reportingTimeZone !== 'string' ||
+    !isRegionShapedZone(record.reportingTimeZone) ||
+    record.currency !== currency ||
+    typeof record.snapshot !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(record.snapshot) ||
+    (requestedSnapshot !== undefined &&
+      record.snapshot !== requestedSnapshot) ||
+    record.limit !== limit ||
+    record.offset !== offset ||
+    typeof record.hasMore !== 'boolean' ||
+    !Array.isArray(record.items) ||
+    record.items.length > limit ||
+    (record.hasMore && record.items.length !== limit)
+  )
+    return undefined;
+
+  const totals = objectRecord(record.totals);
+  if (
+    !totals ||
+    !exactKeys(totals, [
+      'expenseTotal',
+      'refundTotal',
+      'netSpending',
+      'allocatedCostTotal',
+      'unallocatedNet',
+    ])
+  )
+    return undefined;
+  for (const key of Object.keys(totals)) {
+    const value = totals[key];
+    if (typeof value !== 'string' || !isAggregateAmountString(value, currency))
+      return undefined;
+  }
+  const amount = (key: string) =>
+    signedMinorUnitsOfAggregate(totals[key] as string, currency);
+  if (
+    (totals.expenseTotal as string).startsWith('-') ||
+    (totals.refundTotal as string).startsWith('-') ||
+    amount('expenseTotal') - amount('refundTotal') !== amount('netSpending') ||
+    amount('allocatedCostTotal') + amount('unallocatedNet') !==
+      amount('netSpending')
+  )
+    return undefined;
+
+  const items: ContributionItem[] = [];
+  let previous = '';
+  for (const entry of record.items) {
+    const item = objectRecord(entry);
+    if (
+      !item ||
+      !exactKeys(item, [
+        'userId',
+        'membershipStatus',
+        'expensePaid',
+        'refundReceived',
+        'netPaid',
+        'allocatedCost',
+      ]) ||
+      typeof item.userId !== 'string' ||
+      !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(item.userId) ||
+      item.userId <= previous ||
+      (item.membershipStatus !== 'CURRENT' &&
+        item.membershipStatus !== 'DEPARTED') ||
+      typeof item.expensePaid !== 'string' ||
+      !isAggregateAmountString(item.expensePaid, currency) ||
+      typeof item.refundReceived !== 'string' ||
+      !isAggregateAmountString(item.refundReceived, currency) ||
+      typeof item.netPaid !== 'string' ||
+      !isAggregateAmountString(item.netPaid, currency) ||
+      typeof item.allocatedCost !== 'string' ||
+      !isAggregateAmountString(item.allocatedCost, currency) ||
+      (item.expensePaid as string).startsWith('-') ||
+      (item.refundReceived as string).startsWith('-')
+    )
+      return undefined;
+    const paid = signedMinorUnitsOfAggregate(
+      item.expensePaid as string,
+      currency,
+    );
+    const refund = signedMinorUnitsOfAggregate(
+      item.refundReceived as string,
+      currency,
+    );
+    const cost = signedMinorUnitsOfAggregate(
+      item.allocatedCost as string,
+      currency,
+    );
+    if (
+      paid - refund !==
+        signedMinorUnitsOfAggregate(item.netPaid as string, currency) ||
+      (paid === 0n && refund === 0n && cost === 0n)
+    )
+      return undefined;
+    previous = item.userId;
+    items.push(item as unknown as ContributionItem);
+  }
+  return { ...record, totals, items } as unknown as ContributionSummary;
+}
+
+/** A page is one current-state projection; continuation requires its fingerprint. */
+export async function fetchContributionSummary(
+  householdId: string,
+  from: string,
+  to: string,
+  currency: FinancialAccountCurrency,
+  options: {
+    limit?: number;
+    offset?: number;
+    snapshot?: string;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  } = {},
+): Promise<ContributionSummary> {
+  const limit = options.limit ?? 50;
+  const offset = options.offset ?? 0;
+  if (
+    !isReportBoundaryDate(from) ||
+    !isReportBoundaryDate(to) ||
+    from >= to ||
+    !isFinancialAccountCurrency(currency) ||
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > 100 ||
+    !Number.isInteger(offset) ||
+    offset < 0 ||
+    offset > 10000 ||
+    (offset > 0 && options.snapshot === undefined) ||
+    (options.snapshot !== undefined && !/^[0-9a-f]{64}$/.test(options.snapshot))
+  )
+    throw new ApiError({
+      status: 0,
+      code: 'VALIDATION_FAILED',
+      message: 'Choose a valid contribution period, currency and page.',
+    });
+  const query = new URLSearchParams({ from, to, currency });
+  if (options.limit !== undefined) query.set('limit', String(limit));
+  if (options.offset !== undefined) query.set('offset', String(offset));
+  if (options.snapshot !== undefined) query.set('snapshot', options.snapshot);
+  const response = await apiFetch(
+    `/api/households/${encodeURIComponent(householdId)}/contribution-summary?${query}`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    options.signal,
+    options.timeoutMs ?? AUTH_TIMEOUT_MS,
+  );
+  if (!response.ok)
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load household contributions.',
+    );
+  const parsed = parseContributionSummary(
+    await readJson<unknown>(response),
+    from,
+    to,
+    currency,
+    offset,
+    limit,
+    options.snapshot,
+  );
+  if (!parsed)
+    throw new ApiError({
+      status: response.status,
+      code: 'UNKNOWN_ERROR',
+      message:
+        'The server returned an unexpected contribution-summary response.',
+    });
+  return parsed;
 }
 
 function repaymentPath(householdId: string, id?: string): string {

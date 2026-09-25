@@ -31,6 +31,7 @@ import com.housesync.finance.connection.application.ConnectionSyncService;
 import com.housesync.finance.connection.webhook.WebhookIngressService;
 import com.housesync.finance.repayment.RepaymentRepository;
 import com.housesync.finance.repayment.RepaymentService;
+import com.housesync.finance.report.application.ContributionSummaryService;
 import com.housesync.finance.report.application.FinanceReportService;
 import com.housesync.finance.settlement.SettlementService;
 import com.housesync.finance.transaction.application.FinancialAllocationService;
@@ -96,6 +97,7 @@ class SecurityConfigurationTest {
   @MockitoBean private RepaymentService repayments;
   @MockitoBean private SettlementService settlements;
   @MockitoBean private FinanceReportService reporting;
+  @MockitoBean private ContributionSummaryService contributions;
   @MockitoBean private ConnectionLinkService connectionLinks;
   @MockitoBean private ConnectionQueryService connectionQueries;
   @MockitoBean private ConnectionSelectionService connectionSelection;
@@ -158,6 +160,7 @@ class SecurityConfigurationTest {
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
     "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/finance-settings",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/spending-summary",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/contribution-summary",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/categorization-ai-work/status",
     "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts",
     "POST,"

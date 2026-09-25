@@ -123,7 +123,8 @@ public class SecurityConfiguration {
                         "/api/households/*/transactions/*/categorization",
                         "/api/households/*/transaction-categories",
                         "/api/households/*/finance-settings",
-                        "/api/households/*/spending-summary")
+                        "/api/households/*/spending-summary",
+                        "/api/households/*/contribution-summary")
                     .authenticated()
                     .requestMatchers(
                         HttpMethod.PATCH,

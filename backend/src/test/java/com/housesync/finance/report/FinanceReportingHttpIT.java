@@ -761,6 +761,387 @@ class FinanceReportingHttpIT {
     assertThat(stored.path("version").asInt()).isZero();
   }
 
+  @Test
+  void contributionsExactTaggedRefundsAndCurrentStateRestatement() throws Exception {
+    Agent owner = signedInAgent("contribution-owner");
+    String home = createHousehold(owner, "Contribution home");
+    Agent member = signedInAgent("contribution-member");
+    addMember(home, member.userId());
+    String account = createAccount(owner, home, "Shared USD", "CASH", "USD");
+    String expense =
+        created(
+            owner.createTransaction(
+                home,
+                UUID.randomUUID(),
+                datedEntry(account, "EXPENSE", "-10.00", "USD", "Shared", "2026-09-10")));
+    String allocationPath = transactionPath(home) + "/" + expense + "/allocation";
+    Resp allocation =
+        owner.request(
+            "POST",
+            allocationPath,
+            "{\"expectedVersion\":0,\"participantShares\":["
+                + "{\"userId\":\""
+                + owner.userId()
+                + "\",\"share\":{\"amount\":\"7.00\",\"currency\":\"USD\"}},"
+                + "{\"userId\":\""
+                + member.userId()
+                + "\",\"share\":{\"amount\":\"3.00\",\"currency\":\"USD\"}}]}",
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(allocation.status).as(allocation.body).isEqualTo(201);
+    assertThat(allocation.json().path("refundPolicy").asText()).isEqualTo("EXACT_JEFFERSON_V1");
+    String september = contributionsPath(home, "2026-09-01", "2026-10-01", "USD");
+    JsonNode first = member.get(september).json();
+    assertThat(first.propertyNames())
+        .containsExactlyInAnyOrder(
+            "from",
+            "to",
+            "reportingTimeZone",
+            "currency",
+            "snapshot",
+            "totals",
+            "items",
+            "limit",
+            "offset",
+            "hasMore");
+    assertThat(first.path("totals").propertyNames())
+        .containsExactly(
+            "expenseTotal", "refundTotal", "netSpending", "allocatedCostTotal", "unallocatedNet");
+    assertThat(first.path("items").get(0).propertyNames())
+        .containsExactly(
+            "userId",
+            "membershipStatus",
+            "expensePaid",
+            "refundReceived",
+            "netPaid",
+            "allocatedCost");
+    assertThat(first.path("totals").path("expenseTotal").asText()).isEqualTo("10.00");
+    assertThat(first.path("totals").path("allocatedCostTotal").asText()).isEqualTo("10.00");
+    assertThat(first.path("totals").path("unallocatedNet").asText()).isEqualTo("0.00");
+    assertThat(contributionItem(first, owner.userId()).path("expensePaid").asText())
+        .isEqualTo("10.00");
+    assertThat(contributionItem(first, owner.userId()).path("allocatedCost").asText())
+        .isEqualTo("7.00");
+    assertThat(contributionItem(first, member.userId()).path("allocatedCost").asText())
+        .isEqualTo("3.00");
+    String repaymentPath = "/api/households/" + home + "/repayments";
+    Resp pending =
+        member.request(
+            "POST",
+            repaymentPath,
+            "{\"recipientUserId\":\""
+                + owner.userId()
+                + "\",\"money\":{\"amount\":\"2.70\",\"currency\":\"USD\"},\"occurredOn\":\"2026-09-20\"}",
+            member.csrfToken,
+            UUID.randomUUID());
+    assertThat(pending.status).as(pending.body).isEqualTo(201);
+    Resp confirmed =
+        owner.request(
+            "POST",
+            repaymentPath + "/" + pending.json().path("id").asText() + "/decision",
+            "{\"expectedVersion\":0,\"decision\":\"CONFIRM\"}",
+            owner.csrfToken,
+            null);
+    assertThat(confirmed.status).as(confirmed.body).isEqualTo(200);
+    Resp afterRepayment = member.get(september);
+    assertThat(afterRepayment.json()).isEqualTo(first);
+    assertThat(afterRepayment.body)
+        .doesNotContain("repaymentSent", "repaymentReceived", "accountId");
+    assertThat(first.path("snapshot").asText()).matches("[0-9a-f]{64}");
+    assertThat(member.get(september).json().path("snapshot")).isEqualTo(first.path("snapshot"));
+
+    String refund =
+        created(
+            owner.createTransaction(
+                home,
+                UUID.randomUUID(),
+                refundEntry(account, expense, "1.00", "USD", "Partial", "2026-10-05")));
+    String october = contributionsPath(home, "2026-10-01", "2026-11-01", "USD");
+    Resp octoberRead = member.get(october);
+    assertThat(octoberRead.status).as(octoberRead.body).isEqualTo(200);
+    assertThat(octoberRead.cacheControl()).contains("no-store");
+    JsonNode period = octoberRead.json();
+    assertThat(period.path("totals").path("expenseTotal").asText()).isEqualTo("0.00");
+    assertThat(period.path("totals").path("refundTotal").asText()).isEqualTo("1.00");
+    assertThat(period.path("totals").path("netSpending").asText()).isEqualTo("-1.00");
+    assertThat(period.path("totals").path("allocatedCostTotal").asText()).isEqualTo("-1.00");
+    assertThat(contributionItem(period, owner.userId()).path("netPaid").asText())
+        .isEqualTo("-1.00");
+    assertThat(contributionItem(period, owner.userId()).path("allocatedCost").asText())
+        .isEqualTo("-0.70");
+    assertThat(contributionItem(period, member.userId()).path("allocatedCost").asText())
+        .isEqualTo("-0.30");
+    assertThat(member.get(september).json().path("snapshot")).isEqualTo(first.path("snapshot"));
+
+    // Corrected posted amount restates the same bucket; voiding removes it altogether.
+    Resp corrected =
+        owner.patchTransaction(
+            home,
+            refund,
+            "{\"expectedVersion\":0,\"money\":{\"amount\":\"2.00\",\"currency\":\"USD\"}}");
+    assertThat(corrected.status).as(corrected.body).isEqualTo(200);
+    JsonNode doubled = member.get(october).json();
+    assertThat(contributionItem(doubled, owner.userId()).path("allocatedCost").asText())
+        .isEqualTo("-1.40");
+    assertThat(contributionItem(doubled, member.userId()).path("allocatedCost").asText())
+        .isEqualTo("-0.60");
+    assertThat(
+            member
+                .get(october + "&snapshot=" + period.path("snapshot").asText())
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("CONTRIBUTION_SNAPSHOT_STALE");
+    Resp voided =
+        owner.patchTransaction(home, refund, "{\"expectedVersion\":1,\"status\":\"VOIDED\"}");
+    assertThat(voided.status).as(voided.body).isEqualTo(200);
+    assertThat(member.get(october).json().path("items").size()).isZero();
+    assertThat(member.get(september).json().path("snapshot")).isEqualTo(first.path("snapshot"));
+
+    int expenseVersion =
+        owner.get(transactionPath(home) + "/" + expense).json().path("version").asInt();
+    Resp revoked =
+        owner.request(
+            "PATCH",
+            allocationPath,
+            "{\"expectedVersion\":" + expenseVersion + ",\"status\":\"REVOKED\"}",
+            owner.csrfToken,
+            null);
+    assertThat(revoked.status).as(revoked.body).isEqualTo(200);
+    JsonNode unallocated = member.get(september).json();
+    assertThat(unallocated.path("totals").path("allocatedCostTotal").asText()).isEqualTo("0.00");
+    assertThat(unallocated.path("totals").path("unallocatedNet").asText()).isEqualTo("10.00");
+    assertThat(unallocated.path("snapshot")).isNotEqualTo(first.path("snapshot"));
+  }
+
+  @Test
+  void contributionsPaginationPrivacyMembershipAndValidation() throws Exception {
+    Agent owner = signedInAgent("contribution-guard");
+    String home = createHousehold(owner, "Contribution guarded home");
+    Agent member = signedInAgent("contribution-departed");
+    addMember(home, member.userId());
+    Agent outsider = signedInAgent("contribution-outsider");
+    String ownerAccount = createAccount(owner, home, "Shared USD", "CASH", "USD");
+    String memberAccount = createAccount(member, home, "Member USD", "CASH", "USD");
+    String firstExpense =
+        created(
+            owner.createTransaction(
+                home,
+                UUID.randomUUID(),
+                datedEntry(ownerAccount, "EXPENSE", "-5.00", "USD", "First", "2026-09-10")));
+    String secondExpense =
+        created(
+            member.createTransaction(
+                home,
+                UUID.randomUUID(),
+                datedEntry(memberAccount, "EXPENSE", "-5.00", "USD", "Second", "2026-09-10")));
+    created(
+        owner.createTransaction(
+            home,
+            UUID.randomUUID(),
+            privateEntry(ownerAccount, "EXPENSE", "-99.00", "USD", "Private", "2026-09-10")));
+    String path = contributionsPath(home, "2026-09-01", "2026-10-01", "USD");
+    JsonNode page = owner.get(path + "&limit=1").json();
+    assertThat(page.path("totals").path("netSpending").asText()).isEqualTo("10.00");
+    assertThat(page.path("totals").path("unallocatedNet").asText()).isEqualTo("10.00");
+    assertThat(page.path("items").size()).isEqualTo(1);
+    assertThat(page.path("hasMore").asBoolean()).isTrue();
+    String snapshot = page.path("snapshot").asText();
+    JsonNode next = owner.get(path + "&limit=1&offset=1&snapshot=" + snapshot).json();
+    assertThat(next.path("totals")).isEqualTo(page.path("totals"));
+    assertThat(next.path("items").size()).isEqualTo(1);
+    assertThat(next.path("hasMore").asBoolean()).isFalse();
+    assertThat(next.path("items").get(0).path("userId").asText())
+        .isNotEqualTo(page.path("items").get(0).path("userId").asText());
+    assertThat(page.toString()).doesNotContain("Private", "repayment", "accountId", "description");
+    assertThat(
+            owner.patchTransaction(
+                    home,
+                    firstExpense,
+                    "{\"expectedVersion\":0,\"money\":{\"amount\":\"-4.00\",\"currency\":\"USD\"}}")
+                .status)
+        .isEqualTo(200);
+    assertThat(
+            member.patchTransaction(
+                    home,
+                    secondExpense,
+                    "{\"expectedVersion\":0,\"money\":{\"amount\":\"-6.00\",\"currency\":\"USD\"}}")
+                .status)
+        .isEqualTo(200);
+    JsonNode moved = owner.get(path).json();
+    assertThat(moved.path("totals")).isEqualTo(page.path("totals"));
+    assertThat(moved.path("snapshot")).isNotEqualTo(page.path("snapshot"));
+    assertThat(
+            owner.get(path + "&limit=1&offset=1&snapshot=" + snapshot).json().path("code").asText())
+        .isEqualTo("CONTRIBUTION_SNAPSHOT_STALE");
+    assertThat(owner.removeMember(home, member.userId()).status).isEqualTo(204);
+    JsonNode departed = owner.get(path).json();
+    assertThat(contributionItem(departed, member.userId()).path("membershipStatus").asText())
+        .isEqualTo("DEPARTED");
+    assertThat(contributionItem(departed, owner.userId()).path("membershipStatus").asText())
+        .isEqualTo("CURRENT");
+    assertThat(departed.path("totals")).isEqualTo(page.path("totals"));
+    assertThat(departed.path("snapshot")).isNotEqualTo(page.path("snapshot"));
+    assertThat(
+            owner.get(path + "&limit=1&offset=1&snapshot=" + snapshot).json().path("code").asText())
+        .isEqualTo("CONTRIBUTION_SNAPSHOT_STALE");
+    assertThat(member.get(path).status).isEqualTo(404);
+    assertThat(outsider.get(path).status).isEqualTo(404);
+    assertThat(anonymousGet(path).status).isEqualTo(401);
+    assertThat(
+            owner
+                .get(contributionsPath(home, "2026-09-01", "2026-10-01", "JPY"))
+                .json()
+                .path("totals")
+                .path("netSpending")
+                .asText())
+        .isEqualTo("0");
+    assertThat(
+            owner
+                .get(contributionsPath(home, "2026-09-01", "2026-10-01", "JPY"))
+                .json()
+                .path("items")
+                .size())
+        .isZero();
+    for (String bad :
+        new String[] {
+          path + "&offset=1",
+          path + "&limit=0",
+          path + "&limit=101",
+          path + "&offset=10001",
+          path + "&offset=-1",
+          path + "&limit=01",
+          path + "&limit=",
+          path + "&snapshot=null",
+          path + "&snapshot=ABC",
+          path + "&currency=USD",
+          path + "&extra=x",
+          contributionsPath(home, "2026-10-01", "2026-09-01", "USD"),
+          contributionsPath(home, "2026-09-01", "2026-10-01", "usd"),
+          contributionsPath(home, "2026-09-01", "2026-10-01", "null"),
+          contributionsPath(home, "2026-09-01", "2026-10-01", ""),
+          contributionsPath(home, "2026-09-01", "2026-10-01", "USD").replace("&currency=USD", "")
+        }) {
+      Resp rejected = owner.get(bad);
+      assertThat(rejected.status).as(bad + " " + rejected.body).isEqualTo(400);
+      assertThat(rejected.json().path("code").asText()).isEqualTo("VALIDATION_FAILED");
+    }
+  }
+
+  @Test
+  void contributionsExactCurrencyScalesAndCumulativeBoundaryBuckets() throws Exception {
+    Agent owner = signedInAgent("contribution-scales");
+    String home = createHousehold(owner, "Contribution scales home");
+    Agent member = signedInAgent("contribution-scales-member");
+    addMember(home, member.userId());
+    String jpy = createAccount(owner, home, "JPY shared", "CASH", "JPY");
+    String kwd = createAccount(owner, home, "KWD shared", "CASH", "KWD");
+    String yen =
+        created(
+            owner.createTransaction(
+                home,
+                UUID.randomUUID(),
+                datedEntry(jpy, "EXPENSE", "-3", "JPY", "Yen", "2026-09-10")));
+    String dinar =
+        created(
+            owner.createTransaction(
+                home,
+                UUID.randomUUID(),
+                datedEntry(kwd, "EXPENSE", "-1.001", "KWD", "Dinar", "2026-09-10")));
+    for (String expense : new String[] {yen, dinar}) {
+      Resp split =
+          owner.request(
+              "POST",
+              transactionPath(home) + "/" + expense + "/allocation",
+              "{\"expectedVersion\":0,\"participantUserIds\":[\""
+                  + owner.userId()
+                  + "\",\""
+                  + member.userId()
+                  + "\"]}",
+              owner.csrfToken,
+              UUID.randomUUID());
+      assertThat(split.status).as(split.body).isEqualTo(201);
+      assertThat(split.json().path("refundPolicy").asText()).isEqualTo("EQUAL_V1");
+    }
+    JsonNode yenSeptember =
+        owner.get(contributionsPath(home, "2026-09-01", "2026-10-01", "JPY")).json();
+    assertThat(yenSeptember.path("totals").path("expenseTotal").asText()).isEqualTo("3");
+    assertThat(yenSeptember.path("totals").path("allocatedCostTotal").asText()).isEqualTo("3");
+    assertThat(
+            owner
+                .get(contributionsPath(home, "2026-09-01", "2026-10-01", "KWD"))
+                .json()
+                .path("totals")
+                .path("expenseTotal")
+                .asText())
+        .isEqualTo("1.001");
+    created(
+        owner.createTransaction(
+            home,
+            UUID.randomUUID(),
+            refundEntry(jpy, yen, "1", "JPY", "Before boundary", "2026-09-30")));
+    String octoberRefund =
+        created(
+            owner.createTransaction(
+                home,
+                UUID.randomUUID(),
+                refundEntry(jpy, yen, "1", "JPY", "Inside boundary", "2026-10-01")));
+    String october = contributionsPath(home, "2026-10-01", "2026-11-01", "JPY");
+    JsonNode partial = owner.get(october).json();
+    assertThat(partial.path("totals").path("refundTotal").asText()).isEqualTo("1");
+    assertThat(partial.path("totals").path("allocatedCostTotal").asText()).isEqualTo("-1");
+    assertThat(partial.path("totals").path("unallocatedNet").asText()).isEqualTo("0");
+    assertThat(
+            owner.patchTransaction(
+                    home,
+                    octoberRefund,
+                    "{\"expectedVersion\":0,\"money\":{\"amount\":\"2\",\"currency\":\"JPY\"}}")
+                .status)
+        .isEqualTo(200);
+    JsonNode fullyRefunded = owner.get(october).json();
+    assertThat(fullyRefunded.path("totals").path("allocatedCostTotal").asText()).isEqualTo("-2");
+    assertThat(contributionItem(fullyRefunded, owner.userId()).path("allocatedCost").asText())
+        .isEqualTo("-1");
+    assertThat(contributionItem(fullyRefunded, member.userId()).path("allocatedCost").asText())
+        .isEqualTo("-1");
+    created(
+        owner.createTransaction(
+            home,
+            UUID.randomUUID(),
+            refundEntry(kwd, dinar, "0.001", "KWD", "Fractional", "2026-10-05")));
+    JsonNode kwdOctober =
+        owner.get(contributionsPath(home, "2026-10-01", "2026-11-01", "KWD")).json();
+    assertThat(kwdOctober.path("totals").path("refundTotal").asText()).isEqualTo("0.001");
+    assertThat(kwdOctober.path("totals").path("allocatedCostTotal").asText()).isEqualTo("-0.001");
+    assertThat(kwdOctober.path("totals").path("unallocatedNet").asText()).isEqualTo("0.000");
+    assertThat(
+            owner
+                .get(contributionsPath(home, "9999-12-30", "9999-12-31", "KWD"))
+                .json()
+                .path("totals")
+                .path("netSpending")
+                .asText())
+        .isEqualTo("0.000");
+  }
+
+  private static String contributionsPath(String home, String from, String to, String currency) {
+    return "/api/households/"
+        + home
+        + "/contribution-summary?from="
+        + from
+        + "&to="
+        + to
+        + "&currency="
+        + currency;
+  }
+
+  private static JsonNode contributionItem(JsonNode report, String userId) {
+    for (JsonNode item : report.path("items")) {
+      if (userId.equals(item.path("userId").asText())) return item;
+    }
+    throw new AssertionError("No contribution row for user " + userId);
+  }
+
   private void addMember(String householdId, String userId) {
     jdbc.update(
         "INSERT INTO household_members (household_id, user_id, role) VALUES (?::uuid, ?::uuid, 'MEMBER')",

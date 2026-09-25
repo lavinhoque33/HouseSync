@@ -44,6 +44,7 @@ public final class ErrorCodes {
   public static final String REPAYMENT_NOT_FOUND = "REPAYMENT_NOT_FOUND";
   public static final String REPAYMENT_CONFLICT = "REPAYMENT_CONFLICT";
   public static final String SETTLEMENT_SNAPSHOT_STALE = "SETTLEMENT_SNAPSHOT_STALE";
+  public static final String CONTRIBUTION_SNAPSHOT_STALE = "CONTRIBUTION_SNAPSHOT_STALE";
   public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 
   private ErrorCodes() {}

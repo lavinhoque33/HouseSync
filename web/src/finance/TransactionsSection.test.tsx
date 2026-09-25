@@ -120,6 +120,11 @@ interface RouteHandlers {
   settingsGet?: () => Response | Promise<Response>;
   settingsPatch?: () => Response | Promise<Response>;
   summaryGet?: (from: string, to: string) => Response | Promise<Response>;
+  contributionGet?: (
+    from: string,
+    to: string,
+    currency: string,
+  ) => Response | Promise<Response>;
 }
 
 type Call = { url: string; init?: RequestInit | undefined };
@@ -286,6 +291,38 @@ function stubFetch(routes: RouteHandlers) {
             to,
             reportingTimeZone: 'Etc/UTC',
             currencies: [],
+          })
+        );
+      }
+      const contributionBase = `/api/households/${HOUSEHOLD.id}/contribution-summary`;
+      if (url.startsWith(`${contributionBase}?`)) {
+        const query = new URLSearchParams(
+          url.slice(contributionBase.length + 1),
+        );
+        const from = query.get('from') ?? '';
+        const to = query.get('to') ?? '';
+        const currency = query.get('currency') ?? '';
+        const zero =
+          currency === 'JPY' ? '0' : currency === 'KWD' ? '0.000' : '0.00';
+        return (
+          routes.contributionGet?.(from, to, currency) ??
+          jsonResponse({
+            from,
+            to,
+            reportingTimeZone: 'Etc/UTC',
+            currency,
+            snapshot: 'a'.repeat(64),
+            totals: {
+              expenseTotal: zero,
+              refundTotal: zero,
+              netSpending: zero,
+              allocatedCostTotal: zero,
+              unallocatedNet: zero,
+            },
+            items: [],
+            limit: 50,
+            offset: 0,
+            hasMore: false,
           })
         );
       }
@@ -930,14 +967,11 @@ describe('transaction list', () => {
     ).toBeInTheDocument();
   });
 
-  it('keeps the empty state free of synthetic totals', async () => {
+  it('keeps empty transaction and member-balance lists distinct from reporting', async () => {
     renderSection({
       transactionsGet: () => transactionPage([]),
     });
     expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
-    // The spending dashboard names its per-currency rows honestly
-    // ("Expense total") and shows its own empty state; the feed itself
-    // fabricates no totals line.
     expect(
       screen.getByText(/No household spending in this period/),
     ).toBeInTheDocument();
@@ -945,12 +979,6 @@ describe('transaction list', () => {
     const balances = screen.getByRole('region', { name: 'Member balances' });
     expect(await within(balances).findByRole('status')).toBeInTheDocument();
     expect(within(balances).queryByRole('list')).not.toBeInTheDocument();
-    // No recorded money line (amount followed by a currency code) exists.
-    expect(
-      document.body.textContent?.match(
-        /-?\d+\.\d{2,3}\s(BRL|USD|EUR|GBP|JPY|KWD)/,
-      ),
-    ).toBeNull();
   });
 
   it('reports a failed list with a refresh recovery path', async () => {
@@ -4196,6 +4224,175 @@ describe('allocations', () => {
     version = 1;
     await refreshFeed('Household feed');
     expect(balanceCalls(calls)).toHaveLength(2);
+  });
+
+  it('restates the applied contribution period after a newer authorized expense version, preserving the draft', async () => {
+    let version = 1;
+    const { calls } = renderSection(
+      {
+        transactionsGet: () => transactionPage([householdExpense({ version })]),
+        allocationsGet: () =>
+          jsonResponse(activeAllocation({ transactionVersion: version })),
+        contributionGet: (from, to, currency) =>
+          jsonResponse({
+            from,
+            to,
+            currency,
+            reportingTimeZone: 'Etc/UTC',
+            snapshot: (version === 1 ? 'a' : 'b').repeat(64),
+            totals: {
+              expenseTotal: '10.00',
+              refundTotal: version === 1 ? '0.00' : '2.00',
+              netSpending: version === 1 ? '10.00' : '8.00',
+              allocatedCostTotal: version === 1 ? '10.00' : '8.00',
+              unallocatedNet: '0.00',
+            },
+            items: [
+              {
+                userId: ACTOR_ID,
+                membershipStatus: 'CURRENT',
+                expensePaid: '10.00',
+                refundReceived: version === 1 ? '0.00' : '2.00',
+                netPaid: version === 1 ? '10.00' : '8.00',
+                allocatedCost: version === 1 ? '10.00' : '8.00',
+              },
+            ],
+            limit: 50,
+            offset: 0,
+            hasMore: false,
+          }),
+      },
+      { nowProvider: () => new Date('2026-09-17T12:00:00Z') },
+    );
+    const contributions = screen.getByRole('region', {
+      name: 'Period contributions',
+    });
+    await within(contributions).findAllByText('10.00 USD');
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
+      ).toHaveLength(1),
+    );
+    await screen.findByText('Allocated');
+    fireEvent.change(
+      within(contributions).getByLabelText('Contribution from date'),
+      {
+        target: { value: '2026-08-01' },
+      },
+    );
+    version = 2;
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await within(contributions).findAllByText('8.00 USD');
+    expect(
+      within(contributions).getByLabelText('Contribution from date'),
+    ).toHaveValue('2026-08-01');
+    expect(
+      within(contributions).getByText(/Showing 2026-09-01 to 2026-10-01/),
+    ).toBeInTheDocument();
+  });
+
+  it('refreshes spending and contributions when a different member unshares a previously visible expense', async () => {
+    const remainingId = '40000000-0000-4000-8000-000000000009';
+    let shared = true;
+    renderSection(
+      {
+        transactionsGet: (view) =>
+          transactionPage(
+            view === 'OWN'
+              ? []
+              : [
+                  householdExpense({
+                    ownerUserId: MEMBER_B,
+                    description: 'Revoke elsewhere',
+                    money: { amount: '-4.00', currency: 'USD' },
+                  }),
+                  householdExpense({
+                    id: remainingId,
+                    ownerUserId: MEMBER_B,
+                    description: 'Still shared',
+                    money: { amount: '-5.00', currency: 'USD' },
+                  }),
+                ].filter((entry) => shared || entry.id !== EXPENSE_ID),
+          ),
+        summaryGet: (from, to) =>
+          jsonResponse({
+            from,
+            to,
+            reportingTimeZone: 'Etc/UTC',
+            currencies: [
+              {
+                currency: 'USD',
+                expenseTotal: shared ? '9.00' : '5.00',
+                refundTotal: '0.00',
+                netSpending: shared ? '9.00' : '5.00',
+                incomeTotal: '0.00',
+              },
+            ],
+          }),
+        contributionGet: (from, to, currency) =>
+          jsonResponse({
+            from,
+            to,
+            currency,
+            reportingTimeZone: 'Etc/UTC',
+            snapshot: (shared ? 'a' : 'b').repeat(64),
+            totals: {
+              expenseTotal: shared ? '9.00' : '5.00',
+              refundTotal: '0.00',
+              netSpending: shared ? '9.00' : '5.00',
+              allocatedCostTotal: '0.00',
+              unallocatedNet: shared ? '9.00' : '5.00',
+            },
+            items: [
+              {
+                userId: MEMBER_B,
+                membershipStatus: 'CURRENT',
+                expensePaid: shared ? '9.00' : '5.00',
+                refundReceived: '0.00',
+                netPaid: shared ? '9.00' : '5.00',
+                allocatedCost: '0.00',
+              },
+            ],
+            limit: 50,
+            offset: 0,
+            hasMore: false,
+          }),
+      },
+      { nowProvider: () => new Date('2026-09-17T12:00:00Z') },
+    );
+    const contributions = screen.getByRole('region', {
+      name: 'Period contributions',
+    });
+    const spending = screen.getByRole('region', { name: 'Household spending' });
+    await within(contributions).findAllByText('9.00 USD');
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await screen.findByText('Revoke elsewhere');
+    await screen.findByText('Still shared');
+    fireEvent.change(
+      within(contributions).getByLabelText('Contribution from date'),
+      {
+        target: { value: '2026-08-01' },
+      },
+    );
+    shared = false;
+    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole('radio', { name: 'Household feed' }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() =>
+      expect(screen.queryByText('Revoke elsewhere')).not.toBeInTheDocument(),
+    );
+    await within(contributions).findAllByText('5.00 USD');
+    await within(spending).findAllByText('5.00 USD');
+    expect(
+      within(contributions).getByLabelText('Contribution from date'),
+    ).toHaveValue('2026-08-01');
+    expect(
+      within(contributions).getByText(/Showing 2026-09-01 to 2026-10-01/),
+    ).toBeInTheDocument();
   });
 
   it('coalesces two known expenses changed in one authorized feed commit into one balances refresh', async () => {

@@ -2175,6 +2175,93 @@ code {
   }
 }
 
+.contribution-section {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-line);
+}
+
+.contribution-section > *,
+.contribution-controls > * {
+  min-width: 0;
+}
+
+.contribution-section p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.contribution-controls {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.contribution-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.contribution-actions > * {
+  flex: 1 1 10rem;
+}
+
+.contribution-totals {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+}
+
+.contribution-totals > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+}
+
+.contribution-totals dd {
+  margin: 0;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.contribution-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.contribution-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.contribution-table caption {
+  text-align: left;
+  font-weight: 650;
+}
+
+.contribution-table th,
+.contribution-table td {
+  padding: var(--space-1);
+  border-bottom: 1px solid var(--color-line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.contribution-table small {
+  display: block;
+}
+
+.contribution-user {
+  overflow-wrap: anywhere;
+}
+
 /* Owner-private bank activity inbox. */
 .bank-activity {
   display: grid;
