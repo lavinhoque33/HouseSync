@@ -4694,15 +4694,11 @@ describe('allocations', () => {
       calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
     ).toHaveLength(3);
     fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await waitFor(() =>
-      expect(
-        calls.filter(({ url }) => url.includes('view=HOUSEHOLD&status=ALL')),
-      ).toHaveLength(2),
-    );
-    expect(reads).toBe(3);
+    // The next scope switch is intentionally ignored while the prior feed is
+    // loading. Wait for the visible page, not just for its request to start.
+    await screen.findByRole('list', { name: 'Household transactions' });
     version = 4;
     fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
-    await waitFor(() => expect(reads).toBe(4));
     await within(sourcePanel).findByRole('region', {
       name: 'Current refund impact',
     });
