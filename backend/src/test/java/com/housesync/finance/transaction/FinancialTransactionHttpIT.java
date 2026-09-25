@@ -364,6 +364,326 @@ class FinancialTransactionHttpIT {
   }
 
   @Test
+  void visibilityScopeFiltersOwnEntriesInSqlBeforeThePageBoundary() throws Exception {
+    Agent owner = signedInAgent("scope-paging");
+    String householdId = createHousehold(owner, "Scope paging home");
+    String accountId =
+        createAccount(owner, householdId, UUID.randomUUID(), "Everyday", "CHECKING", "BRL");
+
+    // 121 shared entries dated 2026-01-01..2026-05-01 sit behind five newer private entries. A
+    // scope applied after LIMIT would show an empty or short shared page, so the page contents
+    // prove membership/ownership/visibility run in SQL with the other filters before the page
+    // boundary and hasMore. Only the fixture volume uses direct inserts; the rows that anchor the
+    // boundary on both sides are created through the real create contract.
+    List<String> sharedIds = insertSharedHistory(householdId, owner.userId(), accountId, 120);
+    String oldestShared =
+        created(
+            owner.createTransaction(
+                householdId,
+                UUID.randomUUID(),
+                visibilityEntry(
+                    accountId, "EXPENSE", "-1.00", "BRL", "Shared 0", "2026-01-01", "HOUSEHOLD")));
+    List<String> expectedShared = new ArrayList<>(sharedIds);
+    expectedShared.add(oldestShared);
+
+    List<String> expectedPrivate = new ArrayList<>();
+    for (int index = 0; index < 5; index++) {
+      expectedPrivate.add(
+          created(
+              owner.createTransaction(
+                  householdId,
+                  UUID.randomUUID(),
+                  visibilityEntry(
+                      accountId,
+                      "EXPENSE",
+                      "-2.00",
+                      "BRL",
+                      "Private " + index,
+                      "2026-05-0" + (6 - index),
+                      "PRIVATE"))));
+    }
+
+    JsonNode sharedFirst =
+        owner.get(transactionPath(householdId) + "?visibility=HOUSEHOLD&limit=100").json();
+    assertThat(ids(sharedFirst)).isEqualTo(expectedShared.subList(0, 100));
+    assertThat(sharedFirst.path("limit").asInt()).isEqualTo(100);
+    assertThat(sharedFirst.path("offset").asInt()).isZero();
+    assertThat(sharedFirst.path("hasMore").asBoolean()).isTrue();
+
+    JsonNode sharedSecond =
+        owner
+            .get(transactionPath(householdId) + "?visibility=HOUSEHOLD&limit=100&offset=100")
+            .json();
+    assertThat(ids(sharedSecond)).isEqualTo(expectedShared.subList(100, 121));
+    assertThat(sharedSecond.path("hasMore").asBoolean()).isFalse();
+    // The oldest shared match is reachable only because the scope predicate precedes the page.
+    assertThat(ids(sharedSecond)).contains(oldestShared);
+    assertThat(ids(sharedFirst)).doesNotContain(oldestShared);
+
+    JsonNode privateOnly = owner.get(transactionPath(householdId) + "?visibility=PRIVATE").json();
+    assertThat(ids(privateOnly)).isEqualTo(expectedPrivate);
+    assertThat(privateOnly.path("hasMore").asBoolean()).isFalse();
+
+    // An omitted scope still means both visibilities, in one coherent ordered sequence.
+    JsonNode allFirst = owner.get(transactionPath(householdId) + "?limit=100").json();
+    List<String> expectedAllFirst = new ArrayList<>(expectedPrivate);
+    expectedAllFirst.addAll(expectedShared.subList(0, 95));
+    assertThat(ids(allFirst)).isEqualTo(expectedAllFirst);
+    assertThat(allFirst.path("hasMore").asBoolean()).isTrue();
+    JsonNode allSecond = owner.get(transactionPath(householdId) + "?limit=100&offset=100").json();
+    assertThat(ids(allSecond)).isEqualTo(expectedShared.subList(95, 121));
+    assertThat(allSecond.path("hasMore").asBoolean()).isFalse();
+    List<String> union = new ArrayList<>(ids(allFirst));
+    union.addAll(ids(allSecond));
+    assertThat(union).hasSize(126).doesNotHaveDuplicates();
+
+    // The scope composes with the retained account, currency and half-open date predicates.
+    JsonNode scopedWindow =
+        owner
+            .get(
+                transactionPath(householdId)
+                    + "?visibility=HOUSEHOLD&from=2026-04-27&to=2026-05-02&limit=100")
+            .json();
+    assertThat(ids(scopedWindow)).isEqualTo(expectedShared.subList(0, 5));
+    assertThat(scopedWindow.path("hasMore").asBoolean()).isFalse();
+    JsonNode scopedAccount =
+        owner
+            .get(
+                transactionPath(householdId)
+                    + "?visibility=HOUSEHOLD&accountId="
+                    + accountId
+                    + "&currency=BRL&limit=100&offset=100")
+            .json();
+    assertThat(items(scopedAccount).size()).isEqualTo(21);
+    assertThat(scopedAccount.path("hasMore").asBoolean()).isFalse();
+    JsonNode emptyScoped =
+        owner.get(transactionPath(householdId) + "?visibility=PRIVATE&currency=USD").json();
+    assertThat(items(emptyScoped).size()).isZero();
+    assertThat(emptyScoped.path("hasMore").asBoolean()).isFalse();
+    assertThat(emptyScoped.path("limit").asInt()).isEqualTo(50);
+    assertThat(emptyScoped.path("offset").asInt()).isZero();
+
+    // The inclusive offset cap still applies with a scope and never scans past it.
+    JsonNode cappedOffset =
+        owner.get(transactionPath(householdId) + "?visibility=PRIVATE&offset=10000").json();
+    assertThat(items(cappedOffset).size()).isZero();
+    assertThat(cappedOffset.path("offset").asInt()).isEqualTo(10000);
+    assertThat(cappedOffset.path("hasMore").asBoolean()).isFalse();
+
+    // Retained voided shared history stays discoverable through the scope with status=ALL,
+    // is excluded from the default POSTED page, and hasMore follows the filtered population.
+    Resp voided =
+        owner.patchTransaction(
+            householdId, oldestShared, "{\"expectedVersion\":0,\"status\":\"VOIDED\"}");
+    assertThat(voided.status).isEqualTo(200);
+    JsonNode postedShared =
+        owner.get(transactionPath(householdId) + "?visibility=HOUSEHOLD&limit=100").json();
+    assertThat(items(postedShared).size()).isEqualTo(100);
+    assertThat(postedShared.path("hasMore").asBoolean()).isTrue();
+    JsonNode postedSharedSecond =
+        owner
+            .get(transactionPath(householdId) + "?visibility=HOUSEHOLD&limit=100&offset=100")
+            .json();
+    assertThat(items(postedSharedSecond).size()).isEqualTo(20);
+    assertThat(postedSharedSecond.path("hasMore").asBoolean()).isFalse();
+    assertThat(
+            ids(
+                owner
+                    .get(transactionPath(householdId) + "?visibility=HOUSEHOLD&status=VOIDED")
+                    .json()))
+        .containsExactly(oldestShared);
+    assertThat(
+            items(
+                    owner
+                        .get(
+                            transactionPath(householdId)
+                                + "?visibility=HOUSEHOLD&status=ALL&limit=100&offset=100")
+                        .json())
+                .size())
+        .isEqualTo(21);
+  }
+
+  @Test
+  void listRejectsInvalidVisibilityScopesAndCombinationsSafely() throws Exception {
+    Agent actor = signedInAgent("scope-validation");
+    String householdId = createHousehold(actor, "Scope validation home");
+    createAccount(actor, householdId, UUID.randomUUID(), "Cash", "CASH", "BRL");
+    String path = transactionPath(householdId);
+
+    List<Resp> rejected =
+        List.of(
+            actor.get(path + "?visibility="),
+            actor.get(path + "?visibility=ALL"),
+            actor.get(path + "?visibility=private"),
+            actor.get(path + "?visibility=OWNERSHIP"),
+            actor.get(path + "?visibility=PRIVATE&visibility=HOUSEHOLD"),
+            actor.get(path + "?view=HOUSEHOLD&visibility=HOUSEHOLD"),
+            actor.get(path + "?view=HOUSEHOLD&visibility=PRIVATE"),
+            actor.get(path + "?visibility=PRIVATE&offset=10001"),
+            actor.get(path + "?visibility=HOUSEHOLD&limit=101"),
+            actor.get(path + "?visibility=HOUSEHOLD&limit=0"),
+            actor.get(path + "?visibility=PRIVATE&unexpected=x"),
+            actor.get(path + "?visibility=PRIVATE&accountId=not-a-uuid"));
+    for (Resp response : rejected) {
+      assertThat(response.status).isEqualTo(400);
+      assertThat(response.json().path("code").asText()).isEqualTo("VALIDATION_FAILED");
+      assertThat(response.json().path("correlationId").asText()).isNotBlank();
+      assertThat(response.cacheControl()).contains("no-store");
+      assertThat(response.body).doesNotContain("OWNERSHIP", "SQL", "at com.housesync");
+    }
+    Resp unknownScope = actor.get(path + "?visibility=OWNERSHIP");
+    assertThat(unknownScope.status).isEqualTo(400);
+    assertThat(unknownScope.json().path("fieldErrors").propertyNames())
+        .containsExactly("visibility");
+    Resp scopedHouseholdView = actor.get(path + "?view=HOUSEHOLD&visibility=HOUSEHOLD");
+    assertThat(scopedHouseholdView.status).isEqualTo(400);
+    assertThat(scopedHouseholdView.json().path("fieldErrors").propertyNames())
+        .containsExactly("visibility");
+
+    // The two documented scopes and their omission stay valid with the retained bounds.
+    for (String query :
+        List.of(
+            "", "?visibility=PRIVATE", "?visibility=HOUSEHOLD", "?view=OWN&visibility=PRIVATE")) {
+      Resp accepted = actor.get(path + query);
+      assertThat(accepted.status).isEqualTo(200);
+      assertThat(accepted.cacheControl()).contains("no-store");
+      assertThat(items(accepted.json()).size()).isZero();
+      assertThat(accepted.json().path("hasMore").asBoolean()).isFalse();
+    }
+    Resp cappedOffset = actor.get(path + "?visibility=PRIVATE&offset=10000");
+    assertThat(cappedOffset.status).isEqualTo(200);
+    assertThat(cappedOffset.json().path("offset").asInt()).isEqualTo(10000);
+
+    // A scoped foreign account still resolves to the generic account 404, not a scope error.
+    Resp foreignAccount = actor.get(path + "?visibility=HOUSEHOLD&accountId=" + UUID.randomUUID());
+    assertThat(foreignAccount.status).isEqualTo(404);
+    assertThat(foreignAccount.json().path("code").asText())
+        .isEqualTo("FINANCIAL_ACCOUNT_NOT_FOUND");
+  }
+
+  @Test
+  void visibilityScopeNeverWidensOwnershipMembershipOrTheHouseholdFeed() throws Exception {
+    Agent owner = signedInAgent("scope-owner");
+    String householdId = createHousehold(owner, "Scope privacy home");
+    Agent member = signedInAgent("scope-member");
+    addMember(householdId, member.userId(), "MEMBER");
+    Agent outsider = signedInAgent("scope-outsider");
+    String ownerAccount =
+        createAccount(owner, householdId, UUID.randomUUID(), "Owner card", "CREDIT_CARD", "BRL");
+    String memberAccount =
+        createAccount(member, householdId, UUID.randomUUID(), "Member cash", "CASH", "BRL");
+
+    String ownerShared =
+        created(
+            owner.createTransaction(
+                householdId,
+                UUID.randomUUID(),
+                visibilityEntry(
+                    ownerAccount,
+                    "EXPENSE",
+                    "-11.00",
+                    "BRL",
+                    "Owner shared",
+                    "2026-09-10",
+                    "HOUSEHOLD")));
+    created(
+        owner.createTransaction(
+            householdId,
+            UUID.randomUUID(),
+            visibilityEntry(
+                ownerAccount,
+                "EXPENSE",
+                "-12.00",
+                "BRL",
+                "Owner private",
+                "2026-09-11",
+                "PRIVATE")));
+    String memberShared =
+        created(
+            member.createTransaction(
+                householdId,
+                UUID.randomUUID(),
+                visibilityEntry(
+                    memberAccount,
+                    "EXPENSE",
+                    "-13.00",
+                    "BRL",
+                    "Member shared",
+                    "2026-09-12",
+                    "HOUSEHOLD")));
+    created(
+        member.createTransaction(
+            householdId,
+            UUID.randomUUID(),
+            visibilityEntry(
+                memberAccount,
+                "EXPENSE",
+                "-14.00",
+                "BRL",
+                "Member private",
+                "2026-09-13",
+                "PRIVATE")));
+
+    JsonNode ownerSharedPage =
+        owner.get(transactionPath(householdId) + "?visibility=HOUSEHOLD").json();
+    assertThat(ids(ownerSharedPage)).containsExactly(ownerShared);
+    assertThat(items(ownerSharedPage).get(0).path("accountId").asText()).isEqualTo(ownerAccount);
+    assertThat(ownerSharedPage.toString())
+        .doesNotContain("Owner private", "Member shared", "Member private");
+    JsonNode ownerPrivatePage =
+        owner.get(transactionPath(householdId) + "?visibility=PRIVATE").json();
+    assertThat(items(ownerPrivatePage).size()).isEqualTo(1);
+    assertThat(items(ownerPrivatePage).get(0).path("description").asText())
+        .isEqualTo("Owner private");
+
+    JsonNode memberSharedPage =
+        member.get(transactionPath(householdId) + "?visibility=HOUSEHOLD").json();
+    assertThat(ids(memberSharedPage)).containsExactly(memberShared);
+    assertThat(items(memberSharedPage).get(0).path("accountId").asText()).isEqualTo(memberAccount);
+    assertThat(memberSharedPage.toString())
+        .doesNotContain("Member private", "Owner shared", "Owner private");
+
+    // The household feed keeps its own authorization and non-owner account redaction.
+    JsonNode feed = member.get(transactionPath(householdId) + "?view=HOUSEHOLD").json();
+    assertThat(ids(feed)).containsExactly(memberShared, ownerShared);
+    for (JsonNode row : items(feed)) {
+      boolean ownEntry = row.path("id").asText().equals(memberShared);
+      assertThat(row.path("accountId").isNull()).isEqualTo(!ownEntry);
+    }
+    assertThat(feed.toString()).doesNotContain("Owner private", "Member private");
+
+    // An empty scoped page still validates membership instead of leaking or failing.
+    Agent freshMember = signedInAgent("scope-fresh");
+    addMember(householdId, freshMember.userId(), "MEMBER");
+    JsonNode freshScoped =
+        freshMember.get(transactionPath(householdId) + "?visibility=HOUSEHOLD").json();
+    assertThat(items(freshScoped).size()).isZero();
+    assertThat(freshScoped.path("hasMore").asBoolean()).isFalse();
+
+    Resp outsiderScoped = outsider.get(transactionPath(householdId) + "?visibility=HOUSEHOLD");
+    Resp outsiderFeed = outsider.get(transactionPath(householdId) + "?view=HOUSEHOLD");
+    for (Resp response : List.of(outsiderScoped, outsiderFeed)) {
+      assertThat(response.status).isEqualTo(404);
+      assertThat(response.json().path("code").asText()).isEqualTo("HOUSEHOLD_NOT_FOUND");
+      assertThat(response.body).doesNotContain("Owner shared", "Member shared", householdId);
+    }
+
+    // Authority loss closes the scoped feed exactly like the unscoped one, while the owner keeps
+    // the departed member's retained shared entry.
+    jdbc.update(
+        "DELETE FROM household_members WHERE household_id = ?::uuid AND user_id = ?::uuid",
+        householdId,
+        member.userId());
+    Resp removedScoped = member.get(transactionPath(householdId) + "?visibility=HOUSEHOLD");
+    assertThat(removedScoped.status).isEqualTo(404);
+    assertThat(removedScoped.json().path("code").asText()).isEqualTo("HOUSEHOLD_NOT_FOUND");
+    assertThat(removedScoped.body).doesNotContain("Member shared", memberShared);
+    JsonNode ownerAfterDeparture =
+        owner.get(transactionPath(householdId) + "?visibility=HOUSEHOLD").json();
+    assertThat(ids(ownerAfterDeparture)).containsExactly(ownerShared);
+  }
+
+  @Test
   void detailIsolatesHiddenForeignAndNonMemberAccess() throws Exception {
     Agent owner = signedInAgent("detail-owner");
     String householdId = createHousehold(owner, "Privacy feed");
@@ -1541,6 +1861,68 @@ class FinancialTransactionHttpIT {
         + "\"refundOfTransactionId\":\""
         + sourceId
         + "\"}";
+  }
+
+  /** Dated entry body with an explicit disclosure scope for the own-view scope filter cases. */
+  private static String visibilityEntry(
+      String accountId,
+      String kind,
+      String amount,
+      String currency,
+      String description,
+      String date,
+      String visibility) {
+    return "{\"accountId\":\""
+        + accountId
+        + "\",\"kind\":\""
+        + kind
+        + "\",\"money\":{\"amount\":\""
+        + amount
+        + "\",\"currency\":\""
+        + currency
+        + "\"},\"occurredOn\":\""
+        + date
+        + "\",\"description\":\""
+        + description
+        + "\",\"visibility\":\""
+        + visibility
+        + "\"}";
+  }
+
+  /**
+   * Bulk-loads {@code count} older HOUSEHOLD entries (2026-01-02 upward) as the page-boundary
+   * fixture and returns their ids in the contractual order. Direct fixture volume is deliberate:
+   * the rows that anchor each boundary are still created through the real create contract.
+   */
+  private List<String> insertSharedHistory(
+      String householdId, String ownerUserId, String accountId, int count) {
+    jdbc.update(
+        "INSERT INTO financial_transactions (id, household_id, owner_user_id, account_id, kind,"
+            + " amount, currency, occurred_on, description, source, visibility, status, category,"
+            + " category_origin, category_assigned_at, version, created_at, updated_at)"
+            + " SELECT gen_random_uuid(), ?::uuid, ?::uuid, ?::uuid, 'EXPENSE', -1.00, 'BRL',"
+            + " DATE '2026-01-01' + gs, 'Shared ' || gs, 'MANUAL', 'HOUSEHOLD', 'POSTED', NULL,"
+            + " 'NONE', now(), 0, now(), now() FROM generate_series(1, ?) AS gs",
+        householdId,
+        ownerUserId,
+        accountId,
+        count);
+    return jdbc.queryForList(
+        "SELECT id::text FROM financial_transactions"
+            + " WHERE household_id = ?::uuid AND owner_user_id = ?::uuid"
+            + " AND visibility = 'HOUSEHOLD'"
+            + " ORDER BY occurred_on DESC, created_at DESC, id DESC",
+        String.class,
+        householdId,
+        ownerUserId);
+  }
+
+  private static List<String> ids(JsonNode list) {
+    List<String> ids = new ArrayList<>();
+    for (JsonNode item : items(list)) {
+      ids.add(item.path("id").asText());
+    }
+    return ids;
   }
 
   private static String moneyAmount(JsonNode transaction) {

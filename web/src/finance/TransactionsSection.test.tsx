@@ -90,7 +90,11 @@ function jsonResponse(body: unknown, status = 200) {
 interface RouteHandlers {
   accountsGet?: () => Response | Promise<Response>;
   categoriesGet?: () => Response | Promise<Response>;
-  transactionsGet?: (view: 'OWN' | 'HOUSEHOLD') => Response | Promise<Response>;
+  transactionsGet?: (
+    view: 'OWN' | 'HOUSEHOLD',
+    visibility?: string | null,
+    offset?: number,
+  ) => Response | Promise<Response>;
   transactionsPost?: () => Response | Promise<Response>;
   transactionGet?: (transactionId: string) => Response | Promise<Response>;
   categorizationGet?: (transactionId: string) => Response | Promise<Response>;
@@ -280,20 +284,18 @@ function stubFetch(routes: RouteHandlers) {
           jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
         );
       }
-      if (url === `${transactionBase}?limit=100&offset=0&view=OWN&status=ALL`) {
-        return (
-          routes.transactionsGet?.('OWN') ??
-          jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
+      if (url.startsWith(`${transactionBase}?`) && init?.method === 'GET') {
+        const query = new URLSearchParams(
+          url.slice(transactionBase.length + 1),
         );
-      }
-      if (
-        url ===
-        `${transactionBase}?limit=100&offset=0&view=HOUSEHOLD&status=ALL`
-      ) {
-        return (
-          routes.transactionsGet?.('HOUSEHOLD') ??
-          jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
-        );
+        const view = query.get('view');
+        if (view === 'OWN' || view === 'HOUSEHOLD') {
+          const offset = Number(query.get('offset'));
+          return (
+            routes.transactionsGet?.(view, query.get('visibility'), offset) ??
+            jsonResponse({ items: [], limit: 100, offset, hasMore: false })
+          );
+        }
       }
       if (
         url.startsWith(`${transactionBase}/`) &&
@@ -826,8 +828,19 @@ describe('transaction list', () => {
       /Expense · 2026-09-16 · Daily spending · Voided/,
     );
 
-    // Privacy and void state are textual, never color-only.
-    expect(screen.getAllByText('Private')).toHaveLength(4);
+    // Privacy and void state are textual, never color-only. The state is
+    // asserted on each entry, not by counting all "Private" text: the
+    // visibility filter control carries its own "Private" label.
+    for (const description of [
+      'Groceries',
+      'Salary',
+      'Card payment',
+      'Cancelled entry',
+    ]) {
+      expect(
+        within(card(description)).getByText('Private'),
+      ).toBeInTheDocument();
+    }
     expect(
       screen.getByText(
         /Every entry starts private to you. Sharing is explicit/,
@@ -2814,6 +2827,10 @@ describe('feeds', () => {
         'Household — shared by another member; read-only for you.',
       ),
     ).toBeInTheDocument();
+    // Read-only means no owner actions in the panel either.
+    expect(
+      within(panel).queryByRole('button', { name: /from details$/ }),
+    ).toBeNull();
     // The owner UUID is the disclosed identity, never an email.
     expect(
       within(panel).getByText('22222222-3333-4444-8555-666666666666'),
@@ -2923,6 +2940,749 @@ describe('feeds', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
     await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
   });
+  it('filters on the server, pages past 100 with dedupe, and preserves a draft', async () => {
+    const first = Array.from({ length: 100 }, (_, index) =>
+      transaction({
+        id: `40000000-0000-4000-8000-${String(index + 100).padStart(12, '0')}`,
+        description: `Shared entry ${index}`,
+        visibility: 'HOUSEHOLD',
+        kind: 'INCOME',
+        money: { amount: '1.00', currency: 'BRL' },
+      }),
+    );
+    first[0] = { ...first[0]!, version: 2 };
+    const older = transaction({
+      id: '40000000-0000-4000-8000-000000001000',
+      description: 'Older shared expense',
+      visibility: 'HOUSEHOLD',
+    });
+    const { calls } = renderSection({
+      accountsGet: () => accountPage([account()]),
+      transactionsGet: (view, visibility, offset) => {
+        if (view === 'HOUSEHOLD') return transactionPage([]);
+        if (visibility === 'HOUSEHOLD') {
+          return jsonResponse({
+            items:
+              offset === 100
+                ? [
+                    {
+                      ...first[0]!,
+                      version: 1,
+                      description: 'Stale duplicate',
+                    },
+                    older,
+                  ]
+                : first,
+            limit: 100,
+            offset,
+            hasMore: offset === 0,
+          });
+        }
+        return transactionPage([]);
+      },
+    });
+    await screen.findByText('No transactions yet.');
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Keep my draft' },
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'Shared by me' }));
+    expect(await screen.findByText('Shared entry 99')).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load more transactions' }),
+    );
+    expect(await screen.findByText('Older shared expense')).toBeInTheDocument();
+    expect(
+      within(
+        screen.getByRole('list', { name: 'Your transactions' }),
+      ).getAllByRole('listitem'),
+    ).toHaveLength(101);
+    expect(screen.getByText('Shared entry 0')).toBeInTheDocument();
+    expect(screen.queryByText('Stale duplicate')).toBeNull();
+    expect(screen.getByLabelText('Description')).toHaveValue('Keep my draft');
+    expect(
+      calls.some(({ url }) =>
+        url.includes('offset=100&view=OWN&status=ALL&visibility=HOUSEHOLD'),
+      ),
+    ).toBe(true);
+    expect(
+      screen.queryByRole('button', { name: 'Load more transactions' }),
+    ).toBeNull();
+    // Rendering a full 100-row page beside the older match is the behavior
+    // under test; it needs headroom under a loaded parallel run.
+  }, 15000);
+
+  it('retries a failed household page without discarding loaded rows or changing offset', async () => {
+    let attempts = 0;
+    const { calls } = renderSection({
+      transactionsGet: (view, _visibility, offset) => {
+        if (view === 'OWN') return transactionPage([]);
+        if (offset === 0)
+          return jsonResponse({
+            items: [sharedByOther()],
+            limit: 100,
+            offset: 0,
+            hasMore: true,
+          });
+        attempts++;
+        return attempts === 1
+          ? jsonResponse({ code: 'FINANCE_BUSY', message: 'Busy.' }, 503)
+          : jsonResponse({
+              items: [
+                {
+                  ...sharedByOther(),
+                  id: '40000000-0000-4000-8000-000000000099',
+                  description: 'Older shared bill',
+                },
+              ],
+              limit: 100,
+              offset: 100,
+              hasMore: false,
+            });
+      },
+    });
+    await screen.findByText('No transactions yet.');
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await screen.findByText('Shared internet bill');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load more transactions' }),
+    );
+    expect(
+      await screen.findByRole('button', { name: 'Retry next page' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Shared internet bill')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry next page' }));
+    expect(await screen.findByText('Older shared bill')).toBeInTheDocument();
+    expect(
+      calls.filter(({ url }) => url.includes('offset=100&view=HOUSEHOLD')),
+    ).toHaveLength(2);
+  });
+
+  it('navigates an older refund to its authorized source by ID, never through a visibility patch', async () => {
+    const refund = transaction({
+      id: REFUND_ID,
+      kind: 'REFUND',
+      money: { amount: '2.00', currency: 'BRL' },
+      refundOfTransactionId: EXPENSE_ID,
+      description: 'Old refund',
+      visibility: 'HOUSEHOLD',
+    });
+    const { calls } = renderSection({
+      transactionsGet: () => transactionPage([refund]),
+      transactionGet: (id) =>
+        jsonResponse(
+          id === EXPENSE_ID
+            ? transaction({
+                visibility: 'HOUSEHOLD',
+                description: 'Older source',
+              })
+            : refund,
+        ),
+    });
+    await screen.findByText('Old refund');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Old refund' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Details for Old refund',
+    });
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'View source expense' }),
+    );
+    expect(
+      await screen.findByRole('group', { name: 'Details for Older source' }),
+    ).toBeInTheDocument();
+    expect(
+      calls.some(({ url }) => url.endsWith(`/transactions/${EXPENSE_ID}`)),
+    ).toBe(true);
+    expect(patchCalls(calls)).toHaveLength(0);
+  });
+
+  it('keeps the refund visible when its source detail is no longer authorized', async () => {
+    const refund = transaction({
+      id: REFUND_ID,
+      kind: 'REFUND',
+      money: { amount: '2.00', currency: 'BRL' },
+      refundOfTransactionId: EXPENSE_ID,
+      description: 'Visible refund',
+      visibility: 'HOUSEHOLD',
+    });
+    renderSection({
+      transactionsGet: () => transactionPage([refund]),
+      transactionGet: (id) =>
+        id === EXPENSE_ID
+          ? jsonResponse(
+              { code: 'TRANSACTION_NOT_FOUND', message: 'Unavailable.' },
+              404,
+            )
+          : jsonResponse(refund),
+    });
+    await screen.findByText('Visible refund');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Visible refund' }),
+    );
+    fireEvent.click(
+      within(
+        await screen.findByRole('group', {
+          name: 'Details for Visible refund',
+        }),
+      ).getByRole('button', { name: 'View source expense' }),
+    );
+    expect(
+      await screen.findByText(/This transaction is no longer available to you/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('group', { name: 'Details for Visible refund' }),
+    ).toBeInTheDocument();
+  });
+
+  it('offers the owner routes to the existing actions on an off-page source expense', async () => {
+    const refund = transaction({
+      id: REFUND_ID,
+      kind: 'REFUND',
+      money: { amount: '2.00', currency: 'BRL' },
+      refundOfTransactionId: EXPENSE_ID,
+      description: 'Old refund',
+      visibility: 'HOUSEHOLD',
+    });
+    const source = transaction({
+      id: EXPENSE_ID,
+      description: 'Older source',
+      visibility: 'HOUSEHOLD',
+    });
+    const { calls } = renderSection({
+      transactionsGet: () => transactionPage([refund]),
+      transactionGet: (id) => jsonResponse(id === EXPENSE_ID ? source : refund),
+    });
+    await screen.findByText('Old refund');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Old refund' }),
+    );
+    const refundPanel = await screen.findByRole('group', {
+      name: 'Details for Old refund',
+    });
+    // A refund never carries a visibility action of its own: the whole group
+    // follows the source expense, so only its details are offered here.
+    expect(
+      within(refundPanel).queryByRole('button', { name: /from details$/ }),
+    ).toBeNull();
+    fireEvent.click(
+      within(refundPanel).getByRole('button', { name: 'View source expense' }),
+    );
+    const sourcePanel = await screen.findByRole('group', {
+      name: 'Details for Older source',
+    });
+    // The source has no row on the loaded page, so the panel itself carries
+    // the owner's existing share and allocation routes.
+    expect(
+      screen.queryByRole('button', { name: 'Make Older source private' }),
+    ).toBeNull();
+    expect(
+      within(sourcePanel).getByRole('button', {
+        name: 'Make Older source private from details',
+      }),
+    ).toBeEnabled();
+    const allocationTrigger = within(sourcePanel).getByRole('button', {
+      name: 'Allocation for Older source from details',
+    });
+    fireEvent.click(allocationTrigger);
+    expect(
+      await screen.findByRole('group', {
+        name: 'Allocation for Older source',
+      }),
+    ).toBeInTheDocument();
+    expect(patchCalls(calls)).toHaveLength(0);
+  });
+
+  it('makes an off-page source expense private from its details without a refund patch', async () => {
+    const refund = transaction({
+      id: REFUND_ID,
+      kind: 'REFUND',
+      money: { amount: '2.00', currency: 'BRL' },
+      refundOfTransactionId: EXPENSE_ID,
+      description: 'Old refund',
+      visibility: 'HOUSEHOLD',
+    });
+    const source = transaction({
+      id: EXPENSE_ID,
+      description: 'Older source',
+      visibility: 'HOUSEHOLD',
+    });
+    const { calls } = renderSection({
+      transactionsGet: () => transactionPage([refund]),
+      transactionGet: (id) => jsonResponse(id === EXPENSE_ID ? source : refund),
+      transactionsPatch: (id) =>
+        id === EXPENSE_ID
+          ? jsonResponse({ ...source, visibility: 'PRIVATE', version: 1 })
+          : jsonResponse(refund),
+    });
+    await screen.findByText('Old refund');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Old refund' }),
+    );
+    fireEvent.click(
+      within(
+        await screen.findByRole('group', { name: 'Details for Old refund' }),
+      ).getByRole('button', { name: 'View source expense' }),
+    );
+    const sourcePanel = await screen.findByRole('group', {
+      name: 'Details for Older source',
+    });
+    fireEvent.click(
+      within(sourcePanel).getByRole('button', {
+        name: 'Make Older source private from details',
+      }),
+    );
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Make private' }),
+    );
+    expect(
+      await screen.findByText(
+        'This entry is private again. Members lose access on their next refresh; information already read is not retracted.',
+      ),
+    ).toBeInTheDocument();
+    // The versioned patch targets the source expense, never the refund.
+    const patches = patchCalls(calls);
+    expect(patches).toHaveLength(1);
+    expect(patches[0]?.url).toContain(`/transactions/${EXPENSE_ID}`);
+    expect(JSON.parse(String(patches[0]?.init?.body))).toEqual({
+      expectedVersion: 0,
+      visibility: 'PRIVATE',
+    });
+  });
+
+  it('ignores a late failed old page after changing the owner filter', async () => {
+    let failOldPage!: (response: Response) => void;
+    const stale = new Promise<Response>((resolve) => {
+      failOldPage = resolve;
+    });
+    const { calls } = renderSection({
+      transactionsGet: (_view, visibility, offset) => {
+        if (visibility === 'PRIVATE' && offset === 100) return stale;
+        if (visibility === 'PRIVATE')
+          return jsonResponse({
+            items: [transaction({ description: 'Private first page' })],
+            limit: 100,
+            offset: 0,
+            hasMore: true,
+          });
+        if (visibility === 'HOUSEHOLD')
+          return transactionPage([
+            transaction({
+              description: 'Shared first page',
+              visibility: 'HOUSEHOLD',
+            }),
+          ]);
+        return transactionPage([]);
+      },
+    });
+    await screen.findByText('No transactions yet.');
+    fireEvent.click(screen.getByRole('radio', { name: 'Private' }));
+    await screen.findByText('Private first page');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load more transactions' }),
+    );
+    fireEvent.click(screen.getByRole('radio', { name: 'Shared by me' }));
+    await screen.findByText('Shared first page');
+    await act(async () => {
+      failOldPage(
+        jsonResponse({ code: 'FINANCE_BUSY', message: 'Busy.' }, 503),
+      );
+    });
+    expect(
+      screen.queryByRole('button', { name: 'Retry next page' }),
+    ).toBeNull();
+    expect(screen.queryByText('Private first page')).toBeNull();
+    expect(calls.some(({ url }) => url.includes('visibility=PRIVATE'))).toBe(
+      true,
+    );
+  });
+
+  it('keeps an authorized open detail when it is absent from the filtered first page', async () => {
+    let detailReads = 0;
+    renderSection({
+      transactionsGet: (_view, visibility) =>
+        visibility === 'HOUSEHOLD'
+          ? transactionPage([])
+          : transactionPage([transaction()]),
+      transactionGet: () => {
+        detailReads++;
+        return jsonResponse(transaction());
+      },
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    await screen.findByRole('group', { name: 'Details for Groceries' });
+    fireEvent.click(screen.getByRole('radio', { name: 'Shared by me' }));
+    await screen.findByText('No transactions yet.');
+    expect(
+      screen.getByRole('group', { name: 'Details for Groceries' }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(detailReads).toBeGreaterThanOrEqual(2));
+  });
+
+  it('clears loaded pages on a later-page access loss', async () => {
+    const { onHouseholdAccessChanged } = renderSection({
+      transactionsGet: (_view, _visibility, offset) =>
+        offset === 0
+          ? jsonResponse({
+              items: [transaction()],
+              limit: 100,
+              offset: 0,
+              hasMore: true,
+            })
+          : jsonResponse(
+              { code: 'HOUSEHOLD_NOT_FOUND', message: 'Unavailable.' },
+              404,
+            ),
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Load more transactions' }),
+    );
+    await waitFor(() =>
+      expect(onHouseholdAccessChanged).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.queryByText('Groceries')).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Load more transactions' }),
+    ).toBeNull();
+  });
+
+  it('keeps the chosen visibility control enabled and focused through a deferred load', async () => {
+    let resolvePrivate!: (page: Response) => void;
+    const { calls } = renderSection({
+      transactionsGet: (_view, visibility) =>
+        visibility === 'PRIVATE'
+          ? new Promise<Response>((resolve) => {
+              resolvePrivate = resolve;
+            })
+          : transactionPage([]),
+    });
+    await screen.findByText('No transactions yet.');
+    const privateRadio = screen.getByRole('radio', { name: 'Private' });
+    privateRadio.focus();
+    expect(privateRadio).toHaveFocus();
+    // Space on a focused radio selects it in a browser; jsdom delivers that
+    // selection as the click activation React's onChange handles, so this is
+    // the keyboard path without the browser's own key handling.
+    fireEvent.click(privateRadio);
+    expect(privateRadio).toBeChecked();
+    // jsdom never moves focus off a control it just disabled, so pin the
+    // property that keeps it in a real browser: the radio stays enabled while
+    // its own scoped load is in flight.
+    expect(privateRadio).not.toBeDisabled();
+    expect(privateRadio).toHaveFocus();
+    // A different scope chosen during that load is still refused: the pending
+    // page already answers for "Private", and no second request starts.
+    const allRadio = screen.getByRole('radio', { name: 'All' });
+    allRadio.focus();
+    fireEvent.click(allRadio);
+    expect(privateRadio).toBeChecked();
+    expect(allRadio).not.toBeDisabled();
+    expect(allRadio).toHaveFocus();
+    expect(
+      calls.filter(({ url }) => url.includes('visibility=PRIVATE')),
+    ).toHaveLength(1);
+    await act(async () => {
+      resolvePrivate(
+        jsonResponse({
+          items: [
+            transaction({ description: 'Private only', visibility: 'PRIVATE' }),
+          ],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      );
+    });
+    expect(await screen.findByText('Private only')).toBeInTheDocument();
+    expect(privateRadio).toBeChecked();
+    expect(privateRadio).not.toBeDisabled();
+    expect(allRadio).toHaveFocus();
+    // The settled group is operable from where the user left it: the next
+    // activation switches scope for real.
+    const unfilteredBefore = calls.filter(({ url }) =>
+      url.endsWith('view=OWN&status=ALL'),
+    ).length;
+    fireEvent.click(allRadio);
+    expect(allRadio).toBeChecked();
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.endsWith('view=OWN&status=ALL')).length,
+      ).toBe(unfilteredBefore + 1),
+    );
+  });
+
+  it('keeps the chosen feed control enabled and focused through a deferred load', async () => {
+    let resolveHousehold!: (page: Response) => void;
+    const { calls } = renderSection({
+      transactionsGet: (view) =>
+        view === 'HOUSEHOLD'
+          ? new Promise<Response>((resolve) => {
+              resolveHousehold = resolve;
+            })
+          : transactionPage([]),
+    });
+    await screen.findByText('No transactions yet.');
+    const householdRadio = screen.getByRole('radio', {
+      name: 'Household feed',
+    });
+    householdRadio.focus();
+    fireEvent.click(householdRadio);
+    expect(householdRadio).toBeChecked();
+    expect(householdRadio).not.toBeDisabled();
+    expect(householdRadio).toHaveFocus();
+    const ownRadio = screen.getByRole('radio', { name: 'My transactions' });
+    fireEvent.click(ownRadio);
+    expect(householdRadio).toBeChecked();
+    expect(
+      calls.filter(({ url }) => url.endsWith('view=HOUSEHOLD&status=ALL')),
+    ).toHaveLength(1);
+    await act(async () => {
+      resolveHousehold(
+        jsonResponse({
+          items: [sharedByOther()],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      );
+    });
+    expect(await screen.findByText('Shared internet bill')).toBeInTheDocument();
+    expect(householdRadio).toBeChecked();
+    expect(householdRadio).not.toBeDisabled();
+    expect(ownRadio).not.toBeDisabled();
+  });
+
+  it('reaches the next page from a pager above the list, not behind every row', async () => {
+    const rows = Array.from({ length: 100 }, (_, index) =>
+      transaction({
+        id: `40000000-0000-4000-8000-0000000001${String(index).padStart(2, '0')}`,
+        description: `Own entry ${index}`,
+      }),
+    );
+    const { calls, container } = renderSection({
+      transactionsGet: (_view, _visibility, offset) =>
+        offset === 0
+          ? jsonResponse({ items: rows, limit: 100, offset: 0, hasMore: true })
+          : jsonResponse({
+              items: [
+                transaction({
+                  id: '40000000-0000-4000-8000-000000000999',
+                  description: 'Older own expense',
+                }),
+              ],
+              limit: 100,
+              offset: 100,
+              hasMore: false,
+            }),
+    });
+    await screen.findByText('Own entry 99');
+    // The order the browser derives its sequential focus from.
+    const focusable = [
+      ...container.querySelectorAll<HTMLElement>(
+        'button, a[href], input, select, textarea',
+      ),
+    ].filter(
+      (element) => !element.hasAttribute('disabled') && element.tabIndex >= 0,
+    );
+    const firstRow = screen.getByRole('button', {
+      name: 'Details for Own entry 0',
+    });
+    const topPager = screen.getByRole('button', {
+      name: 'Load more transactions (top of list)',
+    });
+    const bottomPager = screen.getByRole('button', {
+      name: 'Load more transactions',
+    });
+    // The early pager precedes row actions; the late pager follows all rows.
+    expect(focusable.indexOf(topPager)).toBeLessThan(
+      focusable.indexOf(firstRow),
+    );
+    expect(focusable.indexOf(bottomPager)).toBeGreaterThan(
+      focusable.indexOf(
+        screen.getByRole('button', { name: 'Details for Own entry 99' }),
+      ),
+    );
+    topPager.focus();
+    expect(topPager).toHaveFocus();
+    // Enter or Space on a focused button activates it in a browser; jsdom
+    // delivers that activation as the click React's onClick handles.
+    fireEvent.click(topPager);
+    expect(await screen.findByText('Older own expense')).toBeInTheDocument();
+    expect(
+      calls.filter(({ url }) => url.includes('offset=100&view=OWN')),
+    ).toHaveLength(1);
+    // The last page leaves no pager behind: no control is offered for a state
+    // that has nothing more to load.
+    expect(
+      screen.queryByRole('button', {
+        name: 'Load more transactions (top of list)',
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Load more transactions' }),
+    ).toBeNull();
+  });
+
+  it('loads one page at a time from the top pager, preserves focus and retries failures', async () => {
+    const first = Array.from({ length: 100 }, (_, index) =>
+      transaction({
+        id: `40000000-0000-4000-8000-${String(index + 100).padStart(12, '0')}`,
+        description: `Page one entry ${index}`,
+      }),
+    );
+    const second = Array.from({ length: 100 }, (_, index) =>
+      transaction({
+        id: `40000000-0000-4000-8000-${String(index + 200).padStart(12, '0')}`,
+        description: `Page two entry ${index}`,
+      }),
+    );
+    const pending: { resolve: (page: Response) => void }[] = [];
+    const { calls } = renderSection({
+      transactionsGet: (_view, _visibility, offset) =>
+        offset === 0
+          ? jsonResponse({ items: first, limit: 100, offset: 0, hasMore: true })
+          : new Promise<Response>((resolve) => pending.push({ resolve })),
+    });
+    await screen.findByText('Page one entry 99');
+    const topPager = screen.getByRole('button', {
+      name: 'Load more transactions (top of list)',
+    });
+    // Enter or Space on a focused button activates it in a browser; jsdom
+    // delivers that activation as the click React's onClick handles.
+    topPager.focus();
+    fireEvent.click(topPager);
+    const pageRequests = (offset: number) =>
+      calls.filter(({ url }) => url.includes(`offset=${offset}&view=OWN`))
+        .length;
+    expect(pageRequests(100)).toBe(1);
+    // While that request is in flight the control reports the state, keeps the
+    // user's focus, and a repeated activation cannot start a second request.
+    expect(topPager).toHaveAttribute('aria-disabled', 'true');
+    expect(topPager).toHaveTextContent('Loading more…');
+    expect(topPager).toHaveFocus();
+    fireEvent.click(topPager);
+    expect(pageRequests(100)).toBe(1);
+    await act(async () => {
+      pending[0]?.resolve(
+        jsonResponse({ code: 'FINANCE_BUSY', message: 'Busy.' }, 503),
+      );
+    });
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Could not load the next page. Try again. Already loaded transactions remain available.',
+    );
+    expect(screen.getByText('Page one entry 99')).toBeInTheDocument();
+    expect(topPager).toHaveFocus();
+    expect(topPager).toHaveTextContent('Retry next page');
+    expect(topPager).not.toHaveAttribute('aria-disabled');
+    fireEvent.click(topPager);
+    expect(pageRequests(100)).toBe(2);
+    await act(async () => {
+      pending[1]?.resolve(
+        jsonResponse({ items: second, limit: 100, offset: 100, hasMore: true }),
+      );
+    });
+    expect(await screen.findByText('Page two entry 99')).toBeInTheDocument();
+    expect(topPager).not.toHaveAttribute('aria-disabled');
+    expect(topPager).toHaveTextContent('Load more transactions');
+    expect(topPager).toHaveFocus();
+    fireEvent.click(topPager);
+    expect(pageRequests(200)).toBe(1);
+    await act(async () => {
+      pending[2]?.resolve(
+        jsonResponse({ code: 'FINANCE_BUSY', message: 'Busy.' }, 503),
+      );
+    });
+    expect(topPager).toHaveFocus();
+    expect(topPager).toHaveTextContent('Retry next page');
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Could not load the next page. Try again.',
+    );
+    fireEvent.click(topPager);
+    expect(pageRequests(200)).toBe(2);
+    // Reproduce a frame that runs before React commits the pager removal.
+    // A focus handoff cannot depend on the timing of this callback.
+    const animationFrame = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((callback) => {
+        callback(0);
+        return 1;
+      });
+    await act(async () => {
+      pending[3]?.resolve(
+        jsonResponse({
+          items: Array.from({ length: 26 }, (_, index) =>
+            transaction({
+              id: `40000000-0000-4000-8000-${String(index + 300).padStart(12, '0')}`,
+              description: `Final page entry ${index}`,
+            }),
+          ),
+          limit: 100,
+          offset: 200,
+          hasMore: false,
+        }),
+      );
+    });
+    animationFrame.mockRestore();
+    expect(screen.getByText('Final page entry 25')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', {
+        name: 'Load more transactions (top of list)',
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Load more transactions' }),
+    ).toBeNull();
+    expect(
+      screen.getByRole('radio', { name: 'My transactions' }),
+    ).toHaveFocus();
+  });
+
+  it('does not move focus after a deferred final page when the user left the pager', async () => {
+    let resolveLast!: (page: Response) => void;
+    const first = Array.from({ length: 100 }, (_, index) =>
+      transaction({
+        id: `40000000-0000-4000-8000-${String(index + 400).padStart(12, '0')}`,
+        description: `Current entry ${index}`,
+      }),
+    );
+    renderSection({
+      transactionsGet: (_view, _visibility, offset) =>
+        offset === 0
+          ? jsonResponse({ items: first, limit: 100, offset: 0, hasMore: true })
+          : new Promise<Response>((resolve) => {
+              resolveLast = resolve;
+            }),
+    });
+    await screen.findByText('Current entry 99');
+    const bottomPager = screen.getByRole('button', {
+      name: 'Load more transactions',
+    });
+    bottomPager.focus();
+    fireEvent.click(bottomPager);
+    expect(bottomPager).toHaveFocus();
+    const firstRow = screen.getByRole('button', {
+      name: 'Details for Current entry 0',
+    });
+    firstRow.focus();
+    await act(async () => {
+      resolveLast(
+        jsonResponse({
+          items: [transaction({ id: '40000000-0000-4000-8000-000000000999' })],
+          limit: 100,
+          offset: 100,
+          hasMore: false,
+        }),
+      );
+    });
+    expect(
+      screen.queryByRole('button', { name: 'Load more transactions' }),
+    ).toBeNull();
+    expect(firstRow).toHaveFocus();
+  });
 });
 
 describe('sharing', () => {
@@ -2996,11 +3756,17 @@ describe('sharing', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
     await screen.findByText('Shared internet bill');
     fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    // The own feed restarts at page one on the view change, so the row's
+    // Share action returns only after that reload settles.
     fireEvent.click(
-      screen.getByRole('button', {
+      await screen.findByRole('button', {
         name: 'Share Groceries with the household',
       }),
     );
+    const feedGets = (view: 'OWN' | 'HOUSEHOLD') =>
+      calls.filter(({ url }) => url.endsWith(`view=${view}&status=ALL`)).length;
+    const ownGetsBeforeShare = feedGets('OWN');
+    const householdGetsBeforeShare = feedGets('HOUSEHOLD');
     fireEvent.click(
       await screen.findByRole('button', { name: 'Share with household' }),
     );
@@ -3017,14 +3783,8 @@ describe('sharing', () => {
     });
     // Both loaded feeds are refreshed after a share.
     await waitFor(() => {
-      const ownGets = calls.filter(({ url }) =>
-        url.endsWith('view=OWN&status=ALL'),
-      );
-      const householdGets = calls.filter(({ url }) =>
-        url.endsWith('view=HOUSEHOLD&status=ALL'),
-      );
-      expect(ownGets.length).toBe(2);
-      expect(householdGets.length).toBe(2);
+      expect(feedGets('OWN')).toBe(ownGetsBeforeShare + 1);
+      expect(feedGets('HOUSEHOLD')).toBe(householdGetsBeforeShare + 1);
     });
   });
 
@@ -5155,9 +5915,20 @@ describe('categorization provenance', () => {
     ).toBeInTheDocument();
     const category = screen.getByLabelText('Category');
     expect(category).toHaveAttribute('aria-invalid', 'true');
-    // The rejection is announced on, and returns focus to, the category
-    // control rather than sending the user to the amount field.
+    // The rejection is announced on the notice...
+    const noticeText = screen.getByText(
+      'Check the highlighted transaction details.',
+    );
+    const notice = noticeText.closest('[role="alert"]');
+    expect(notice).not.toBeNull();
+    // ...while focus lands on, and stays on, the rejected control rather
+    // than the notice, even after the notice's own focus effects settle.
     await waitFor(() => expect(category).toHaveFocus());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(category).toHaveFocus();
+    expect(notice).not.toHaveFocus();
     expect(screen.getByLabelText('Amount')).not.toHaveFocus();
   });
 

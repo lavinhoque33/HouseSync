@@ -93,6 +93,30 @@ describe('transaction typed client', () => {
       Accept: 'application/json',
     });
   });
+  it('requests bounded owner visibility and offset without changing ALL status', async () => {
+    const calls = stubFetch(() =>
+      jsonResponse({ items: [], limit: 100, offset: 10000, hasMore: true }),
+    );
+    const page = await fetchTransactions(HOUSEHOLD_ID, 'OWN', undefined, {
+      offset: 10000,
+      visibility: 'HOUSEHOLD',
+    });
+    expect(calls[0]?.url).toBe(
+      `/api/households/${HOUSEHOLD_ID}/transactions?limit=100&offset=10000&view=OWN&status=ALL&visibility=HOUSEHOLD`,
+    );
+    expect(page).toMatchObject({ offset: 10000, hasMore: true });
+    await expect(
+      fetchTransactions(HOUSEHOLD_ID, 'OWN', undefined, {
+        offset: 10001,
+      }),
+    ).rejects.toThrow(RangeError);
+    await expect(
+      fetchTransactions(HOUSEHOLD_ID, 'HOUSEHOLD', undefined, {
+        visibility: 'PRIVATE',
+      }),
+    ).rejects.toThrow(RangeError);
+    expect(calls).toHaveLength(1);
+  });
 
   it('accepts CONNECTED source entries with all correction fields intact', async () => {
     stubFetch(() =>

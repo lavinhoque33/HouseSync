@@ -34,17 +34,20 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Transaction endpoints: own entries at any visibility plus the household feed. Query
- * parameters are filtered in SQL after membership and visibility authorization, never in memory;
- * non-owner account references are redacted to null in the authorized projection.
+ * Transaction endpoints: own entries at any visibility plus the household feed. List
+ * query parameters, including the optional own-view disclosure scope, are filtered in SQL
+ * after membership authorization, never in memory; non-owner account references are redacted to
+ * null in the authorized projection.
  */
 @RestController
 @RequestMapping("/api/households/{householdId}/transactions")
 public class FinancialTransactionController {
 
   private static final Set<String> LIST_PARAMETERS =
-      Set.of("limit", "offset", "view", "accountId", "currency", "from", "to", "status");
+      Set.of(
+          "limit", "offset", "view", "visibility", "accountId", "currency", "from", "to", "status");
   private static final Set<String> VIEWS = Set.of("OWN", "HOUSEHOLD");
+  private static final Set<String> VISIBILITIES = Set.of("PRIVATE", "HOUSEHOLD");
   private static final Set<String> CURRENCIES =
       Set.of("BRL", "USD", "EUR", "GBP", "JPY", "KWD", "CAD");
   private static final LocalDate MIN_FILTER_DATE = LocalDate.of(1900, 1, 1);
@@ -115,6 +118,16 @@ public class FinancialTransactionController {
     if (!VIEWS.contains(view)) {
       throw new ValidationFailedException(Map.of("view", "Choose your own or household entries."));
     }
+    String visibility = single(query, "visibility", null);
+    if (visibility != null && !VISIBILITIES.contains(visibility)) {
+      throw new ValidationFailedException(
+          Map.of("visibility", "Choose private or household entries."));
+    }
+    if (visibility != null && !"OWN".equals(view)) {
+      // Disclosure scope is an own-view filter; the household feed is household-only by contract.
+      throw new ValidationFailedException(
+          Map.of("visibility", "Visibility filtering is available for your own entries."));
+    }
     String status = single(query, "status", "POSTED");
     if (!Set.of("POSTED", "VOIDED", "ALL").contains(status)) {
       throw new ValidationFailedException(Map.of("status", "Choose posted, voided, or all."));
@@ -136,6 +149,7 @@ public class FinancialTransactionController {
             householdId,
             actorId(authentication),
             view,
+            visibility,
             status,
             accountId,
             currency,

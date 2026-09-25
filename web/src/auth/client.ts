@@ -2638,13 +2638,17 @@ function parseTransactionPage(
     offset?: unknown;
     hasMore?: unknown;
   },
+  requestedOffset: number,
 ): TransactionPage {
   if (
     !Array.isArray(body.items) ||
     typeof body.limit !== 'number' ||
     !Number.isInteger(body.limit) ||
+    body.limit !== 100 ||
     typeof body.offset !== 'number' ||
     !Number.isInteger(body.offset) ||
+    body.offset !== requestedOffset ||
+    body.items.length > body.limit ||
     typeof body.hasMore !== 'boolean'
   ) {
     throw unexpectedTransactionResponse(response.status);
@@ -2663,19 +2667,31 @@ function parseTransactionPage(
   };
 }
 
-/**
- * Household feed query: the documented feed projection, all statuses so
- * retained voided entries stay visible, page 1 with the documented 1–100
- * limit bound.
- */
+/** Feed pages are bounded by the server, with the owner filter only on OWN. */
+export type TransactionFeedOptions = {
+  offset?: number;
+  visibility?: TransactionVisibility | undefined;
+};
+
 export async function fetchTransactions(
   householdId: string,
   view: TransactionFeedView,
   signal?: AbortSignal,
+  options: TransactionFeedOptions = {},
   timeoutMs: number = AUTH_TIMEOUT_MS,
 ): Promise<TransactionPage> {
+  const { offset = 0, visibility } = options;
+  if (!Number.isInteger(offset) || offset < 0 || offset > 10000) {
+    throw new RangeError('Transaction offset must be between 0 and 10000.');
+  }
+  if (visibility && view !== 'OWN') {
+    throw new RangeError('Visibility filtering is only available for OWN.');
+  }
+  const query = `limit=100&offset=${offset}&view=${view}&status=ALL${
+    visibility ? `&visibility=${visibility}` : ''
+  }`;
   const response = await apiFetch(
-    `${transactionPath(householdId)}?limit=100&offset=0&view=${view}&status=ALL`,
+    `${transactionPath(householdId)}?${query}`,
     {
       method: 'GET',
       credentials: 'include',
@@ -2700,6 +2716,7 @@ export async function fetchTransactions(
       offset?: unknown;
       hasMore?: unknown;
     }>(response),
+    offset,
   );
 }
 

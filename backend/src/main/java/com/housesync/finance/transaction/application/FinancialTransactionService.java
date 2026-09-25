@@ -461,6 +461,7 @@ public class FinancialTransactionService {
       UUID householdId,
       UUID actorId,
       String view,
+      String visibility,
       String status,
       UUID accountId,
       String currency,
@@ -469,6 +470,11 @@ public class FinancialTransactionService {
       int limit,
       int offset) {
     if (HOUSEHOLD_VIEW.equals(view)) {
+      if (visibility != null) {
+        // Disclosure scope narrows the actor's own feed; the household feed is always shared-only.
+        throw new ValidationFailedException(
+            Map.of("visibility", "Visibility filtering is available for your own entries."));
+      }
       // Household feed: only HOUSEHOLD entries from any owner, including departed owners;
       // the membership join is the authorization, and every filter applies in SQL.
       List<FinancialTransactionEntity> page =
@@ -488,6 +494,13 @@ public class FinancialTransactionService {
       return new FinancialTransactionListResponse(items, limit, offset, hasMore);
     }
 
+    if (visibility != null
+        && !PRIVATE_VISIBILITY.equals(visibility)
+        && !HOUSEHOLD_VISIBILITY.equals(visibility)) {
+      // Omission means both; an unknown or blank scope never widens the authorized population.
+      throw new ValidationFailedException(
+          Map.of("visibility", "Choose private or household entries."));
+    }
     if (accountId != null) {
       // A filtered feed resolves membership first so a non-member gets the household 404
       // rather than a resource-shaped one, then requires private account ownership.
@@ -498,7 +511,16 @@ public class FinancialTransactionService {
     }
     List<FinancialTransactionEntity> page =
         findOwnedPage(
-            householdId, actorId, status, accountId, currency, from, to, limit + 1, offset);
+            householdId,
+            actorId,
+            visibility,
+            status,
+            accountId,
+            currency,
+            from,
+            to,
+            limit + 1,
+            offset);
     if (page.isEmpty()) {
       households.requireFinanceMembership(householdId, actorId);
     }
@@ -778,13 +800,15 @@ public class FinancialTransactionService {
   }
 
   /**
-   * Builds the authorized OWN-view page query dynamically so every optional filter is either
-   * omitted or bound with a concrete typed value; visibility scope and filters apply in SQL, never
-   * to an unrestricted in-memory result.
+   * Builds the authorized OWN-view page query dynamically so every filter - membership, ownership,
+   * the optional disclosure scope, account, status, currency and dates - applies in SQL before the
+   * page boundary; each optional filter is either omitted or bound with a concrete typed value, and
+   * an omitted scope means both visibilities rather than an unrestricted in-memory result.
    */
   private List<FinancialTransactionEntity> findOwnedPage(
       UUID householdId,
       UUID actorId,
+      String visibility,
       String status,
       UUID accountId,
       String currency,
@@ -799,6 +823,9 @@ public class FinancialTransactionService {
                 + " AND m.user_id = :actorId"
                 + " WHERE t.household_id = :householdId AND t.owner_user_id = :actorId"
                 + " AND (:status = 'ALL' OR t.status = :status)");
+    if (visibility != null) {
+      sql.append(" AND t.visibility = :visibility");
+    }
     if (accountId != null) {
       sql.append(" AND t.account_id = :accountId");
     }
@@ -818,6 +845,9 @@ public class FinancialTransactionService {
     query.setParameter("householdId", householdId);
     query.setParameter("actorId", actorId);
     query.setParameter("status", status);
+    if (visibility != null) {
+      query.setParameter("visibility", visibility);
+    }
     if (accountId != null) {
       query.setParameter("accountId", accountId);
     }

@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
@@ -33,6 +34,7 @@ import {
   type TransactionAllocation,
   type TransactionCategory,
   type TransactionFeedView,
+  type TransactionVisibility,
   type TransactionKind,
 } from '../auth/client';
 import {
@@ -317,12 +319,18 @@ export function TransactionsSection({
     null,
   );
   const [ownHasMore, setOwnHasMore] = useState(false);
+  const [ownNextOffset, setOwnNextOffset] = useState(0);
+  const [ownVisibility, setOwnVisibility] =
+    useState<TransactionVisibility | null>(null);
   const [householdTransactions, setHouseholdTransactions] = useState<
     Transaction[] | null
   >(null);
   const [householdHasMore, setHouseholdHasMore] = useState(false);
+  const [householdNextOffset, setHouseholdNextOffset] = useState(0);
   const [activeView, setActiveView] = useState<TransactionFeedView>('OWN');
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
 
   // Create-form draft state. The date default follows the household
@@ -427,6 +435,7 @@ export function TransactionsSection({
   const csrfRef = useRef(csrf);
   const generationRef = useRef(0);
   const unmountedRef = useRef(false);
+  const pageLoadingRef = useRef(false);
   const controllersRef = useRef<Set<AbortController>>(new Set());
   const creatingRef = useRef(false);
   const updatingRef = useRef<string | null>(null);
@@ -440,6 +449,19 @@ export function TransactionsSection({
   const provenanceSeqRef = useRef(0);
   const ruleCreatingRef = useRef(false);
   const noticeRef = useRef<HTMLDivElement>(null);
+  const feedControlRef = useRef<HTMLInputElement>(null);
+  const topPagerRef = useRef<HTMLButtonElement>(null);
+  const bottomPagerRef = useRef<HTMLButtonElement>(null);
+  // A final page removes both pagers. Remember whether one held focus before
+  // that update, then hand off only after React has committed its removal.
+  const pendingPagerFocusRef = useRef<{
+    generation: number;
+    signal: AbortSignal;
+  } | null>(null);
+  // A field-level rejection announces through the notice but moves focus to
+  // the rejected control, so the notice's own focus effect yields exactly once
+  // for that notice instead of racing the field focus.
+  const skipNoticeFocusRef = useRef(false);
   const createAccountRef = useRef<HTMLSelectElement>(null);
   const createCategoryRef = useRef<HTMLSelectElement>(null);
   const amountRef = useRef<HTMLInputElement>(null);
@@ -515,6 +537,23 @@ export function TransactionsSection({
     return !unmountedRef.current && generationRef.current === generation;
   }
 
+  useLayoutEffect(() => {
+    const pending = pendingPagerFocusRef.current;
+    if (!pending) return;
+    if (!current(pending.generation) || pending.signal.aborted) {
+      pendingPagerFocusRef.current = null;
+      return;
+    }
+    // Another commit may precede the page commit; wait until the focused
+    // pager has actually gone rather than guessing when a frame will run.
+    if (topPagerRef.current || bottomPagerRef.current) return;
+    pendingPagerFocusRef.current = null;
+    // A notice or a deliberate focus move must retain precedence.
+    if (!notice && document.activeElement === document.body) {
+      feedControlRef.current?.focus();
+    }
+  });
+
   function track(controller: AbortController) {
     controllersRef.current.add(controller);
   }
@@ -525,20 +564,28 @@ export function TransactionsSection({
 
   function setFeedPage(
     view: TransactionFeedView,
-    items: Transaction[],
-    hasMore: boolean,
+    page: {
+      items: Transaction[];
+      hasMore: boolean;
+      offset: number;
+      limit: number;
+    },
   ) {
-    if (view === 'OWN') {
-      setOwnTransactions(items);
-      setOwnHasMore(hasMore);
-    } else {
-      setHouseholdTransactions(items);
-      setHouseholdHasMore(hasMore);
+    const byId = new Map<string, Transaction>();
+    for (const item of page.items) {
+      const previous = byId.get(item.id);
+      if (!previous || item.version > previous.version) byId.set(item.id, item);
     }
-  }
-
-  function feedIsLoaded(view: TransactionFeedView): boolean {
-    return (view === 'OWN' ? ownTransactions : householdTransactions) !== null;
+    const rows = [...byId.values()];
+    if (view === 'OWN') {
+      setOwnTransactions(rows);
+      setOwnHasMore(page.hasMore);
+      setOwnNextOffset(page.offset + page.limit);
+    } else {
+      setHouseholdTransactions(rows);
+      setHouseholdHasMore(page.hasMore);
+      setHouseholdNextOffset(page.offset + page.limit);
+    }
   }
 
   function activeTransactions(): Transaction[] | null {
@@ -547,6 +594,85 @@ export function TransactionsSection({
 
   function activeHasMore(): boolean {
     return activeView === 'OWN' ? ownHasMore : householdHasMore;
+  }
+
+  function activeNextOffset(): number {
+    return activeView === 'OWN' ? ownNextOffset : householdNextOffset;
+  }
+  async function loadMore() {
+    const view = activeView;
+    const offset = activeNextOffset();
+    if (
+      pageLoadingRef.current ||
+      loading ||
+      !authorityConfirmed ||
+      !activeHasMore() ||
+      offset > 10000 ||
+      confirmOrMutationActive()
+    )
+      return;
+    const generation = generationRef.current;
+    const controller = new AbortController();
+    track(controller);
+    pageLoadingRef.current = true;
+    setLoadingMore(true);
+    setPageError(null);
+    try {
+      const page = await fetchTransactions(
+        household.id,
+        view,
+        controller.signal,
+        {
+          offset,
+          visibility: view === 'OWN' ? (ownVisibility ?? undefined) : undefined,
+        },
+      );
+      if (!current(generation) || controller.signal.aborted) return;
+      if (
+        (!page.hasMore || page.offset + page.limit > 10000) &&
+        (document.activeElement === topPagerRef.current ||
+          document.activeElement === bottomPagerRef.current)
+      ) {
+        pendingPagerFocusRef.current = {
+          generation,
+          signal: controller.signal,
+        };
+      }
+      // Offset comes from the server page boundary, not the count of unique rows.
+      // A newer version from an earlier page wins against a stale overlapping row.
+      const merge = (rows: Transaction[] | null) => {
+        const merged = new Map((rows ?? []).map((row) => [row.id, row]));
+        for (const row of page.items) {
+          const previous = merged.get(row.id);
+          if (!previous || row.version > previous.version)
+            merged.set(row.id, row);
+        }
+        return [...merged.values()];
+      };
+      if (view === 'OWN') {
+        setOwnTransactions(merge);
+        setOwnHasMore(page.hasMore);
+        setOwnNextOffset(page.offset + page.limit);
+      } else {
+        setHouseholdTransactions(merge);
+        setHouseholdHasMore(page.hasMore);
+        setHouseholdNextOffset(page.offset + page.limit);
+      }
+    } catch (error) {
+      if (!current(generation) || controller.signal.aborted) return;
+      if (error instanceof ApiError && mapCommonErrors(error)) return;
+      setPageError(
+        error instanceof ApiError && error.timedOut
+          ? 'Loading more transactions timed out. Try again.'
+          : 'Could not load the next page. Try again.',
+      );
+    } finally {
+      untrack(controller);
+      if (current(generation)) {
+        pageLoadingRef.current = false;
+        setLoadingMore(false);
+      }
+    }
   }
 
   function loadedViews(): TransactionFeedView[] {
@@ -563,6 +689,7 @@ export function TransactionsSection({
       views: TransactionFeedView[];
       includeMeta: boolean;
       preserveNotice: boolean;
+      visibility?: TransactionVisibility | null;
     },
   ) {
     setLoading(true);
@@ -572,10 +699,6 @@ export function TransactionsSection({
         options.includeMeta
           ? fetchFinancialAccounts(household.id, controller.signal)
           : Promise.resolve(null),
-        // The taxonomy is optional metadata: its failure is captured rather
-        // than rejecting the load, so a category-list outage never hides the
-        // ledger. The controls then show the calm "Category unavailable"
-        // label and the section's refresh retries the list.
         options.includeMeta
           ? fetchTransactionCategories(household.id, controller.signal).then(
               (page) => ({ items: page.items, failure: null as unknown }),
@@ -584,7 +707,10 @@ export function TransactionsSection({
           : Promise.resolve(null),
         Promise.all(
           options.views.map((view) =>
-            fetchTransactions(household.id, view, controller.signal),
+            fetchTransactions(household.id, view, controller.signal, {
+              visibility:
+                view === 'OWN' ? (options.visibility ?? undefined) : undefined,
+            }),
           ),
         ),
       ]);
@@ -592,8 +718,11 @@ export function TransactionsSection({
       if (accountsPage) setAccounts(accountsPage.items);
       options.views.forEach((view, index) => {
         const page = feedPages[index];
-        if (page) setFeedPage(view, page.items, page.hasMore);
+        if (page) setFeedPage(view, page);
       });
+      setPageError(null);
+      setLoadingMore(false);
+      pageLoadingRef.current = false;
       setLoading(false);
       if (categoriesOutcome) {
         if (categoriesOutcome.items) {
@@ -660,7 +789,8 @@ export function TransactionsSection({
 
   function refresh() {
     if (loading || creatingRef.current || updatingRef.current !== null) return;
-    reloadViews(loadedViews(), true, false);
+    const views = loadedViews();
+    reloadViews(views.length ? views : [activeView], true, false);
   }
 
   /**
@@ -680,16 +810,60 @@ export function TransactionsSection({
     views: TransactionFeedView[],
     includeMeta: boolean,
     preserveNotice: boolean,
+    visibility: TransactionVisibility | null = ownVisibility,
   ) {
     const generation = ++generationRef.current;
+    pendingPagerFocusRef.current = null;
+    pageLoadingRef.current = false;
+    setLoadingMore(false);
+    setPageError(null);
     const controller = new AbortController();
     track(controller);
-    // A reload that settles a mutation keeps that mutation's outcome
-    // notice visible; manual refreshes clear notices instead.
+    // A filtered page cannot establish whether an open detail was revoked.
+    // Reauthorize by ID independently; a transient failure keeps the panel
+    // and offers refresh, while a confirmed 404 closes it.
+    if (detail) {
+      const detailId = detail.id;
+      void fetchTransaction(household.id, detailId, controller.signal).then(
+        (fresh) => {
+          if (!current(generation) || controller.signal.aborted) return;
+          // A reauthorization read can be answered by a representation older
+          // than one this session already committed (for example a detail
+          // GET issued before a just-committed category correction). It must
+          // never overwrite the newer committed representation, which would
+          // silently revert the correction and desynchronize the provenance
+          // panel; the next authoritative read reconciles it.
+          setDetail((opened) =>
+            opened?.id === detailId && fresh.version >= opened.version
+              ? fresh
+              : opened,
+          );
+        },
+        (error: unknown) => {
+          if (!current(generation) || controller.signal.aborted) return;
+          if (error instanceof ApiError && mapCommonErrors(error)) return;
+          if (
+            error instanceof ApiError &&
+            error.code === 'TRANSACTION_NOT_FOUND'
+          ) {
+            setDetail((opened) => (opened?.id === detailId ? null : opened));
+            resetProvenance();
+            removeFromFeeds(detailId);
+            return;
+          }
+          setNotice({
+            kind: 'warning',
+            text: 'Could not verify the open transaction details. Refresh to try again.',
+            showRefresh: true,
+          });
+        },
+      );
+    }
     void load(generation, controller, {
       views,
       includeMeta,
       preserveNotice,
+      visibility,
     }).finally(() => untrack(controller));
   }
 
@@ -700,14 +874,42 @@ export function TransactionsSection({
       creatingRef.current ||
       updatingRef.current !== null ||
       detailLoadingRef.current ||
+      pendingCreate !== null ||
+      pendingVoid !== null ||
+      pendingShare !== null ||
+      pendingRevoke !== null ||
       !authorityConfirmed
     ) {
       return;
     }
     setActiveView(view);
-    if (!feedIsLoaded(view)) {
-      reloadViews([view], categories === null, false);
+    if (view === 'OWN') {
+      setOwnTransactions(null);
+      setOwnNextOffset(0);
+      setOwnHasMore(false);
+    } else {
+      setHouseholdTransactions(null);
+      setHouseholdNextOffset(0);
+      setHouseholdHasMore(false);
     }
+    reloadViews([view], categories === null, false);
+  }
+
+  function switchVisibility(visibility: TransactionVisibility | null) {
+    if (
+      visibility === ownVisibility ||
+      pendingCreate !== null ||
+      confirmOrMutationActive() ||
+      detailLoadingRef.current
+    )
+      return;
+    setOwnVisibility(visibility);
+    setOwnTransactions(null);
+    setOwnHasMore(false);
+    setOwnNextOffset(0);
+    // The new filter is passed explicitly because React has not rendered its
+    // state update yet.
+    reloadViews(['OWN'], categories === null, false, visibility);
   }
 
   /**
@@ -727,6 +929,14 @@ export function TransactionsSection({
     // Old generations must not publish into cleared state: in-flight
     // load continuations are ignored from here on.
     generationRef.current += 1;
+    pendingPagerFocusRef.current = null;
+    for (const controller of controllersRef.current) controller.abort();
+    pageLoadingRef.current = false;
+    setLoadingMore(false);
+    setPageError(null);
+    setOwnNextOffset(0);
+    setHouseholdNextOffset(0);
+    setOwnVisibility(null);
     setAccounts(null);
     setCategories(null);
     setOwnTransactions(null);
@@ -792,6 +1002,7 @@ export function TransactionsSection({
     return () => {
       unmountedRef.current = true;
       generationRef.current += 1;
+      pendingPagerFocusRef.current = null;
       for (const owned of controllers) owned.abort();
     };
     // Household identity is fixed for this keyed component instance.
@@ -938,7 +1149,12 @@ export function TransactionsSection({
   }, [accounts, ownTransactions, householdTransactions]);
 
   useEffect(() => {
-    if (notice) noticeRef.current?.focus();
+    if (!notice) return;
+    if (skipNoticeFocusRef.current) {
+      skipNoticeFocusRef.current = false;
+      return;
+    }
+    noticeRef.current?.focus();
   }, [notice]);
 
   useEffect(() => {
@@ -1226,6 +1442,9 @@ export function TransactionsSection({
     const built = buildCreateInput();
     if (!built.ok) {
       setCreateFieldErrors(built.errors);
+      // The notice announces the rejection; focus belongs on the first
+      // invalid control, so the notice focus effect yields once.
+      skipNoticeFocusRef.current = true;
       setNotice({ kind: 'error', text: 'Check the highlighted fields.' });
       // Focus the first field that needs attention.
       const focus =
@@ -1413,6 +1632,7 @@ export function TransactionsSection({
         })
       ) {
         setPendingCreate(null);
+        skipNoticeFocusRef.current = true;
         setNotice({
           kind: 'error',
           text: 'Check the highlighted transaction details.',
@@ -1581,6 +1801,9 @@ export function TransactionsSection({
     }
     if (Object.keys(errors).length > 0) {
       setEditFieldErrors(errors);
+      // The notice announces the rejection; focus belongs on the field that
+      // needs attention, so the notice focus effect yields once.
+      skipNoticeFocusRef.current = true;
       setNotice({ kind: 'error', text: 'Check the highlighted fields.' });
       requestAnimationFrame(() => editAmountRef.current?.focus());
       return;
@@ -1755,24 +1978,22 @@ export function TransactionsSection({
       if (
         mapCreateFieldErrors(apiError, {
           setFieldErrors: setEditFieldErrors,
-          // The editor and global notice both re-render after this failure. Two frames place
-          // focus after the notice's own announcement focus, on the field that needs correction.
+          // The editor and the notice re-render after this failure. The
+          // notice keeps its announcement role but yields focus, so the
+          // rejected control owns focus once the re-render commits.
           focusAmount: () =>
-            requestAnimationFrame(() =>
-              requestAnimationFrame(() => editAmountRef.current?.focus()),
-            ),
+            requestAnimationFrame(() => editAmountRef.current?.focus()),
           focusCategory: () =>
-            requestAnimationFrame(() =>
-              requestAnimationFrame(() => {
-                if (transaction.kind === 'REFUND') {
-                  editAmountRef.current?.focus();
-                } else {
-                  editCategoryRef.current?.focus();
-                }
-              }),
-            ),
+            requestAnimationFrame(() => {
+              if (transaction.kind === 'REFUND') {
+                editAmountRef.current?.focus();
+              } else {
+                editCategoryRef.current?.focus();
+              }
+            }),
         })
       ) {
+        skipNoticeFocusRef.current = true;
         setNotice({
           kind: 'error',
           text: 'Check the highlighted transaction details.',
@@ -1796,11 +2017,13 @@ export function TransactionsSection({
   }
 
   function removeFromFeeds(transactionId: string) {
-    setOwnTransactions((currentRows) =>
-      (currentRows ?? []).filter((value) => value.id !== transactionId),
+    setOwnTransactions(
+      (currentRows) =>
+        currentRows?.filter((value) => value.id !== transactionId) ?? null,
     );
-    setHouseholdTransactions((currentRows) =>
-      (currentRows ?? []).filter((value) => value.id !== transactionId),
+    setHouseholdTransactions(
+      (currentRows) =>
+        currentRows?.filter((value) => value.id !== transactionId) ?? null,
     );
   }
 
@@ -2957,22 +3180,24 @@ export function TransactionsSection({
     }
   }
 
-  async function openDetail(transaction: Transaction) {
+  async function openDetail(transaction: Transaction | string) {
     // The ref guards same-flush double activations; the aligned opener
     // guard refuses confirmations, mutations, loads, and unconfirmed
     // authority for defense in depth.
     if (confirmOrMutationActive() || detailLoadingRef.current) return;
     if (detailLoadingId !== null) return;
+    const transactionId =
+      typeof transaction === 'string' ? transaction : transaction.id;
     const generation = generationRef.current;
     const controller = new AbortController();
     track(controller);
     detailLoadingRef.current = true;
-    setDetailLoadingId(transaction.id);
+    setDetailLoadingId(transactionId);
     setNotice(null);
     try {
       const fresh = await fetchTransaction(
         household.id,
-        transaction.id,
+        transactionId,
         controller.signal,
       );
       // Guards block every late continuation after unmount, a household
@@ -2996,8 +3221,8 @@ export function TransactionsSection({
         // A stale shared detail 404 must clear the affected detail view and
         // the row; the feed refresh shows the reconciled state. The cleanup
         // is scoped so an unrelated open panel survives.
-        removeFromFeeds(transaction.id);
-        if (detail?.id === transaction.id) setDetail(null);
+        removeFromFeeds(transactionId);
+        if (detail?.id === transactionId) setDetail(null);
         setNotice({
           kind: 'warning',
           text: 'This transaction is no longer available to you. Refresh to see the current list.',
@@ -3026,13 +3251,21 @@ export function TransactionsSection({
   function closeDetail() {
     const closing = detail;
     setDetail(null);
-    // The Details trigger element persists (the panel renders after the
-    // list, not in place of the row actions), so focus returns by its
-    // stable id after the flush removes the panel.
+    // The row may be outside the loaded page (refund-source navigation);
+    // return focus to the feed control when its Details trigger is absent.
     if (closing) {
       requestAnimationFrame(() => {
         if (unmountedRef.current) return;
-        document.getElementById(`details-trigger-${closing.id}`)?.focus();
+        const trigger = document.getElementById(
+          `details-trigger-${closing.id}`,
+        );
+        if (trigger) trigger.focus();
+        else
+          document
+            .querySelector<HTMLInputElement>(
+              `input[name="transactions-feed-${household.id}"]:checked`,
+            )
+            ?.focus();
       });
     }
   }
@@ -3080,12 +3313,40 @@ export function TransactionsSection({
   const hasMore = activeHasMore();
   const isOwnView = activeView === 'OWN';
 
-  const busy =
-    loading ||
+  const mutating =
     creating ||
     updatingId !== null ||
     detailLoadingId !== null ||
     splitLoadingId !== null;
+  const busy = loading || mutating;
+  /**
+   * The feed and visibility radios keep their place while their own scoped
+   * load runs. A focused control that becomes disabled loses focus to the
+   * document body in real browsers, which strands a keyboard user mid-switch;
+   * the list already reports that load with its own status text. Every switch
+   * handler keeps its refusal guards, so an enabled control cannot start
+   * overlapping work: a second scope change while a load or mutation is active
+   * is ignored rather than raced.
+   */
+  const feedControlsDisabled =
+    mutating ||
+    pendingCreate !== null ||
+    pendingVoid !== null ||
+    pendingShare !== null ||
+    pendingRevoke !== null ||
+    !authorityConfirmed;
+  /**
+   * Both pager controls stay focusable during a page request. A failed page
+   * changes the early pager into a retry at the same keyboard position; a
+   * second activation while loading cannot start a duplicate request.
+   */
+  const pagerBlocked =
+    busy ||
+    loadingMore ||
+    !authorityConfirmed ||
+    pendingVoid !== null ||
+    pendingShare !== null ||
+    pendingRevoke !== null;
 
   const linkedRefunds = (expenseId: string): Transaction[] =>
     (ownTransactions ?? []).filter(
@@ -3128,31 +3389,90 @@ export function TransactionsSection({
         <label className="finance-feed-option">
           <input
             type="radio"
+            ref={activeView === 'OWN' ? feedControlRef : undefined}
             name={`transactions-feed-${household.id}`}
             value="OWN"
             checked={activeView === 'OWN'}
             onChange={() => switchView('OWN')}
-            disabled={busy || pendingCreate !== null || !authorityConfirmed}
+            disabled={feedControlsDisabled}
           />
           <span>My transactions</span>
         </label>
         <label className="finance-feed-option">
           <input
             type="radio"
+            ref={activeView === 'HOUSEHOLD' ? feedControlRef : undefined}
             name={`transactions-feed-${household.id}`}
             value="HOUSEHOLD"
             checked={activeView === 'HOUSEHOLD'}
             onChange={() => switchView('HOUSEHOLD')}
-            disabled={busy || pendingCreate !== null || !authorityConfirmed}
+            disabled={feedControlsDisabled}
           />
           <span>Household feed</span>
         </label>
       </fieldset>
+      {activeView === 'OWN' && (
+        <fieldset className="finance-feed-toggle">
+          <legend>My transactions visibility</legend>
+          {(
+            [
+              [null, 'All'],
+              ['PRIVATE', 'Private'],
+              ['HOUSEHOLD', 'Shared by me'],
+            ] as const
+          ).map(([visibility, label]) => (
+            <label className="finance-feed-option" key={label}>
+              <input
+                type="radio"
+                name={`transactions-visibility-${household.id}`}
+                checked={ownVisibility === visibility}
+                onChange={() => switchVisibility(visibility)}
+                disabled={feedControlsDisabled}
+              />
+              <span>{label}</span>
+            </label>
+          ))}
+        </fieldset>
+      )}
 
       {!authorityConfirmed && (
         <p role="status" className="household-stale">
           Refresh the household before changing transactions.
         </p>
+      )}
+
+      {hasMore && activeNextOffset() <= 10000 && (
+        // A full page of rows contributes hundreds of focusable controls, so
+        // the pager below the list sits far outside a keyboard or screen
+        // reader user's reach. This pager is the short path to the next page
+        // and exists only while another page can actually be loaded, exactly
+        // like the control below the list.
+        <nav
+          className="finance-feed-pager"
+          aria-label={
+            isOwnView
+              ? 'Your transactions paging'
+              : 'Household transactions paging'
+          }
+        >
+          <button
+            ref={topPagerRef}
+            type="button"
+            className="household-button household-button--secondary"
+            aria-disabled={pagerBlocked || undefined}
+            onClick={() => {
+              if (pagerBlocked) return;
+              void loadMore();
+            }}
+          >
+            {loadingMore
+              ? 'Loading more…'
+              : pageError
+                ? 'Retry next page'
+                : 'Load more transactions'}
+            <span className="finance-sr-only"> (top of list)</span>
+          </button>
+        </nav>
       )}
 
       {loading && activeTransactions() === null && (
@@ -3473,10 +3793,33 @@ export function TransactionsSection({
         </ul>
       )}
 
-      {hasMore && (
+      {pageError && (
+        <div role="alert" className="household-notice household-notice--error">
+          <p>{pageError} Already loaded transactions remain available.</p>
+        </div>
+      )}
+      {hasMore && activeNextOffset() <= 10000 && (
+        <button
+          ref={bottomPagerRef}
+          type="button"
+          className="household-button household-button--secondary"
+          aria-disabled={pagerBlocked || undefined}
+          onClick={() => {
+            if (pagerBlocked) return;
+            void loadMore();
+          }}
+        >
+          {loadingMore
+            ? 'Loading more…'
+            : pageError
+              ? 'Retry next page'
+              : 'Load more transactions'}
+        </button>
+      )}
+      {hasMore && activeNextOffset() > 10000 && (
         <p role="status" className="finance-helper">
-          Showing the first 100 transactions. Additional paging will arrive with
-          larger-history support.
+          More history exists beyond the 10000 offset limit. This is not a
+          complete export.
         </p>
       )}
 
@@ -3940,9 +4283,21 @@ export function TransactionsSection({
             <div>
               <dt>Refund source</dt>
               <dd>
-                {detail.refundOfTransactionId
-                  ? detail.refundOfTransactionId
-                  : 'None — not a refund'}
+                {detail.refundOfTransactionId ? (
+                  <button
+                    type="button"
+                    className="household-button household-button--secondary"
+                    disabled={busy || !authorityConfirmed}
+                    onClick={() => {
+                      if (detail.refundOfTransactionId)
+                        void openDetail(detail.refundOfTransactionId);
+                    }}
+                  >
+                    View source expense
+                  </button>
+                ) : (
+                  'None — not a refund'
+                )}
               </dd>
             </div>
             {detail.kind === 'EXPENSE' &&
@@ -4001,6 +4356,46 @@ export function TransactionsSection({
             </div>
           </dl>
           <div className="finance-account-actions">
+            {/* A source expense reached by ID may sit outside the loaded
+                pages, so the panel itself offers the same owner actions a
+                row would: the exact versioned visibility change and the
+                allocation route. Another member's shared entry stays
+                read-only, and a refund never carries a direct visibility
+                patch — its group follows the source expense. */}
+            {detail.ownerUserId === currentUserId &&
+              detail.kind !== 'REFUND' && (
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  disabled={busy || !authorityConfirmed}
+                  aria-label={
+                    detail.visibility === 'HOUSEHOLD'
+                      ? `Make ${detail.description} private from details`
+                      : `Share ${detail.description} with the household from details`
+                  }
+                  onClick={(event) =>
+                    openShareConfirm(
+                      detail,
+                      detail.visibility === 'HOUSEHOLD' ? 'REVOKE' : 'SHARE',
+                      event.currentTarget,
+                    )
+                  }
+                >
+                  {detail.visibility === 'HOUSEHOLD' ? 'Make private' : 'Share'}
+                </button>
+              )}
+            {isAllocationFetchable(detail) &&
+              detail.ownerUserId === currentUserId && (
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  disabled={busy || !authorityConfirmed}
+                  aria-label={`Allocation for ${detail.description} from details`}
+                  onClick={(event) => openSplit(detail, event.currentTarget)}
+                >
+                  {allocationByTransaction[detail.id] ? 'Allocation' : 'Split'}
+                </button>
+              )}
             <button
               type="button"
               className="household-button household-button--secondary"

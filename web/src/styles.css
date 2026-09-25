@@ -552,6 +552,16 @@ code {
   cursor: wait;
 }
 
+/*
+ * A control that is busy but must keep its place in the tab order (the feed
+ * pagers) uses aria-disabled instead of disabled, so it needs the same
+ * treatment as a natively disabled button.
+ */
+.household-button[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 .household-button--secondary {
   background: transparent;
   color: var(--color-ink);
@@ -1074,6 +1084,19 @@ code {
   min-width: 0;
 }
 
+/*
+ * A 320px viewport with 200% text leaves a transaction action row about 164px
+ * wide. The button's fixed 1.2rem inline padding then leaves less content room
+ * than the shortest labels need, so browsers break them inside a word
+ * ("Deta ils") to avoid overflowing. Capping the padding against the row
+ * instead keeps those short labels whole, changes nothing on wider rows where
+ * 1.2rem still wins, and leaves the existing break as the last resort for a
+ * label whose longest word cannot fit at all (for example "Allocation").
+ */
+.finance-transactions .finance-account-actions > * {
+  padding-inline: min(1.2rem, 10%);
+}
+
 .finance-transaction-list {
   list-style: none;
   display: grid;
@@ -1172,6 +1195,31 @@ code {
   border-radius: 0.75rem;
   min-width: 0;
   background: #e9f1e8;
+}
+
+/*
+ * Pager shown above the transaction list, so the next page is reachable
+ * without walking every row control. It is rendered only while another page
+ * exists, and its button keeps the full-width shape of the control below the
+ * list.
+ */
+.finance-feed-pager {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+/* Accessible name text that must not appear on screen. */
+.finance-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  clip-path: inset(50%);
+  border: 0;
 }
 
 .finance-feed-toggle legend {
