@@ -55,6 +55,8 @@ import { categoryLabel } from './categories';
 import { CategorizationReviewsSection } from './CategorizationReviewsSection';
 import { CategorizationRulesSection } from './CategorizationRulesSection';
 import { MemberBalancesSection } from './MemberBalancesSection';
+import { RepaymentsSection } from './RepaymentsSection';
+import { SettlementSuggestionsSection } from './SettlementSuggestionsSection';
 import { ReportingSettingsSection } from './ReportingSettingsSection';
 import { SpendingDashboardSection } from './SpendingDashboardSection';
 import {
@@ -176,6 +178,8 @@ interface TransactionsSectionProps {
    * this section or discarding form/detail drafts. Dismissals never bump it.
    */
   ledgerRefreshSignal?: number | undefined;
+  /** Membership changes refresh party eligibility and derived balance plans. */
+  membershipRefreshSignal?: number | undefined;
 }
 
 const KIND_OPTIONS: Array<{
@@ -310,6 +314,7 @@ export function TransactionsSection({
   nowProvider,
   accountsRefreshSignal = 0,
   ledgerRefreshSignal = 0,
+  membershipRefreshSignal = 0,
 }: TransactionsSectionProps) {
   function clockNow(): Date {
     return nowProvider ? nowProvider() : new Date();
@@ -452,6 +457,7 @@ export function TransactionsSection({
     useState<PendingAllocationRevoke | null>(null);
   // Derived balances refresh after every mutation that can change them.
   const [balancesRefresh, setBalancesRefresh] = useState(0);
+  const [repaymentsRefresh, setRepaymentsRefresh] = useState(0);
   // Reporting: the authoritative zone reported up by the settings
   // section (initially the documented Etc/UTC) and a refresh signal that
   // refetches the spending dashboard after relevant mutations.
@@ -548,6 +554,10 @@ export function TransactionsSection({
    * overwritten by a zone arrival.
    */
   function handleZoneLoaded(zone: string) {
+    if (reportingZoneRef.current !== zone) {
+      setRepaymentsRefresh((value) => value + 1);
+      bumpBalances();
+    }
     setReportingZone(zone);
     if (!createDateTouchedRef.current) {
       setCreateDate(
@@ -5117,10 +5127,28 @@ export function TransactionsSection({
         scopeResetSignal={scopeReset}
         onTransactionChanged={handleReviewedTransaction}
       />
+      <RepaymentsSection
+        household={household}
+        currentUserId={currentUserId}
+        csrf={csrf}
+        onCsrfRefreshed={onCsrfRefreshed}
+        onSessionExpired={onSessionExpired}
+        onHouseholdAccessChanged={onHouseholdAccessChanged}
+        authorityConfirmed={authorityConfirmed}
+        reportingZone={reportingZone}
+        refreshSignal={repaymentsRefresh + membershipRefreshSignal}
+        onBalancesChanged={bumpBalances}
+      />
       <MemberBalancesSection
         household={household}
         currentUserId={currentUserId}
-        refreshSignal={balancesRefresh}
+        refreshSignal={balancesRefresh + membershipRefreshSignal}
+        onSessionExpired={onSessionExpired}
+        onHouseholdAccessChanged={onHouseholdAccessChanged}
+      />
+      <SettlementSuggestionsSection
+        household={household}
+        refreshSignal={balancesRefresh + membershipRefreshSignal}
         onSessionExpired={onSessionExpired}
         onHouseholdAccessChanged={onHouseholdAccessChanged}
       />

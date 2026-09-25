@@ -148,11 +148,8 @@ describe('member balances section', () => {
   it('renders the empty authorized state without inventing values', async () => {
     renderSection({ balancesGet: () => jsonResponse({ currencies: [] }) });
     const section = await screen.findByTestId('member-balances-section');
-    expect(
-      await within(section).findByText(
-        /No member balances. Balances appear only after a household expense/,
-      ),
-    ).toBeInTheDocument();
+    expect(await within(section).findByRole('status')).toBeInTheDocument();
+    expect(within(section).queryByRole('list')).not.toBeInTheDocument();
     expect(
       section.textContent?.match(/-?\d+(\.\d+)?\s(BRL|USD|EUR|GBP|JPY|KWD)/),
     ).toBeNull();

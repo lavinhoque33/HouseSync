@@ -40,6 +40,8 @@ interface MembersSectionProps {
    * collection is busy is never dropped.
    */
   onHouseholdAccessChanged: () => void;
+  onRosterCommitted?: () => void;
+  onSelfLeft?: () => void;
 }
 
 const ACTION_LABELS: Record<MemberAction, string> = {
@@ -84,6 +86,8 @@ export function MembersSection({
   onCsrfRefreshed,
   onSessionExpired,
   onHouseholdAccessChanged,
+  onRosterCommitted,
+  onSelfLeft,
 }: MembersSectionProps) {
   const [members, setMembers] = useState<HouseholdMember[] | null>(null);
   const [rosterLoading, setRosterLoading] = useState(true);
@@ -323,12 +327,11 @@ export function MembersSection({
       if (kind === 'leave') {
         await postLeaveHousehold(household.id, requestCsrf, controller.signal);
         if (!isCurrent(generation) || controller.signal.aborted) return;
-        // The actor no longer belongs: drop the roster locally and let the
-        // collection reload remove the card. No roster retry runs here —
-        // the leave endpoint itself is the authoritative self-removal.
         setLeft(true);
         setMembers(null);
         setNotice({ kind: 'info', text: `You left “${household.name}”.` });
+        // The successful response revokes this household immediately.
+        onSelfLeft?.();
         onHouseholdAccessChanged();
         return;
       }
@@ -373,6 +376,7 @@ export function MembersSection({
       // The optimistic row above is display data only: reload the roster
       // and the household collection so authority comes from the backend
       // before further writes.
+      onRosterCommitted?.();
       reloadRoster();
       onHouseholdAccessChanged();
     } catch (error) {

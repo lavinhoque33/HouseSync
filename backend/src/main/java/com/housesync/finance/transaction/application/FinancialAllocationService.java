@@ -36,9 +36,6 @@ import com.housesync.finance.transaction.web.FinancialTransactionExceptions.Tran
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionNotFoundException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionVersionConflictException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.TransactionVersionExhaustedException;
-import com.housesync.finance.transaction.web.MemberBalancesResponse;
-import com.housesync.finance.transaction.web.MemberBalancesResponse.CurrencyBalancesResponse;
-import com.housesync.finance.transaction.web.MemberBalancesResponse.MemberBalanceResponse;
 import com.housesync.household.application.HouseholdService;
 import com.housesync.identity.web.IdentityExceptions.ValidationFailedException;
 import java.math.BigDecimal;
@@ -382,21 +379,6 @@ public class FinancialAllocationService {
     return toResponse(allocation, expense.getVersion(), householdId);
   }
 
-  /**
-   * Derived balances from one coherent authorized snapshot under the household lifecycle lock, so a
-   * concurrent removal cannot produce a partially authorized read. Contributions come only from
-   * active allocations on posted household expenses; the payer credit is {@code M - R} and each
-   * participant's obligation is their frozen share minus their cumulative refund share, so every
-   * currency's balances sum to exactly zero.
-   */
-  @Transactional
-  public MemberBalancesResponse memberBalances(UUID householdId, UUID actorId) {
-    households.lockForFinance(householdId, actorId);
-    Map<String, Map<UUID, BigDecimal>> ledger = allocationBalanceDeltasLocked(householdId);
-    Set<UUID> currentMembers = households.currentMemberUserIds(householdId);
-    return renderBalances(ledger, currentMembers);
-  }
-
   /** Raw zero-sum deltas; caller MUST hold the household finance lifecycle lock. */
   public Map<String, Map<UUID, BigDecimal>> allocationBalanceDeltasLocked(UUID householdId) {
     List<FinancialTransactionAllocationEntity> actives =
@@ -458,35 +440,6 @@ public class FinancialAllocationService {
       }
     }
     return ledger;
-  }
-
-  private static MemberBalancesResponse renderBalances(
-      Map<String, Map<UUID, BigDecimal>> ledger, Set<UUID> currentMembers) {
-
-    List<CurrencyBalancesResponse> currencies = new ArrayList<>();
-    for (Map.Entry<String, Map<UUID, BigDecimal>> entry : ledger.entrySet()) {
-      SupportedCurrency currency = SupportedCurrency.valueOf(entry.getKey());
-      List<MemberBalanceResponse> balances = new ArrayList<>();
-      entry.getValue().entrySet().stream()
-          .sorted(Map.Entry.comparingByKey(CANONICAL_USER_ORDER))
-          .forEach(
-              balance -> {
-                if (balance.getValue().signum() == 0) {
-                  // Exact zeros are omitted, so each emitted currency sums to zero.
-                  return;
-                }
-                String membership = currentMembers.contains(balance.getKey()) ? CURRENT : DEPARTED;
-                balances.add(
-                    new MemberBalanceResponse(
-                        balance.getKey().toString(),
-                        membership,
-                        balance.getValue().setScale(currency.scale()).toPlainString()));
-              });
-      if (!balances.isEmpty()) {
-        currencies.add(new CurrencyBalancesResponse(entry.getKey(), balances));
-      }
-    }
-    return new MemberBalancesResponse(List.copyOf(currencies));
   }
 
   private static void addBalance(

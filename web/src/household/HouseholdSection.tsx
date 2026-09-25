@@ -116,6 +116,9 @@ export function HouseholdSection({
   const [ledgerSignals, setLedgerSignals] = useState<Record<string, number>>(
     {},
   );
+  const [membershipSignals, setMembershipSignals] = useState<
+    Record<string, number>
+  >({});
 
   const csrfRef = useRef<CsrfToken | null>(csrf);
   const genRef = useRef(0);
@@ -149,6 +152,14 @@ export function HouseholdSection({
   function isCurrent(generation: number): boolean {
     return !unmountedRef.current && genRef.current === generation;
   }
+  function revokeLeftHousehold(id: string): void {
+    // A collection read predating the successful leave cannot restore access.
+    genRef.current++;
+    for (const controller of ownedRef.current) controller.abort();
+    setHouseholds(
+      (current) => current?.filter((household) => household.id !== id) ?? null,
+    );
+  }
 
   async function load(signal: AbortSignal, generation: number) {
     setLoading(true);
@@ -156,6 +167,14 @@ export function HouseholdSection({
     try {
       const result = await fetchHouseholds(signal);
       if (!isCurrent(generation) || signal.aborted) return;
+      if (loaded) {
+        setMembershipSignals((current) => {
+          const next = { ...current };
+          for (const household of result)
+            next[household.id] = (next[household.id] ?? 0) + 1;
+          return next;
+        });
+      }
       setHouseholds(sortHouseholds(result));
       setLoaded(true);
       setListError(null);
@@ -549,6 +568,7 @@ export function HouseholdSection({
                 authorityConfirmed={!stale && !loading && listError === null}
                 accountsRefreshSignal={accountSignals[household.id] ?? 0}
                 ledgerRefreshSignal={ledgerSignals[household.id] ?? 0}
+                membershipRefreshSignal={membershipSignals[household.id] ?? 0}
               />
               <FinancialConnectionsSection
                 key={`${household.id}-connections`}
@@ -583,6 +603,13 @@ export function HouseholdSection({
                 onCsrfRefreshed={onCsrfRefreshed}
                 onSessionExpired={onSessionExpired}
                 onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+                onRosterCommitted={() =>
+                  setMembershipSignals((current) => ({
+                    ...current,
+                    [household.id]: (current[household.id] ?? 0) + 1,
+                  }))
+                }
+                onSelfLeft={() => revokeLeftHousehold(household.id)}
               />
               {household.role === 'OWNER' && (
                 <InvitationSection

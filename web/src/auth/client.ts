@@ -37,6 +37,25 @@ import {
   type ResolveBody,
 } from '../finance/bank-activity';
 import { isRegionShapedZone } from '../finance/reporting';
+import {
+  parseRepayment,
+  parseRepaymentEvent,
+  parseRepaymentPage,
+  parseSettlementSuggestions,
+  type Repayment,
+  type RepaymentEvent,
+  type RepaymentPage,
+  type RepaymentMoney,
+  type RepaymentDecision,
+  type SettlementSuggestions,
+} from '../finance/repayments';
+export type {
+  Repayment,
+  RepaymentEvent,
+  RepaymentPage,
+  RepaymentMoney,
+  SettlementSuggestions,
+} from '../finance/repayments';
 
 export type { FinancialAccountCurrency } from '../finance/money';
 
@@ -85,6 +104,9 @@ export type ApiErrorCode =
   | 'ALLOCATION_NOT_FOUND'
   | 'ALLOCATION_CONFLICT'
   | 'FINANCE_BUSY'
+  | 'REPAYMENT_NOT_FOUND'
+  | 'REPAYMENT_CONFLICT'
+  | 'SETTLEMENT_SNAPSHOT_STALE'
   | 'BANK_ACTIVITY_NOT_FOUND'
   | 'OBSERVATION_NOT_POSTED'
   | 'OBSERVATION_ALREADY_CONFIRMED'
@@ -164,6 +186,9 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'CATEGORY_REVIEW_NOT_FOUND',
     'ALLOCATION_NOT_FOUND',
     'ALLOCATION_CONFLICT',
+    'REPAYMENT_NOT_FOUND',
+    'REPAYMENT_CONFLICT',
+    'SETTLEMENT_SNAPSHOT_STALE',
     'FINANCE_BUSY',
     'BANK_ACTIVITY_NOT_FOUND',
     'OBSERVATION_NOT_POSTED',
@@ -227,7 +252,10 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
         key === 'reason' ||
         key === 'state' ||
         key === 'review' ||
-        key === 'connectionId') &&
+        key === 'connectionId' ||
+        key === 'recipientUserId' ||
+        key === 'decision' ||
+        key === 'cursor') &&
       typeof message === 'string'
     ) {
       result[key] = message;
@@ -4651,4 +4679,218 @@ export async function fetchSpendingSummary(
   const summary = parseSpendingSummary(await readJson<unknown>(response));
   if (!summary) throw unexpectedSpendingSummaryResponse(response.status);
   return summary;
+}
+
+function repaymentPath(householdId: string, id?: string): string {
+  const base = `/api/households/${encodeURIComponent(householdId)}/repayments`;
+  return id === undefined ? base : `${base}/${encodeURIComponent(id)}`;
+}
+
+function unexpectedRepaymentResponse(status: number): ApiError {
+  return new ApiError({
+    status,
+    code: 'UNKNOWN_ERROR',
+    message:
+      'The server returned an unexpected repayment or settlement response.',
+  });
+}
+
+async function repaymentRequest<T>(
+  path: string,
+  parse: (value: unknown) => T | null,
+  signal?: AbortSignal,
+  post?: { body: object; csrf: CsrfToken; key?: string },
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<T> {
+  const response = await apiFetch(
+    path,
+    {
+      method: post ? 'POST' : 'GET',
+      credentials: 'include',
+      headers: post
+        ? {
+            ...unsafeHeaders(post.csrf),
+            ...(post.key ? { 'Idempotency-Key': post.key } : {}),
+          }
+        : { ...JSON_HEADERS },
+      cache: 'no-store',
+      ...(post ? { body: JSON.stringify(post.body) } : {}),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (!response.ok)
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not complete the repayment request.',
+    );
+  if (response.status !== 200 && !(post?.key && response.status === 201))
+    throw unexpectedRepaymentResponse(response.status);
+  const parsed = parse(await readJson<unknown>(response));
+  if (parsed === null) throw unexpectedRepaymentResponse(response.status);
+  return parsed;
+}
+
+export interface RepaymentQuery {
+  limit: number;
+  offset: number;
+  currency?: FinancialAccountCurrency;
+  status?: Repayment['status'] | 'ALL';
+  from?: string;
+  to?: string;
+}
+export async function fetchRepayments(
+  householdId: string,
+  query: RepaymentQuery,
+  signal?: AbortSignal,
+): Promise<RepaymentPage<Repayment>> {
+  const params = new URLSearchParams({
+    limit: String(query.limit),
+    offset: String(query.offset),
+  });
+  if (query.currency) params.set('currency', query.currency);
+  if (query.status) params.set('status', query.status);
+  if (query.from && query.to) {
+    params.set('from', query.from);
+    params.set('to', query.to);
+  }
+  const page = await repaymentRequest(
+    `${repaymentPath(householdId)}?${params}`,
+    (value) => parseRepaymentPage(value, parseRepayment),
+    signal,
+  );
+  if (
+    page.limit !== query.limit ||
+    page.offset !== query.offset ||
+    page.items.some((item) => item.householdId !== householdId)
+  )
+    throw unexpectedRepaymentResponse(200);
+  return page;
+}
+export async function fetchRepayment(
+  householdId: string,
+  id: string,
+  signal?: AbortSignal,
+): Promise<Repayment> {
+  const result = await repaymentRequest(
+    repaymentPath(householdId, id),
+    parseRepayment,
+    signal,
+  );
+  if (result.id !== id || result.householdId !== householdId)
+    throw unexpectedRepaymentResponse(200);
+  return result;
+}
+export async function fetchRepaymentEvents(
+  householdId: string,
+  id: string,
+  limit: number,
+  offset: number,
+  signal?: AbortSignal,
+): Promise<RepaymentPage<RepaymentEvent>> {
+  const page = await repaymentRequest(
+    `${repaymentPath(householdId, id)}/events?limit=${limit}&offset=${offset}`,
+    (value) => parseRepaymentPage(value, parseRepaymentEvent),
+    signal,
+  );
+  if (
+    page.limit !== limit ||
+    page.offset !== offset ||
+    page.items.some((event, index) => event.version !== offset + index)
+  )
+    throw unexpectedRepaymentResponse(200);
+  return page;
+}
+export async function postRepayment(
+  householdId: string,
+  input: { recipientUserId: string; money: RepaymentMoney; occurredOn: string },
+  key: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<Repayment> {
+  const result = await repaymentRequest(
+    repaymentPath(householdId),
+    parseRepayment,
+    signal,
+    { body: input, csrf, key },
+  );
+  if (result.householdId !== householdId)
+    throw unexpectedRepaymentResponse(200);
+  return result;
+}
+export async function postRepaymentDecision(
+  householdId: string,
+  id: string,
+  expectedVersion: number,
+  decision: RepaymentDecision,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<Repayment> {
+  const result = await repaymentRequest(
+    `${repaymentPath(householdId, id)}/decision`,
+    parseRepayment,
+    signal,
+    { body: { expectedVersion, decision }, csrf },
+  );
+  if (result.id !== id || result.householdId !== householdId)
+    throw unexpectedRepaymentResponse(200);
+  return result;
+}
+export async function postRepaymentAmendment(
+  householdId: string,
+  id: string,
+  input:
+    | { expectedVersion: number; action: 'VOID' }
+    | {
+        expectedVersion: number;
+        action: 'REPLACE';
+        money: RepaymentMoney;
+        occurredOn: string;
+      },
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<Repayment> {
+  const result = await repaymentRequest(
+    `${repaymentPath(householdId, id)}/amendment`,
+    parseRepayment,
+    signal,
+    { body: input, csrf },
+  );
+  if (result.id !== id || result.householdId !== householdId)
+    throw unexpectedRepaymentResponse(200);
+  return result;
+}
+export async function postRepaymentAmendmentDecision(
+  householdId: string,
+  id: string,
+  expectedVersion: number,
+  decision: RepaymentDecision,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<Repayment> {
+  const result = await repaymentRequest(
+    `${repaymentPath(householdId, id)}/amendment/decision`,
+    parseRepayment,
+    signal,
+    { body: { expectedVersion, decision }, csrf },
+  );
+  if (result.id !== id || result.householdId !== householdId)
+    throw unexpectedRepaymentResponse(200);
+  return result;
+}
+export async function fetchSettlementSuggestions(
+  householdId: string,
+  currency: FinancialAccountCurrency,
+  limit = 50,
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<SettlementSuggestions> {
+  const params = new URLSearchParams({ currency, limit: String(limit) });
+  if (cursor) params.set('cursor', cursor);
+  return repaymentRequest(
+    `/api/households/${encodeURIComponent(householdId)}/settlement-suggestions?${params}`,
+    (value) => parseSettlementSuggestions(value, currency),
+    signal,
+  );
 }

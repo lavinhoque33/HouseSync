@@ -41,6 +41,9 @@ public final class ErrorCodes {
   public static final String CATEGORY_RULE_NOT_FOUND = "CATEGORY_RULE_NOT_FOUND";
   public static final String CATEGORY_RULE_CONFLICT = "CATEGORY_RULE_CONFLICT";
   public static final String CATEGORY_REVIEW_NOT_FOUND = "CATEGORY_REVIEW_NOT_FOUND";
+  public static final String REPAYMENT_NOT_FOUND = "REPAYMENT_NOT_FOUND";
+  public static final String REPAYMENT_CONFLICT = "REPAYMENT_CONFLICT";
+  public static final String SETTLEMENT_SNAPSHOT_STALE = "SETTLEMENT_SNAPSHOT_STALE";
   public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 
   private ErrorCodes() {}

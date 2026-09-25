@@ -159,10 +159,24 @@ public class SecurityConfiguration {
                     .requestMatchers(
                         HttpMethod.GET,
                         "/api/households/*/transactions/*/allocation",
-                        "/api/households/*/member-balances")
+                        "/api/households/*/member-balances",
+                        "/api/households/*/settlement-suggestions")
                     .authenticated()
                     .requestMatchers(
                         HttpMethod.PATCH, "/api/households/*/transactions/*/allocation")
+                    .authenticated()
+                    .requestMatchers(
+                        HttpMethod.GET,
+                        "/api/households/*/repayments",
+                        "/api/households/*/repayments/*",
+                        "/api/households/*/repayments/*/events")
+                    .authenticated()
+                    .requestMatchers(
+                        HttpMethod.POST,
+                        "/api/households/*/repayments",
+                        "/api/households/*/repayments/*/decision",
+                        "/api/households/*/repayments/*/amendment",
+                        "/api/households/*/repayments/*/amendment/decision")
                     .authenticated()
                     .requestMatchers(
                         HttpMethod.POST,

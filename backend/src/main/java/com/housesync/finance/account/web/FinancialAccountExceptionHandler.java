@@ -26,9 +26,12 @@ import com.housesync.finance.connection.web.ConnectionExceptions.ProviderTransie
 import com.housesync.finance.connection.web.ConnectionExceptions.ReconciliationRequiredException;
 import com.housesync.finance.connection.webhook.PlaidWebhookVerifier.WebhookUnavailableException;
 import com.housesync.finance.connection.webhook.PlaidWebhookVerifier.WebhookVerificationException;
+import com.housesync.finance.repayment.RepaymentPolicy;
+import com.housesync.finance.repayment.RepaymentService;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsForbiddenException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionConflictException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionExhaustedException;
+import com.housesync.finance.settlement.SettlementService;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AccountArchivedException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AllocationConflictException;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AllocationIdempotencyConflictException;
@@ -241,6 +244,47 @@ public class FinancialAccountExceptionHandler {
         HttpStatus.CONFLICT,
         ErrorCodes.IDEMPOTENCY_CONFLICT,
         "That request key was already used for different allocation details.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RepaymentService.NotFound.class)
+  public ResponseEntity<ApiError> repaymentNotFound(RepaymentService.NotFound failure) {
+    return error(
+        HttpStatus.NOT_FOUND,
+        ErrorCodes.REPAYMENT_NOT_FOUND,
+        "Repayment was not found.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RepaymentPolicy.Conflict.class)
+  public ResponseEntity<ApiError> repaymentConflict(RepaymentPolicy.Conflict failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.REPAYMENT_CONFLICT,
+        "The repayment changed or cannot be decided. Refresh it before trying again.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RepaymentService.IdempotencyConflict.class)
+  public ResponseEntity<ApiError> repaymentIdempotencyConflict(
+      RepaymentService.IdempotencyConflict failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.IDEMPOTENCY_CONFLICT,
+        "That request key was already used for different repayment details.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(SettlementService.SnapshotStale.class)
+  public ResponseEntity<ApiError> settlementSnapshotStale(SettlementService.SnapshotStale failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.SETTLEMENT_SNAPSHOT_STALE,
+        "The settlement balances changed. Restart from the first page.",
         null,
         failure);
   }

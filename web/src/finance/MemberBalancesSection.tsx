@@ -17,11 +17,7 @@ interface MemberBalancesSectionProps {
   household: Household;
   /** Signed-in account id, marking the viewer's own balance row. */
   currentUserId: string;
-  /**
-   * Bumped by the parent after every mutation that changes derived
-   * balances (allocation create/revoke, refund create/correct/void,
-   * expense void) so the derived view refreshes without a global reload.
-   */
+  /** Refresh after allocation, repayment or membership changes. */
   refreshSignal: number;
   onSessionExpired: () => void;
   onHouseholdAccessChanged: () => void;
@@ -199,10 +195,13 @@ export function MemberBalancesSection({
         Member balances
       </h4>
       <p className="finance-helper">
-        Derived from active allocations of shared expenses in this household,
-        grouped per currency. Positive amounts are owed to the member; negative
-        amounts are owed by the member. There is no bank balance, combined sum
-        across currencies, or settlement suggestion here.
+        Derived from active allocations and confirmed external repayments in
+        this household, grouped per currency. Positive amounts are owed to the
+        member; negative amounts are owed by the member. Pending repayments
+        change nothing; a confirmed payment can settle, overpay or reverse
+        credit after a refund. These net amounts are household-visible even
+        though repayment amounts, dates and history are party-only. There is no
+        bank balance or combined sum across currencies.
       </p>
 
       {loading && !loaded && !notice && (
@@ -242,8 +241,8 @@ export function MemberBalancesSection({
 
       {readyBalances && readyBalances.currencies.length === 0 && (
         <p role="status" className="finance-empty">
-          No member balances. Balances appear only after a household expense
-          with an active allocation; nothing is invented for empty currencies.
+          No net member balances. Zero balances are omitted, including after a
+          confirmed repayment settles an allocation.
         </p>
       )}
 

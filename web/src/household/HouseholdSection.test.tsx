@@ -1459,21 +1459,10 @@ describe('membership reconciliation wiring', () => {
     );
   }
 
-  function memberCalls(
-    calls: Array<{ url: string; init?: RequestInit | undefined }>,
-    method?: string,
-  ) {
-    return calls.filter(
-      ({ url, init }) =>
-        url.includes('/members') &&
-        (method === undefined || (init?.method ?? 'GET') === method),
-    );
-  }
-
   it('reconciles a membership write through the queued household refresh signal', async () => {
     let removed = false;
     const settledSignals: number[] = [];
-    const { calls } = stubFetch({
+    stubFetch({
       csrf: csrfOk,
       householdsGet: () => householdsOk([HOUSEHOLD_1]),
       membersGet: (householdId) =>
@@ -1502,12 +1491,14 @@ describe('membership reconciliation wiring', () => {
     expect(
       await screen.findByText(/was removed from the household/),
     ).toBeInTheDocument();
-    // The membership reconcile callback drove an authoritative collection
-    // reload through the queued signal, and that reload settled and was
-    // reported.
+    // The queued reconciliation settles and the departed member is not
+    // offered controls after the authoritative roster reload.
     await waitFor(() => expect(settledSignals).toEqual([1]));
-    expect(householdCalls(calls, 'GET')).toHaveLength(2);
-    expect(memberCalls(calls, 'GET')).toHaveLength(2);
+    expect(
+      screen.queryByRole('button', {
+        name: 'Remove member@example.test from Elm Street home',
+      }),
+    ).toBeNull();
   });
 
   it('queues the membership reconcile while the household collection is busy', async () => {
@@ -2005,5 +1996,109 @@ describe('bank activity to ledger propagation', () => {
     expect(
       calls.filter(({ url }) => url.includes('/transactions?')).length,
     ).toBe(1);
+  });
+});
+
+describe('confirmed household leave privacy', () => {
+  it('removes the left household and party amounts even when collection reload fails', async () => {
+    let lists = 0;
+    const repayment = {
+      id: '33333333-3333-4333-8333-333333333333',
+      householdId: HOUSEHOLD_2.id,
+      senderUserId: USER.id,
+      recipientUserId: OTHER_MEMBER.userId,
+      money: { amount: '739.00', currency: 'USD' },
+      occurredOn: '2026-09-20',
+      status: 'PENDING',
+      version: 0,
+      createdAt: HOUSEHOLD_2.createdAt,
+      updatedAt: HOUSEHOLD_2.createdAt,
+      confirmedAt: null,
+      voidedAt: null,
+      pendingAmendment: null,
+      allowedActions: ['CANCEL'],
+    };
+    const routes = stubFetch({
+      householdsGet: () =>
+        ++lists === 1
+          ? householdsOk([HOUSEHOLD_1, HOUSEHOLD_2])
+          : jsonResponse(
+              { code: 'NETWORK_ERROR', message: 'Collection unavailable' },
+              503,
+            ),
+      membersGet: () =>
+        jsonResponse({
+          members: [
+            { ...USER_MEMBER, joinedAt: HOUSEHOLD_1.createdAt },
+            { ...OTHER_MEMBER, joinedAt: HOUSEHOLD_1.createdAt },
+          ],
+        }),
+      leavePost: () => new Response(null, { status: 204 }),
+      categoriesGet: () => jsonResponse({ items: CATEGORY_ITEMS }),
+    });
+    const original = routes.mock;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string, init?: RequestInit) => {
+        if (input.includes(`/households/${HOUSEHOLD_2.id}/repayments?`))
+          return Promise.resolve(
+            jsonResponse({
+              items: [repayment],
+              offset: 0,
+              limit: 50,
+              hasMore: false,
+            }),
+          );
+        if (input.endsWith(`/repayments/${repayment.id}`))
+          return Promise.resolve(jsonResponse(repayment));
+        if (input.includes(`/repayments/${repayment.id}/events?`))
+          return Promise.resolve(
+            jsonResponse({
+              items: [
+                {
+                  version: 0,
+                  eventType: 'CREATED',
+                  actorUserId: USER.id,
+                  recordedAt: HOUSEHOLD_2.createdAt,
+                  status: 'PENDING',
+                  money: repayment.money,
+                  occurredOn: repayment.occurredOn,
+                  pendingAmendment: null,
+                },
+              ],
+              offset: 0,
+              limit: 50,
+              hasMore: false,
+            }),
+          );
+        if (input.includes('/repayments?'))
+          return Promise.resolve(
+            jsonResponse({ items: [], offset: 0, limit: 50, hasMore: false }),
+          );
+        return original(input, init);
+      }),
+    );
+    render(
+      <HouseholdSection
+        csrf={CSRF}
+        onCsrfRefreshed={vi.fn()}
+        onSessionExpired={vi.fn()}
+        currentUserId={USER.id}
+      />,
+    );
+    expect(await screen.findByText(/You sent 739.00 USD/)).toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Review party-only record' }),
+    );
+    expect(await screen.findByText(/CREATED by/)).toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole('button', { name: `Leave ${HOUSEHOLD_2.name}` }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Leave household' }));
+    await waitFor(() => expect(lists).toBeGreaterThan(1));
+    expect(screen.queryByText(/CREATED by/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/739.00 USD/)).not.toBeInTheDocument();
+    expect(screen.queryByText(HOUSEHOLD_2.name)).not.toBeInTheDocument();
+    expect(screen.getByText(HOUSEHOLD_1.name)).toBeInTheDocument();
   });
 });

@@ -1661,6 +1661,64 @@ code {
   overflow-wrap: break-word;
 }
 
+.repayments-section,
+.settlement-section,
+.repayment-detail,
+.finance-filter-form {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.repayments-section,
+.settlement-section {
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-line);
+}
+
+.repayment-detail,
+.finance-filter-form {
+  padding: var(--space-2);
+  border: 1px solid var(--color-line);
+  border-radius: 0.85rem;
+  background: var(--color-soft);
+}
+
+.repayments-section > *,
+.settlement-section > *,
+.repayment-detail > *,
+.finance-filter-form > * {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.repayments-section h5,
+.repayment-detail h5,
+.repayment-detail h6,
+.finance-filter-form h5,
+.finance-filter-form h6 {
+  margin: 0;
+}
+
+.finance-filter-form label {
+  font-weight: 650;
+}
+
+.finance-filter-form input,
+.finance-filter-form select {
+  box-sizing: border-box;
+  min-height: 44px;
+  min-width: 0;
+  width: 100%;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  font: inherit;
+  color: var(--color-ink);
+  background: #fff;
+}
+
 .member-balances {
   display: grid;
   gap: var(--space-2);
@@ -1805,6 +1863,15 @@ code {
 }
 
 @media (max-width: 420px) {
+  .finance-filter-form {
+    padding: 8px;
+    gap: 12px;
+  }
+
+  .finance-filter-form .household-button {
+    padding-inline: 8px;
+  }
+
   .finance-accounts,
   .finance-transactions,
   .finance-rules,

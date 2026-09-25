@@ -253,6 +253,14 @@ function stubFetch(routes: RouteHandlers) {
       if (url === membersUrl) {
         return routes.membersGet?.() ?? jsonResponse({ members: [] });
       }
+      if (url.startsWith(`/api/households/${HOUSEHOLD.id}/repayments?`)) {
+        return jsonResponse({
+          items: [],
+          limit: 50,
+          offset: 0,
+          hasMore: false,
+        });
+      }
       const settingsUrl = `/api/households/${HOUSEHOLD.id}/finance-settings`;
       const summaryBase = `/api/households/${HOUSEHOLD.id}/spending-summary`;
       if (url === settingsUrl) {
@@ -933,14 +941,10 @@ describe('transaction list', () => {
     expect(
       screen.getByText(/No household spending in this period/),
     ).toBeInTheDocument();
-    // The member-balances subsection exists for the household but its
-    // empty state invents no values: balances come only from real
-    // allocations, and no balance number is fabricated anywhere.
-    expect(
-      screen.getByText(
-        /No member balances. Balances appear only after a household expense/,
-      ),
-    ).toBeInTheDocument();
+    // An empty authoritative balance projection must not fabricate rows.
+    const balances = screen.getByRole('region', { name: 'Member balances' });
+    expect(await within(balances).findByRole('status')).toBeInTheDocument();
+    expect(within(balances).queryByRole('list')).not.toBeInTheDocument();
     // No recorded money line (amount followed by a currency code) exists.
     expect(
       document.body.textContent?.match(
@@ -4532,7 +4536,7 @@ describe('allocations', () => {
     await waitFor(() => expect(reads(EXPENSE_ID)).toBe(1));
     await waitFor(() => expect(reads(otherId)).toBe(1));
     const balances = screen.getByRole('region', { name: 'Member balances' });
-    await within(balances).findByText(/No member balances/);
+    await within(balances).findByRole('status');
     expect(balanceCalls(calls)).toHaveLength(1);
     fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
     await waitFor(() =>
@@ -4604,7 +4608,7 @@ describe('allocations', () => {
     );
     version = 2;
     fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await within(balances).findByText(/No member balances/);
+    await within(balances).findByRole('status');
     expect(balanceCalls(calls)).toHaveLength(2);
     await waitFor(() =>
       expect(
@@ -6514,11 +6518,12 @@ describe('allocations', () => {
   });
 
   it('refetches the roster each time the allocation creation form opens', async () => {
-    const calls = renderSection({
+    let currentMembers = ROSTER;
+    renderSection({
       transactionsGet: () => transactionPage([householdExpense()]),
       allocationsGet: () => allocationNotFound(),
-      membersGet: () => jsonResponse({ members: ROSTER }),
-    }).calls;
+      membersGet: () => jsonResponse({ members: currentMembers }),
+    });
     await screen.findByText('Groceries');
     fireEvent.click(
       screen.getByRole('button', { name: 'Allocation for Groceries' }),
@@ -6534,6 +6539,7 @@ describe('allocations', () => {
     expect(
       screen.queryByRole('group', { name: 'Allocation for Groceries' }),
     ).toBeNull();
+    currentMembers = ROSTER.slice(0, 2);
     // Reopening refetches the roster instead of reusing the old snapshot.
     fireEvent.click(
       screen.getByRole('button', { name: 'Allocation for Groceries' }),
@@ -6542,10 +6548,9 @@ describe('allocations', () => {
       name: 'Allocation for Groceries',
     });
     await waitFor(() =>
-      expect(within(reopened).getAllByRole('checkbox').length).toBe(3),
+      expect(within(reopened).getAllByRole('checkbox')).toHaveLength(2),
     );
-    const memberCalls = calls.filter(({ url }) => url.endsWith('/members'));
-    expect(memberCalls.length).toBe(2);
+    expect(within(reopened).queryByText(MEMBER_C_EMAIL)).toBeNull();
   });
 });
 
