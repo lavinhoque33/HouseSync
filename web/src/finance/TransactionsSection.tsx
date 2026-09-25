@@ -20,9 +20,11 @@ import {
   patchTransaction,
   postTransaction,
   postTransactionAllocation,
+  previewTransactionAllocation,
   postTransactionCategorizationRule,
   type CategorizationOrigin,
   type CategorizationState,
+  type AllocationPreview,
   type CreateAllocationInput,
   type CreateTransactionInput,
   type CsrfToken,
@@ -42,12 +44,13 @@ import {
   encodeMoneyMagnitude,
   formatMoney,
   isSupportedTransactionDate,
+  isAggregateAmountString,
   magnitudeOfMinorUnits,
   minorUnitsOfMagnitude,
   type FinancialAccountCurrency,
   type MoneySign,
 } from './money';
-import { previewEqualShares, sortCanonicalUserIds } from './allocation';
+import { sortCanonicalUserIds } from './allocation';
 import { categoryLabel } from './categories';
 import { CategorizationReviewsSection } from './CategorizationReviewsSection';
 import { CategorizationRulesSection } from './CategorizationRulesSection';
@@ -410,11 +413,34 @@ export function TransactionsSection({
   const [allocationByTransaction, setAllocationByTransaction] = useState<
     Record<string, TransactionAllocation | null>
   >({});
+  // A feed or authorized open detail version is a lower bound on a current
+  // allocation projection. Keep the version at which "none" was observed:
+  // another session can create an allocation before the next feed refresh.
+  // Retain floors across page/filter changes so older reads cannot restore
+  // stale refund impact. Request epochs order concurrent reads.
+  const allocationNoneVersionRef = useRef<Record<string, number>>({});
+  const allocationVersionFloorRef = useRef<Record<string, number>>({});
+  const allocationReadEpochRef = useRef<Record<string, number>>({});
+  // Once a server read establishes active or none, retain that knowledge
+  // through temporary cache invalidation while newer versions are probed.
+  const allocationKnownIdsRef = useRef<Set<string>>(new Set());
+  // A feed and its detail reauthorization can commit separately; an unknown
+  // allocation gets one background probe per observed expense version.
+  const allocationProbeVersionRef = useRef<Record<string, number>>({});
   const [splitTransaction, setSplitTransaction] = useState<Transaction | null>(
     null,
   );
   const [splitLoadingId, setSplitLoadingId] = useState<string | null>(null);
   const [splitParticipants, setSplitParticipants] = useState<string[]>([]);
+  const [splitMethod, setSplitMethod] = useState<'EQUAL' | 'EXACT'>('EQUAL');
+  const [splitAmounts, setSplitAmounts] = useState<Record<string, string>>({});
+  const [splitPreview, setSplitPreview] = useState<AllocationPreview | null>(
+    null,
+  );
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewInput, setPreviewInput] =
+    useState<CreateAllocationInput | null>(null);
   const [splitFieldErrors, setSplitFieldErrors] = useState<FieldErrors>({});
   const [roster, setRoster] = useState<HouseholdMember[] | null>(null);
   const [rosterLoading, setRosterLoading] = useState(false);
@@ -471,6 +497,10 @@ export function TransactionsSection({
   const voidTriggerRef = useRef<HTMLButtonElement | null>(null);
   const detailPanelRef = useRef<HTMLDivElement>(null);
   const shareConfirmRef = useRef<HTMLDivElement>(null);
+  const previewEpochRef = useRef(0);
+  // A ref closes the same-render double-activation gap while the preview
+  // button remains focusable during its request.
+  const previewControllerRef = useRef<AbortController | null>(null);
   const shareTriggerRef = useRef<HTMLButtonElement | null>(null);
   const splitPanelRef = useRef<HTMLDivElement>(null);
   const splitTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -971,8 +1001,19 @@ export function TransactionsSection({
     // Allocation/balance scoped state: allocation cache, split panel,
     // roster, retained create intent, revoke confirm, and balances.
     setAllocationByTransaction({});
+    allocationVersionFloorRef.current = {};
+    allocationNoneVersionRef.current = {};
+    allocationReadEpochRef.current = {};
+    allocationProbeVersionRef.current = {};
+    allocationKnownIdsRef.current.clear();
     setSplitTransaction(null);
     setSplitParticipants([]);
+    setSplitPreview(null);
+    setPreviewInput(null);
+    setPreviewLoading(false);
+    previewControllerRef.current = null;
+    previewEpochRef.current += 1;
+    setPreviewError(null);
     setSplitFieldErrors({});
     setRoster(null);
     setRosterLoading(false);
@@ -1237,14 +1278,42 @@ export function TransactionsSection({
     return false;
   }
 
+  function allocationReadEpoch(transactionId: string): number {
+    const next = (allocationReadEpochRef.current[transactionId] ?? 0) + 1;
+    allocationReadEpochRef.current[transactionId] = next;
+    return next;
+  }
+
   function setAllocationFor(
     transactionId: string,
     allocation: TransactionAllocation | null,
+    readEpoch?: number,
   ) {
-    setAllocationByTransaction((current) => ({
-      ...current,
-      [transactionId]: allocation,
-    }));
+    if (
+      readEpoch !== undefined &&
+      allocationReadEpochRef.current[transactionId] !== readEpoch
+    )
+      return;
+    if (
+      allocation &&
+      allocation.transactionVersion <
+        (allocationVersionFloorRef.current[transactionId] ?? 0)
+    )
+      return;
+    if (allocation === null)
+      allocationNoneVersionRef.current[transactionId] =
+        allocationVersionFloorRef.current[transactionId] ?? 0;
+    allocationKnownIdsRef.current.add(transactionId);
+    setAllocationByTransaction((current) => {
+      const previous = current[transactionId];
+      if (
+        allocation &&
+        previous &&
+        previous.transactionVersion > allocation.transactionVersion
+      )
+        return current;
+      return { ...current, [transactionId]: allocation };
+    });
   }
 
   function bumpBalances() {
@@ -1290,7 +1359,8 @@ export function TransactionsSection({
    * "none": removing the key returns the entry to unknown so the next
    * feed-driven probe reconciles with the server's actual state.
    */
-  function clearAllocationFor(transactionId: string) {
+  function clearAllocationFor(transactionId: string, preserveProbe = false) {
+    if (!preserveProbe) delete allocationProbeVersionRef.current[transactionId];
     setAllocationByTransaction((current) => {
       if (!(transactionId in current)) return current;
       const next = { ...current };
@@ -1311,6 +1381,7 @@ export function TransactionsSection({
     generation: number,
     controller: AbortController,
   ): Promise<void> {
+    const readEpoch = allocationReadEpoch(transactionId);
     try {
       const allocation = await fetchTransactionAllocation(
         household.id,
@@ -1318,15 +1389,16 @@ export function TransactionsSection({
         controller.signal,
       );
       if (!current(generation) || controller.signal.aborted) return;
-      setAllocationFor(transactionId, allocation);
+      setAllocationFor(transactionId, allocation, readEpoch);
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
+      if (allocationReadEpochRef.current[transactionId] !== readEpoch) return;
       if (!(error instanceof ApiError)) return;
       if (
         error.code === 'ALLOCATION_NOT_FOUND' ||
         error.code === 'TRANSACTION_NOT_FOUND'
       ) {
-        setAllocationFor(transactionId, null);
+        setAllocationFor(transactionId, null, readEpoch);
         return;
       }
       if (error.status === 401) {
@@ -1339,36 +1411,99 @@ export function TransactionsSection({
     }
   }
 
-  // Allocation state for rendered expense rows: unknown entries are probed
-  // once per feed page; known entries (active or none) are never refetched
-  // here, and the affected entry alone is cleared on a stale 404.
-  useEffect(() => {
-    const seen = new Set<string>();
-    const unknownIds: string[] = [];
+  // A newer expense version can change the live refund projection or replace
+  // a cached "none" with an allocation created in another session. Reconcile
+  // only that expense, including an authorized detail outside the feed page.
+  useLayoutEffect(() => {
+    const latest = new Map<string, Transaction>();
     for (const transaction of [
       ...(ownTransactions ?? []),
       ...(householdTransactions ?? []),
     ]) {
       if (!isAllocationFetchable(transaction)) continue;
-      if (seen.has(transaction.id)) continue;
-      seen.add(transaction.id);
-      if (allocationByTransaction[transaction.id] === undefined) {
-        unknownIds.push(transaction.id);
-      }
+      const previous = latest.get(transaction.id);
+      if (!previous || transaction.version > previous.version)
+        latest.set(transaction.id, transaction);
     }
-    if (unknownIds.length === 0) return;
+    if (detail && isAllocationFetchable(detail)) {
+      const previous = latest.get(detail.id);
+      if (!previous || detail.version > previous.version)
+        latest.set(detail.id, detail);
+    }
     const generation = generationRef.current;
+    const probeIds: string[] = [];
+    let balancesChanged = false;
+    for (const [id, transaction] of latest) {
+      const previouslyObserved = id in allocationVersionFloorRef.current;
+      const floor = allocationVersionFloorRef.current[id] ?? 0;
+      const cached = allocationByTransaction[id];
+      if (!previouslyObserved || transaction.version > floor) {
+        allocationVersionFloorRef.current[id] = transaction.version;
+        // A known allocation state (including "none") can change all-time
+        // balances on every newer version, even while its cached projection
+        // is temporarily unknown pending a previous refresh. Coalesce all
+        // changed expenses in this feed/detail commit into one refetch.
+        if (
+          transaction.version > floor &&
+          allocationKnownIdsRef.current.has(id)
+        )
+          balancesChanged = true;
+      }
+      if (
+        (cached &&
+          cached.transactionVersion < allocationVersionFloorRef.current[id]!) ||
+        (cached === null &&
+          (allocationNoneVersionRef.current[id] ?? 0) <
+            allocationVersionFloorRef.current[id]!)
+      ) {
+        // Invalidate before a delayed GET completes: never label old impact
+        // (or a previous "none") current, even when the re-read fails.
+        clearAllocationFor(id, true);
+        if (
+          allocationProbeVersionRef.current[id] !==
+          (allocationVersionFloorRef.current[id] ?? 0)
+        )
+          probeIds.push(id);
+      } else if (
+        cached === undefined &&
+        allocationProbeVersionRef.current[id] !==
+          (allocationVersionFloorRef.current[id] ?? 0)
+      ) {
+        probeIds.push(id);
+      }
+      if (
+        splitTransaction?.id === id &&
+        transaction.version > splitTransaction.version
+      )
+        // The open panel must reflect the newly authorized expense version
+        // before any stale allocation impact can render.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setSplitTransaction((opened) =>
+          opened?.id === id && transaction.version > opened.version
+            ? transaction
+            : opened,
+        );
+      if (detail?.id === id && transaction.version > detail.version)
+        setDetail((opened) =>
+          opened?.id === id && transaction.version > opened.version
+            ? transaction
+            : opened,
+        );
+    }
+    if (balancesChanged) bumpBalances();
+    if (probeIds.length === 0) return;
+    for (const id of probeIds)
+      allocationProbeVersionRef.current[id] =
+        allocationVersionFloorRef.current[id]!;
     const controller = new AbortController();
     track(controller);
-    void (async () => {
-      await Promise.all(
-        unknownIds.map((id) => loadAllocationFor(id, generation, controller)),
-      );
-    })().finally(() => untrack(controller));
-    // The cache is read only to decide what is unknown; feed pages drive
-    // this effect so a mid-flight cache write never duplicates probes.
+    void Promise.all(
+      probeIds.map((id) => loadAllocationFor(id, generation, controller)),
+    ).finally(() => untrack(controller));
+    // Feed and authorized detail commits drive reconciliation: cache writes
+    // must not duplicate probes (including failed GETs) until another commit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ownTransactions, householdTransactions]);
+  }, [ownTransactions, householdTransactions, detail?.id, detail?.version]);
 
   function buildCreateInput():
     | { ok: true; input: CreateTransactionInput }
@@ -1569,7 +1704,11 @@ export function TransactionsSection({
       });
       // A posted refund changes the source expense's cumulative refunded
       // magnitude and therefore derived balances.
-      if (created.kind === 'REFUND') bumpBalances();
+      if (created.kind === 'REFUND') {
+        bumpBalances();
+        if (created.refundOfTransactionId)
+          clearAllocationFor(created.refundOfTransactionId);
+      }
       // A new entry without an explicit category is classified on commit and
       // may open a suggestion, so the private review count converges too.
       setReviewsRefresh((value) => value + 1);
@@ -1612,6 +1751,7 @@ export function TransactionsSection({
           text: 'Transaction creation has an unknown outcome. Retry the same request safely, or refresh the list before retrying.',
           correlationId: apiError.correlationId,
         });
+        setAllocationByTransaction({});
         bumpBalances();
         reloadTransactions(true);
         return;
@@ -1883,7 +2023,11 @@ export function TransactionsSection({
       });
       // A money correction of a refund or expense changes derived
       // balances; description/date/category changes do not.
-      if (changedMoney) bumpBalances();
+      if (changedMoney) {
+        bumpBalances();
+        if (updated.kind === 'REFUND' && updated.refundOfTransactionId)
+          clearAllocationFor(updated.refundOfTransactionId);
+      }
       // Every committed correction moves the entry's version, and a category
       // or description change can supersede an open suggestion, so the
       // private review queue and its count converge on the committed state.
@@ -2085,6 +2229,8 @@ export function TransactionsSection({
       // credit); reconcile both here. A revoke patch afterwards answers
       // ALLOCATION_NOT_FOUND, so the cache clears without a probe.
       if (voided.kind === 'EXPENSE') setAllocationFor(voided.id, null);
+      if (voided.kind === 'REFUND' && voided.refundOfTransactionId)
+        clearAllocationFor(voided.refundOfTransactionId);
       setNotice({
         kind: 'info',
         text: `Transaction voided. It stays listed as voided and stops counting toward spending.`,
@@ -2343,6 +2489,15 @@ export function TransactionsSection({
     if (splitLoadingId !== null) return;
     splitTriggerRef.current = trigger;
     setSplitParticipants([]);
+    setSplitMethod('EQUAL');
+    setSplitAmounts({});
+    setSplitPreview(null);
+    previewControllerRef.current?.abort();
+    previewControllerRef.current = null;
+    setPreviewLoading(false);
+    previewEpochRef.current += 1;
+    setPreviewInput(null);
+    setPreviewError(null);
     setSplitFieldErrors({});
     setRoster(null);
     setRosterError(undefined);
@@ -2354,6 +2509,13 @@ export function TransactionsSection({
     splitTriggerRef.current = null;
     setSplitTransaction(null);
     setSplitParticipants([]);
+    setSplitPreview(null);
+    previewControllerRef.current?.abort();
+    previewControllerRef.current = null;
+    setPreviewLoading(false);
+    previewEpochRef.current += 1;
+    setPreviewInput(null);
+    setPreviewError(null);
     setSplitFieldErrors({});
     setRoster(null);
     setRosterError(undefined);
@@ -2372,6 +2534,7 @@ export function TransactionsSection({
   // form can render, while session/access errors reconcile upward.
   async function loadSplitPanel(transaction: Transaction) {
     const generation = generationRef.current;
+    const readEpoch = allocationReadEpoch(transaction.id);
     const controller = new AbortController();
     track(controller);
     splitLoadingRef.current = true;
@@ -2383,7 +2546,7 @@ export function TransactionsSection({
         controller.signal,
       );
       if (!current(generation) || controller.signal.aborted) return;
-      setAllocationFor(transaction.id, allocation);
+      setAllocationFor(transaction.id, allocation, readEpoch);
     } catch (error) {
       if (!current(generation) || controller.signal.aborted) return;
       const apiError = error instanceof ApiError ? error : null;
@@ -2392,7 +2555,7 @@ export function TransactionsSection({
         (apiError.code === 'ALLOCATION_NOT_FOUND' ||
           apiError.code === 'TRANSACTION_NOT_FOUND')
       ) {
-        setAllocationFor(transaction.id, null);
+        setAllocationFor(transaction.id, null, readEpoch);
         return;
       }
       if (apiError?.status === 401) {
@@ -2427,7 +2590,7 @@ export function TransactionsSection({
     })();
     // Roster loading for the creation form runs in its own effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [splitTransaction]);
+  }, [splitTransaction?.id]);
 
   // The creation form needs a roster snapshot for participant selection.
   // Opening or closing the panel clears it, so every resolved creation
@@ -2445,16 +2608,21 @@ export function TransactionsSection({
       : undefined;
   async function loadSplitRoster() {
     const generation = generationRef.current;
+    const panelEpoch = previewEpochRef.current;
     const controller = new AbortController();
     track(controller);
     setRosterLoading(true);
-    setRosterError(undefined);
     try {
       const members = await fetchHouseholdMembers(
         household.id,
         controller.signal,
       );
-      if (!current(generation) || controller.signal.aborted) return;
+      if (
+        !current(generation) ||
+        controller.signal.aborted ||
+        panelEpoch !== previewEpochRef.current
+      )
+        return;
       setRoster(members);
       // Sensible default: every current member starts selected, payer
       // included (the payer may be omitted explicitly).
@@ -2462,7 +2630,12 @@ export function TransactionsSection({
         sortCanonicalUserIds(members.map((member) => member.userId)),
       );
     } catch (error) {
-      if (!current(generation) || controller.signal.aborted) return;
+      if (
+        !current(generation) ||
+        controller.signal.aborted ||
+        panelEpoch !== previewEpochRef.current
+      )
+        return;
       const apiError = error instanceof ApiError ? error : null;
       if (apiError?.status === 401) {
         handleSessionLost();
@@ -2480,12 +2653,18 @@ export function TransactionsSection({
       );
     } finally {
       untrack(controller);
-      if (!unmountedRef.current) setRosterLoading(false);
+      if (!unmountedRef.current && panelEpoch === previewEpochRef.current)
+        setRosterLoading(false);
     }
   }
 
   useEffect(() => {
-    if (!splitTransaction || splitAllocationState !== null) return;
+    if (
+      !splitTransaction ||
+      splitTransaction.ownerUserId !== currentUserId ||
+      splitAllocationState !== null
+    )
+      return;
     void (async () => {
       await loadSplitRoster();
     })();
@@ -2493,8 +2672,19 @@ export function TransactionsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [splitTransaction, splitAllocationState]);
 
+  function invalidateSplitPreview() {
+    previewControllerRef.current?.abort();
+    previewControllerRef.current = null;
+    setPreviewLoading(false);
+    previewEpochRef.current += 1;
+    setSplitPreview(null);
+    setPreviewInput(null);
+    setPreviewError(null);
+  }
+
   function toggleSplitParticipant(userId: string, checked: boolean) {
     setSplitFieldErrors({});
+    invalidateSplitPreview();
     setSplitParticipants((current) =>
       checked
         ? [...new Set([...current, userId])]
@@ -2509,6 +2699,175 @@ export function TransactionsSection({
       )
       .join(', ');
     return `Allocation recorded in participant order: ${shares}. The expense version is now ${allocation.transactionVersion}.`;
+  }
+
+  function allocationInput(
+    transaction: Transaction,
+  ): CreateAllocationInput | null {
+    const selected = sortCanonicalUserIds(splitParticipants);
+    if (selected.length === 0 || new Set(selected).size !== selected.length) {
+      setSplitFieldErrors({
+        participants: 'Select distinct current participants.',
+      });
+      return null;
+    }
+    if (splitMethod === 'EQUAL')
+      return {
+        expectedVersion: transaction.version,
+        participantUserIds: selected,
+      };
+    const currency = transaction.money.currency;
+    const shares = selected.map((userId) => ({
+      userId,
+      share: {
+        amount: splitAmounts[userId] ?? '',
+        currency,
+      },
+    }));
+    if (
+      shares.some(
+        ({ share }) =>
+          !isAggregateAmountString(share.amount, currency) ||
+          share.amount.startsWith('-') ||
+          share.amount.split('.')[0]!.length > 12,
+      )
+    ) {
+      setSplitFieldErrors({
+        participants:
+          'Enter a nonnegative amount for each selected member at the exact currency scale (up to 12 whole digits).',
+      });
+      return null;
+    }
+    const sum = shares.reduce(
+      (total, { share }) =>
+        total + minorUnitsOfMagnitude(share.amount, currency),
+      0n,
+    );
+    if (
+      sum !== minorUnitsOfMagnitude(expenseMagnitudeOf(transaction), currency)
+    ) {
+      setSplitFieldErrors({
+        participants: `Shares must total exactly ${formatMoney(expenseMagnitudeOf(transaction), currency)}. No amount is left implicit.`,
+      });
+      return null;
+    }
+    return { expectedVersion: transaction.version, participantShares: shares };
+  }
+
+  async function handleAllocationPreview() {
+    const transaction = splitTransaction;
+    if (
+      !transaction ||
+      previewControllerRef.current !== null ||
+      updatingRef.current !== null ||
+      !authorityConfirmed
+    )
+      return;
+    const input = allocationInput(transaction);
+    if (!input) return;
+    const generation = generationRef.current;
+    const controller = new AbortController();
+    previewControllerRef.current = controller;
+    track(controller);
+    setPreviewLoading(true);
+    setPreviewError(null);
+    setSplitPreview(null);
+    setPreviewInput(null);
+    const previewEpoch = ++previewEpochRef.current;
+    try {
+      const token = await ensureCsrf(generation, controller.signal);
+      if (
+        !current(generation) ||
+        controller.signal.aborted ||
+        previewEpoch !== previewEpochRef.current
+      )
+        return;
+      if (!token) {
+        setPreviewError('Security setup is still loading. Retry preview.');
+        return;
+      }
+      const preview = await previewTransactionAllocation(
+        household.id,
+        transaction.id,
+        input,
+        token,
+        controller.signal,
+      );
+      if (
+        !current(generation) ||
+        controller.signal.aborted ||
+        previewEpoch !== previewEpochRef.current
+      )
+        return;
+      if (preview.transactionVersion !== transaction.version) {
+        setPreviewError(
+          'The expense version changed. Refresh before previewing again.',
+        );
+        reloadTransactions(true);
+        return;
+      }
+      setSplitPreview(preview);
+      setPreviewInput(input);
+    } catch (error) {
+      if (
+        !current(generation) ||
+        controller.signal.aborted ||
+        previewEpoch !== previewEpochRef.current
+      )
+        return;
+      const apiError = error instanceof ApiError ? error : null;
+      if (apiError?.status === 401) {
+        handleSessionLost();
+        return;
+      }
+      if (apiError?.code === 'HOUSEHOLD_NOT_FOUND') {
+        handleAccessLost();
+        return;
+      }
+      if (apiError?.code === 'TRANSACTION_NOT_FOUND') {
+        removeFromFeeds(transaction.id);
+        cancelSplit();
+        return;
+      }
+      if (
+        apiError?.code === 'RESOURCE_VERSION_CONFLICT' ||
+        apiError?.code === 'ALLOCATION_CONFLICT'
+      ) {
+        setPreviewError(
+          'This expense, refund group, or allocation changed. Refresh the list and review before trying again.',
+        );
+        clearAllocationFor(transaction.id);
+        reloadTransactions(true);
+      } else if (apiError?.code === 'FORBIDDEN') {
+        setPreviewError(
+          'Only the financial owner can preview and create an allocation.',
+        );
+      } else if (
+        apiError?.fieldErrors?.participantShares ||
+        apiError?.fieldErrors?.participantUserIds
+      ) {
+        setSplitFieldErrors({
+          participants:
+            apiError.fieldErrors.participantShares ??
+            apiError.fieldErrors.participantUserIds,
+        });
+        setPreviewError(
+          'Check the highlighted participant shares and preview again.',
+        );
+      } else {
+        setPreviewError(
+          apiError?.message ??
+            'Preview could not be loaded. Retry before creating.',
+        );
+      }
+    } finally {
+      untrack(controller);
+      if (previewControllerRef.current === controller) {
+        previewControllerRef.current = null;
+        if (!unmountedRef.current && previewEpoch === previewEpochRef.current)
+          setPreviewLoading(false);
+      }
+    }
   }
 
   function handleAllocationSubmit() {
@@ -2532,35 +2891,21 @@ export function TransactionsSection({
       });
       return;
     }
-    const selected = sortCanonicalUserIds(splitParticipants);
-    if (selected.length === 0) {
-      setSplitFieldErrors({
-        participants: 'Select at least one participant.',
-      });
-      setNotice({ kind: 'error', text: 'Check the highlighted fields.' });
-      return;
-    }
-    // Invalid local state (malformed or duplicated participant IDs) is
-    // rejected instead of previewed or submitted.
-    const preview = previewEqualShares(
-      expenseMagnitudeOf(transaction),
-      transaction.money.currency,
-      selected,
-    );
-    if (!preview) {
-      setSplitFieldErrors({
-        participants: 'Choose distinct, valid participants.',
-      });
-      setNotice({ kind: 'error', text: 'Check the highlighted fields.' });
+    if (
+      !splitPreview ||
+      !previewInput ||
+      previewLoading ||
+      splitPreview.transactionVersion !== transaction.version
+    ) {
+      setPreviewError(
+        'Preview the current shares and refund impact before creating.',
+      );
       return;
     }
     const request: PendingAllocationCreate = {
       key: crypto.randomUUID(),
       transactionId: transaction.id,
-      input: {
-        expectedVersion: transaction.version,
-        participantUserIds: selected,
-      },
+      input: previewInput,
     };
     setPendingAllocation(request);
     void submitAllocationCreate(request);
@@ -2712,14 +3057,20 @@ export function TransactionsSection({
         });
         return;
       }
-      if (apiError.fieldErrors?.participantUserIds) {
+      if (
+        apiError.fieldErrors?.participantUserIds ||
+        apiError.fieldErrors?.participantShares
+      ) {
         setPendingAllocation(null);
+        invalidateSplitPreview();
         setSplitFieldErrors({
-          participants: apiError.fieldErrors.participantUserIds,
+          participants:
+            apiError.fieldErrors.participantShares ??
+            apiError.fieldErrors.participantUserIds,
         });
         setNotice({
           kind: 'error',
-          text: 'Check the highlighted participants.',
+          text: 'Check the highlighted participant shares and preview again.',
           correlationId: apiError.correlationId,
         });
         return;
@@ -2923,6 +3274,7 @@ export function TransactionsSection({
       return;
     }
     if (fresh.version !== transaction.version) {
+      invalidateSplitPreview();
       setSplitTransaction(fresh);
     }
   }
@@ -4080,6 +4432,7 @@ export function TransactionsSection({
                   </li>
                 ))}
               </ul>
+              <AllocationImpactView allocation={splitAllocationState} />
               <p className="finance-helper">
                 Household visibility alone creates no debt; only this active
                 allocation does. While it is active, the entry cannot be made
@@ -4109,6 +4462,11 @@ export function TransactionsSection({
                 </p>
               )}
             </div>
+          ) : splitTransaction.ownerUserId !== currentUserId ? (
+            <p className="finance-helper">
+              No active allocation. Only the financial owner can preview or
+              create one.
+            </p>
           ) : (
             <AllocationCreateForm
               transaction={splitTransaction}
@@ -4117,11 +4475,30 @@ export function TransactionsSection({
               rosterLoading={rosterLoading}
               rosterError={rosterError}
               selected={splitParticipants}
+              method={splitMethod}
+              amounts={splitAmounts}
+              preview={splitPreview}
+              previewLoading={previewLoading}
+              previewError={previewError}
               fieldError={splitFieldErrors.participants}
               busy={busy}
               creating={allocationCreating}
               currentUserId={currentUserId}
               onToggle={toggleSplitParticipant}
+              onMethodChange={(method) => {
+                setSplitMethod(method);
+                invalidateSplitPreview();
+                setSplitFieldErrors({});
+              }}
+              onAmountChange={(userId, amount) => {
+                setSplitAmounts((current) => ({
+                  ...current,
+                  [userId]: amount,
+                }));
+                invalidateSplitPreview();
+                setSplitFieldErrors({});
+              }}
+              onPreview={() => void handleAllocationPreview()}
               onSubmit={() => {
                 void handleAllocationSubmit();
               }}
@@ -4335,6 +4712,7 @@ export function TransactionsSection({
                       </li>
                     ))}
                   </ul>
+                  <AllocationImpactView allocation={detailAllocation} />
                 </dd>
               </div>
             )}
@@ -5166,21 +5544,23 @@ interface AllocationCreateFormProps {
   rosterError: string | undefined;
   selected: string[];
   fieldError: string | undefined;
+  method: 'EQUAL' | 'EXACT';
+  amounts: Record<string, string>;
+  preview: AllocationPreview | null;
+  previewLoading: boolean;
+  previewError: string | null;
   busy: boolean;
   creating: boolean;
   currentUserId: string;
   onToggle: (userId: string, checked: boolean) => void;
+  onMethodChange: (method: 'EQUAL' | 'EXACT') => void;
+  onAmountChange: (userId: string, amount: string) => void;
+  onPreview: () => void;
   onSubmit: () => void;
   onCancel: () => void;
 }
 
-/**
- * The allocation creation form: roster-based explicit participant
- * selection (payer included or omitted), the exact equal-division preview
- * in checked minor units, and the contract explanations before an
- * irreversible freeze. The participant set is bounded by the loaded
- * roster; the selection is nonempty before submission.
- */
+/** Owner-only allocation intent; all monetary preview values come from the server. */
 function AllocationCreateForm({
   transaction,
   magnitude,
@@ -5188,11 +5568,19 @@ function AllocationCreateForm({
   rosterLoading,
   rosterError,
   selected,
+  method,
+  amounts,
+  preview,
+  previewLoading,
+  previewError,
   fieldError,
   busy,
   creating,
   currentUserId,
   onToggle,
+  onMethodChange,
+  onAmountChange,
+  onPreview,
   onSubmit,
   onCancel,
 }: AllocationCreateFormProps) {
@@ -5205,16 +5593,8 @@ function AllocationCreateForm({
       (roster ?? []).find((member) => member.userId === userId) as
         HouseholdMember | undefined,
   );
-  const preview = previewEqualShares(magnitude, currency, selected);
-
-  function previewText(): string {
-    if (selected.length === 0) {
-      return 'Select participants to preview the exact shares.';
-    }
-    if (!preview) return 'The selection is not valid yet.';
-    const shares = preview.map((entry) => formatMoney(entry.share, currency));
-    return `Divides the full ${formatMoney(magnitude, currency)} exactly: ${shares.join(' + ')} across ${preview.length} ${preview.length === 1 ? 'participant' : 'participants'}.`;
-  }
+  const previewAllocation = preview ? { ...preview, currency } : null;
+  const fieldErrorId = `finance-allocation-field-error-${transaction.id}`;
 
   return (
     <form
@@ -5236,6 +5616,29 @@ function AllocationCreateForm({
         </p>
       )}
       <fieldset className="finance-participants-fieldset">
+        <legend>Split method</legend>
+        <label className="finance-participant-option">
+          <input
+            type="radio"
+            name="allocation-method"
+            checked={method === 'EQUAL'}
+            onChange={() => onMethodChange('EQUAL')}
+            disabled={busy || previewLoading}
+          />
+          Equal shares
+        </label>
+        <label className="finance-participant-option">
+          <input
+            type="radio"
+            name="allocation-method"
+            checked={method === 'EXACT'}
+            onChange={() => onMethodChange('EXACT')}
+            disabled={busy || previewLoading}
+          />
+          Exact amounts
+        </label>
+      </fieldset>
+      <fieldset className="finance-participants-fieldset">
         <legend>Participants</legend>
         <p className="household-hint">
           Select every member who shares this expense. Everyone starts selected.
@@ -5247,23 +5650,43 @@ function AllocationCreateForm({
         )}
         {orderedRoster.map((member) =>
           member ? (
-            <label key={member.userId} className="finance-participant-option">
-              <input
-                type="checkbox"
-                checked={selectedSet.has(member.userId)}
-                onChange={(event) =>
-                  onToggle(member.userId, event.target.checked)
-                }
-                disabled={busy || rosterLoading}
-              />
-              <span>
-                {member.email}
-                {member.userId === currentUserId ? ' — you (payer)' : ''}
-                <span className="finance-participant-uuid">
-                  {member.userId}
+            <div key={member.userId} className="finance-participant-row">
+              <label className="finance-participant-option">
+                <input
+                  disabled={busy || rosterLoading || previewLoading}
+                  type="checkbox"
+                  checked={selectedSet.has(member.userId)}
+                  onChange={(event) =>
+                    onToggle(member.userId, event.target.checked)
+                  }
+                />
+                <span>
+                  {member.email}
+                  {member.userId === currentUserId ? ' — you (payer)' : ''}
+                  <span className="finance-participant-uuid">
+                    {member.userId}
+                  </span>
                 </span>
-              </span>
-            </label>
+              </label>
+              {method === 'EXACT' && selectedSet.has(member.userId) && (
+                <label className="finance-exact-share">
+                  <span>
+                    Exact share for {member.email} ({currency}; zero allowed)
+                  </span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={amounts[member.userId] ?? ''}
+                    aria-invalid={Boolean(fieldError)}
+                    aria-describedby={fieldError ? fieldErrorId : undefined}
+                    onChange={(event) =>
+                      onAmountChange(member.userId, event.target.value)
+                    }
+                    disabled={busy || previewLoading}
+                  />
+                </label>
+              )}
+            </div>
           ) : null,
         )}
         {roster !== null && orderedRoster.length === 0 && !rosterLoading && (
@@ -5274,13 +5697,45 @@ function AllocationCreateForm({
         )}
       </fieldset>
       {fieldError && (
-        <p role="alert" className="household-error">
+        <p id={fieldErrorId} role="alert" className="household-error">
           {fieldError}
         </p>
       )}
-      <p role="status" className="finance-amount-preview finance-share-preview">
-        {previewText()}
-      </p>
+      <div className="finance-share-preview" aria-live="polite">
+        <button
+          type="button"
+          className="household-button household-button--secondary"
+          disabled={
+            busy || rosterLoading || selected.length === 0 || roster === null
+          }
+          aria-disabled={previewLoading}
+          onClick={() => {
+            if (!previewLoading) onPreview();
+          }}
+        >
+          {previewLoading ? 'Previewing…' : 'Preview current allocation'}
+        </button>
+        {previewError && (
+          <p role="alert" className="household-error">
+            {previewError}
+          </p>
+        )}
+        {previewAllocation ? (
+          <>
+            <p>
+              Server preview for expense version {preview!.transactionVersion}.
+              Creating rechecks the version and complete refund group; this
+              preview does not reserve shares.
+            </p>
+            <AllocationImpactView allocation={previewAllocation} />
+          </>
+        ) : (
+          <p>
+            Preview from the server before creating; no shares or refund amounts
+            are estimated locally.
+          </p>
+        )}
+      </div>
       <p className="finance-helper">
         Shares freeze when the allocation is created: the participant set and
         each exact share are recorded and never change. To correct the
@@ -5293,7 +5748,7 @@ function AllocationCreateForm({
         <button
           type="submit"
           className="household-button"
-          disabled={busy || rosterLoading}
+          disabled={busy || rosterLoading || previewLoading || preview === null}
         >
           {creating ? 'Creating…' : 'Create allocation'}
         </button>
@@ -5307,5 +5762,74 @@ function AllocationCreateForm({
         </button>
       </div>
     </form>
+  );
+}
+
+function AllocationImpactView({
+  allocation,
+}: {
+  allocation: Pick<
+    TransactionAllocation,
+    'currency' | 'method' | 'refundPolicy' | 'participants' | 'impact'
+  >;
+}) {
+  const impact = allocation.impact;
+  if (!impact)
+    return (
+      <p className="finance-helper">
+        Revoked allocation: no current refund impact or balance contribution.
+      </p>
+    );
+  return (
+    <section
+      className="finance-allocation-impact"
+      aria-label="Current refund impact"
+    >
+      <h6>
+        {allocation.method === 'EXACT' ? 'Exact amounts' : 'Equal shares'} —
+        current refund impact
+      </h6>
+      <p>
+        Cumulative posted refunds:{' '}
+        {formatMoney(impact.cumulativeRefundAmount.amount, allocation.currency)}
+        . Payer credit after refunds:{' '}
+        {formatMoney(impact.payerCredit.amount, allocation.currency)}.
+      </p>
+      <ul className="finance-allocation-shares">
+        {impact.participants.map((entry, index) => (
+          <li key={entry.userId}>
+            <span>
+              {entry.userId} (original{' '}
+              {formatMoney(
+                allocation.participants[index]!.share.amount,
+                allocation.currency,
+              )}
+              )
+            </span>
+            <span>
+              Refund share{' '}
+              {formatMoney(
+                entry.cumulativeRefundShare.amount,
+                allocation.currency,
+              )}
+              ; remaining cost{' '}
+              {formatMoney(
+                entry.remainingObligation.amount,
+                allocation.currency,
+              )}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {allocation.refundPolicy === 'EXACT_JEFFERSON_V1' && (
+        <p className="finance-helper">
+          Highest-averages rounding of the cumulative refund can favor larger
+          original shares at intermediate totals. It conserves the full amount
+          and never reduces a member’s cumulative refund share as posted refunds
+          increase. Refunds are not assigned to individual purchases or line
+          items.
+        </p>
+      )}
+    </section>
   );
 }

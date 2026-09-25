@@ -117,6 +117,19 @@ function activeAllocation(transactionId: string) {
     createdAt: '2026-09-18T10:00:00Z',
     revokedAt: null,
     transactionVersion: 1,
+    method: 'EQUAL',
+    refundPolicy: 'EQUAL_V1',
+    impact: {
+      cumulativeRefundAmount: { amount: '0.00', currency: 'USD' },
+      payerCredit: { amount: '12.34', currency: 'USD' },
+      participants: [
+        {
+          userId: '30000000-0000-4000-8000-000000000001',
+          cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+          remainingObligation: { amount: '12.34', currency: 'USD' },
+        },
+      ],
+    },
   };
 }
 

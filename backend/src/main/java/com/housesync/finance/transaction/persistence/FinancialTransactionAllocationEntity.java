@@ -1,6 +1,8 @@
 package com.housesync.finance.transaction.persistence;
 
 import com.housesync.finance.account.domain.SupportedCurrency;
+import com.housesync.finance.transaction.domain.AllocationMethod;
+import com.housesync.finance.transaction.domain.AllocationRefundPolicy;
 import com.housesync.finance.transaction.domain.AllocationStatus;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -42,6 +44,14 @@ public class FinancialTransactionAllocationEntity {
   private BigDecimal originalAmount;
 
   @Enumerated(EnumType.STRING)
+  @Column(nullable = false, length = 8)
+  private AllocationMethod method;
+
+  @Enumerated(EnumType.STRING)
+  @Column(name = "refund_policy", nullable = false, length = 24)
+  private AllocationRefundPolicy refundPolicy;
+
+  @Enumerated(EnumType.STRING)
   @Column(nullable = false, length = 16)
   private AllocationStatus status;
 
@@ -60,6 +70,8 @@ public class FinancialTransactionAllocationEntity {
       UUID payerUserId,
       SupportedCurrency currency,
       BigDecimal originalAmount,
+      AllocationMethod method,
+      AllocationRefundPolicy refundPolicy,
       Instant createdAt) {
     this.id = id;
     this.transactionId = transactionId;
@@ -67,6 +79,8 @@ public class FinancialTransactionAllocationEntity {
     this.payerUserId = payerUserId;
     this.currency = currency;
     this.originalAmount = originalAmount;
+    this.method = method;
+    this.refundPolicy = refundPolicy;
     this.status = AllocationStatus.ACTIVE;
     this.createdAt = createdAt;
     this.revokedAt = null;
@@ -94,6 +108,14 @@ public class FinancialTransactionAllocationEntity {
 
   public BigDecimal getOriginalAmount() {
     return originalAmount;
+  }
+
+  public AllocationMethod getMethod() {
+    return method;
+  }
+
+  public AllocationRefundPolicy getRefundPolicy() {
+    return refundPolicy;
   }
 
   public AllocationStatus getStatus() {

@@ -2,9 +2,11 @@ package com.housesync.finance.transaction.domain;
 
 import com.housesync.finance.account.domain.SupportedCurrency;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.PriorityQueue;
 import java.util.UUID;
 
 /**
@@ -44,6 +46,70 @@ public final class AllocationSharesPolicy {
       shares.add(fromMinorUnits(minor, currency));
     }
     return shares;
+  }
+
+  /**
+   * Cumulative refund shares in canonical participant order. The exact policy starts from floor
+   * proportional quotas, then awards the bounded remainder by exact Jefferson priorities.
+   */
+  public static List<BigDecimal> refundShares(
+      AllocationRefundPolicy policy,
+      BigDecimal original,
+      List<BigDecimal> originalShares,
+      BigDecimal refunded,
+      SupportedCurrency currency,
+      List<UUID> orderedUsers) {
+    int count = originalShares.size();
+    if (count == 0 || count != orderedUsers.size()) {
+      throw new IllegalArgumentException("Participants must be aligned and nonempty.");
+    }
+    if (policy == AllocationRefundPolicy.EQUAL_V1) {
+      return equalShares(refunded, currency, count);
+    }
+    if (policy != AllocationRefundPolicy.EXACT_JEFFERSON_V1) {
+      throw new IllegalArgumentException("Unknown refund policy.");
+    }
+    BigInteger magnitude = original.setScale(currency.scale()).unscaledValue();
+    BigInteger refund = refunded.setScale(currency.scale()).unscaledValue();
+    if (magnitude.signum() <= 0 || refund.signum() < 0 || refund.compareTo(magnitude) > 0) {
+      throw new IllegalArgumentException("Refund outside original magnitude.");
+    }
+    BigInteger[] shares = new BigInteger[count];
+    BigInteger[] quotas = new BigInteger[count];
+    BigInteger sum = BigInteger.ZERO;
+    BigInteger assigned = BigInteger.ZERO;
+    for (int i = 0; i < count; i++) {
+      shares[i] = originalShares.get(i).setScale(currency.scale()).unscaledValue();
+      if (shares[i].signum() < 0) throw new IllegalArgumentException("Negative original share.");
+      sum = sum.add(shares[i]);
+      quotas[i] = refund.multiply(shares[i]).divide(magnitude);
+      assigned = assigned.add(quotas[i]);
+    }
+    if (!sum.equals(magnitude))
+      throw new IllegalArgumentException("Original shares do not conserve.");
+    PriorityQueue<Integer> heap =
+        new PriorityQueue<>(
+            (a, b) -> {
+              int priority =
+                  shares[b]
+                      .multiply(quotas[a].add(BigInteger.ONE))
+                      .compareTo(shares[a].multiply(quotas[b].add(BigInteger.ONE)));
+              return priority != 0
+                  ? priority
+                  : CANONICAL_USER_ORDER.compare(orderedUsers.get(a), orderedUsers.get(b));
+            });
+    for (int i = 0; i < count; i++) {
+      if (quotas[i].compareTo(shares[i]) < 0) heap.add(i);
+    }
+    int residual = refund.subtract(assigned).intValueExact();
+    for (int i = 0; i < residual; i++) {
+      int winner = heap.remove();
+      quotas[winner] = quotas[winner].add(BigInteger.ONE);
+      if (quotas[winner].compareTo(shares[winner]) < 0) heap.add(winner);
+    }
+    List<BigDecimal> result = new ArrayList<>(count);
+    for (BigInteger quota : quotas) result.add(new BigDecimal(quota, currency.scale()));
+    return result;
   }
 
   /** Exact integer minor units of a magnitude at the currency's scale. */

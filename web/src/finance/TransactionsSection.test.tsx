@@ -27,6 +27,8 @@ const HOUSEHOLD: Household = {
   createdAt: '2026-09-13T01:30:00Z',
 };
 const ACTOR_ID = '30000000-0000-4000-8000-000000000001';
+const MEMBER_B = '30000000-0000-4000-8000-000000000002';
+const MEMBER_C = '30000000-0000-4000-8000-000000000003';
 const CHECKING_ID = '10000000-0000-4000-8000-000000000001';
 const CASH_ID = '10000000-0000-4000-8000-000000000002';
 const EXPENSE_ID = '40000000-0000-4000-8000-000000000001';
@@ -100,6 +102,7 @@ interface RouteHandlers {
   categorizationGet?: (transactionId: string) => Response | Promise<Response>;
   transactionsPatch?: (transactionId: string) => Response | Promise<Response>;
   allocationsGet?: (transactionId: string) => Response | Promise<Response>;
+  allocationsPreview?: (init?: RequestInit) => Response | Promise<Response>;
   allocationsPost?: (init?: RequestInit) => Response | Promise<Response>;
   allocationsPatch?: (transactionId: string) => Response | Promise<Response>;
   rulesGet?: (
@@ -296,6 +299,46 @@ function stubFetch(routes: RouteHandlers) {
             jsonResponse({ items: [], limit: 100, offset, hasMore: false })
           );
         }
+      }
+      if (
+        url.startsWith(`${transactionBase}/`) &&
+        url.endsWith('/allocation/preview') &&
+        init?.method === 'POST'
+      ) {
+        if (routes.allocationsPreview) return routes.allocationsPreview(init);
+        return jsonResponse({
+          transactionId: EXPENSE_ID,
+          transactionVersion: 0,
+          method: 'EQUAL',
+          refundPolicy: 'EQUAL_V1',
+          originalAmount: { amount: '10.00', currency: 'USD' },
+          participants: [
+            { userId: ACTOR_ID, share: { amount: '3.34', currency: 'USD' } },
+            { userId: MEMBER_B, share: { amount: '3.33', currency: 'USD' } },
+            { userId: MEMBER_C, share: { amount: '3.33', currency: 'USD' } },
+          ],
+          impact: {
+            cumulativeRefundAmount: { amount: '0.00', currency: 'USD' },
+            payerCredit: { amount: '10.00', currency: 'USD' },
+            participants: [
+              {
+                userId: ACTOR_ID,
+                cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+                remainingObligation: { amount: '3.34', currency: 'USD' },
+              },
+              {
+                userId: MEMBER_B,
+                cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+                remainingObligation: { amount: '3.33', currency: 'USD' },
+              },
+              {
+                userId: MEMBER_C,
+                cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+                remainingObligation: { amount: '3.33', currency: 'USD' },
+              },
+            ],
+          },
+        });
       }
       if (
         url.startsWith(`${transactionBase}/`) &&
@@ -3973,8 +4016,6 @@ describe('sharing', () => {
 });
 
 describe('allocations', () => {
-  const MEMBER_B = '30000000-0000-4000-8000-000000000002';
-  const MEMBER_C = '30000000-0000-4000-8000-000000000003';
   const ACTOR_EMAIL = 'payer@example.test';
   const MEMBER_B_EMAIL = 'member-b@example.test';
   const MEMBER_C_EMAIL = 'member-c@example.test';
@@ -4012,6 +4053,29 @@ describe('allocations', () => {
       createdAt: '2026-09-16T12:00:00Z',
       revokedAt: null,
       transactionVersion: 1,
+      method: 'EQUAL',
+      refundPolicy: 'EQUAL_V1',
+      impact: {
+        cumulativeRefundAmount: { amount: '0.00', currency: 'USD' },
+        payerCredit: { amount: '10.00', currency: 'USD' },
+        participants: [
+          {
+            userId: ACTOR_ID,
+            cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+            remainingObligation: { amount: '3.34', currency: 'USD' },
+          },
+          {
+            userId: MEMBER_B,
+            cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+            remainingObligation: { amount: '3.33', currency: 'USD' },
+          },
+          {
+            userId: MEMBER_C,
+            cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+            remainingObligation: { amount: '3.33', currency: 'USD' },
+          },
+        ],
+      },
       ...overrides,
     };
   }
@@ -4035,6 +4099,733 @@ describe('allocations', () => {
   const balanceCalls = (
     calls: Array<{ url: string; init?: RequestInit | undefined }>,
   ) => calls.filter(({ url }) => url.endsWith('/member-balances'));
+
+  it('refreshes all-time balances once for an externally changed allocated expense, not for unchanged or older pages', async () => {
+    const otherId = '40000000-0000-4000-8000-000000000009';
+    let version = 1;
+    let otherVersion = 1;
+    let balanceAmount = '6.66';
+    const { calls } = renderSection({
+      transactionsGet: () =>
+        transactionPage([
+          householdExpense({ version }),
+          transaction({
+            id: otherId,
+            kind: 'INCOME',
+            description: 'Other',
+            money: { amount: '10.00', currency: 'USD' },
+            visibility: 'HOUSEHOLD',
+            version: otherVersion,
+          }),
+        ]),
+      allocationsGet: (id) =>
+        id === EXPENSE_ID
+          ? jsonResponse(activeAllocation({ transactionVersion: version }))
+          : allocationNotFound(),
+      balancesGet: () =>
+        jsonResponse({
+          currencies: [
+            {
+              currency: 'USD',
+              balances: [
+                {
+                  userId: ACTOR_ID,
+                  membershipStatus: 'CURRENT',
+                  amount: balanceAmount,
+                },
+                {
+                  userId: MEMBER_B,
+                  membershipStatus: 'CURRENT',
+                  amount: balanceAmount === '6.66' ? '-6.66' : '-5.66',
+                },
+              ],
+            },
+          ],
+        }),
+    });
+    const balances = screen.getByRole('region', { name: 'Member balances' });
+    await within(balances).findByText('6.66 USD');
+    await screen.findByText('Groceries');
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
+      ).toHaveLength(1),
+    );
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Unrelated draft' },
+    });
+    const refreshFeed = async (view: 'Household feed' | 'My transactions') => {
+      const count = calls.filter(
+        ({ url }) =>
+          url.includes('view=OWN&status=ALL') ||
+          url.includes('view=HOUSEHOLD&status=ALL'),
+      ).length;
+      fireEvent.click(screen.getByRole('radio', { name: view }));
+      await waitFor(() =>
+        expect(
+          calls.filter(
+            ({ url }) =>
+              url.includes('view=OWN&status=ALL') ||
+              url.includes('view=HOUSEHOLD&status=ALL'),
+          ).length,
+        ).toBeGreaterThan(count),
+      );
+      await waitFor(() =>
+        expect(screen.getByRole('radio', { name: view })).toBeEnabled(),
+      );
+    };
+    await refreshFeed('Household feed');
+    expect(balanceCalls(calls)).toHaveLength(1);
+    // Changing an unrelated income does not invalidate this allocation.
+    otherVersion = 2;
+    await refreshFeed('My transactions');
+    expect(balanceCalls(calls)).toHaveLength(1);
+    balanceAmount = '5.66';
+    version = 2;
+    await refreshFeed('Household feed');
+    await within(balances).findByText('5.66 USD');
+    expect(within(balances).queryByText('6.66 USD')).toBeNull();
+    expect(balanceCalls(calls)).toHaveLength(2);
+    expect(screen.getByLabelText('Description')).toHaveValue('Unrelated draft');
+    await refreshFeed('My transactions');
+    expect(balanceCalls(calls)).toHaveLength(2);
+    version = 1;
+    await refreshFeed('Household feed');
+    expect(balanceCalls(calls)).toHaveLength(2);
+  });
+
+  it('coalesces two known expenses changed in one authorized feed commit into one balances refresh', async () => {
+    const otherId = '40000000-0000-4000-8000-000000000009';
+    let version = 1;
+    const { calls } = renderSection({
+      transactionsGet: () =>
+        transactionPage([
+          householdExpense({ version }),
+          householdExpense({
+            id: otherId,
+            description: 'Other expense',
+            version,
+          }),
+        ]),
+      allocationsGet: (id) =>
+        jsonResponse(
+          activeAllocation({
+            transactionId: id,
+            transactionVersion: version,
+          }),
+        ),
+    });
+    await screen.findByText('Groceries');
+    await screen.findByText('Other expense');
+    await waitFor(() =>
+      expect(screen.getAllByText('Allocated')).toHaveLength(2),
+    );
+    expect(balanceCalls(calls)).toHaveLength(1);
+    version = 2;
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() => expect(balanceCalls(calls)).toHaveLength(2));
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.endsWith('/allocation')),
+      ).toHaveLength(4),
+    );
+    expect(balanceCalls(calls)).toHaveLength(2);
+  });
+
+  it('does not refresh balances for a version advance before an allocation is first known', async () => {
+    let version = 1;
+    let reads = 0;
+    let finishInitial: ((response: Response) => void) | undefined;
+    const { calls } = renderSection({
+      transactionsGet: () => transactionPage([householdExpense({ version })]),
+      allocationsGet: () => {
+        reads += 1;
+        if (reads === 1)
+          return new Promise<Response>((resolve) => {
+            finishInitial = resolve;
+          });
+        return jsonResponse(activeAllocation({ transactionVersion: version }));
+      },
+    });
+    await screen.findByText('Groceries');
+    await waitFor(() => expect(finishInitial).toBeDefined());
+    expect(balanceCalls(calls)).toHaveLength(1);
+    version = 2;
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() => expect(reads).toBe(2));
+    await screen.findByText('Allocated');
+    expect(balanceCalls(calls)).toHaveLength(1);
+    await act(async () => {
+      finishInitial!(jsonResponse(activeAllocation({ transactionVersion: 1 })));
+    });
+    expect(screen.getByText('Allocated')).toBeInTheDocument();
+    expect(balanceCalls(calls)).toHaveLength(1);
+  });
+
+  it('refreshes again for a newer external refund while the previous allocation and balances reads are pending', async () => {
+    let version = 1;
+    let allocationReads = 0;
+    let balanceReads = 0;
+    let finishOldAllocation: ((response: Response) => void) | undefined;
+    let finishOldBalances: ((response: Response) => void) | undefined;
+    const balanceResponse = (amount: string) =>
+      jsonResponse({
+        currencies: [
+          {
+            currency: 'USD',
+            balances: [
+              { userId: ACTOR_ID, membershipStatus: 'CURRENT', amount },
+              {
+                userId: MEMBER_B,
+                membershipStatus: 'CURRENT',
+                amount: `-${amount}`,
+              },
+            ],
+          },
+        ],
+      });
+    const { calls } = renderSection({
+      transactionsGet: () => transactionPage([householdExpense({ version })]),
+      allocationsGet: () => {
+        allocationReads += 1;
+        if (allocationReads === 3)
+          return new Promise<Response>((resolve) => {
+            finishOldAllocation = resolve;
+          });
+        if (allocationReads === 4)
+          return jsonResponse(
+            activeAllocation({
+              transactionVersion: 3,
+              impact: {
+                cumulativeRefundAmount: { amount: '3.00', currency: 'USD' },
+                payerCredit: { amount: '7.00', currency: 'USD' },
+                participants: [
+                  {
+                    userId: ACTOR_ID,
+                    cumulativeRefundShare: { amount: '1.00', currency: 'USD' },
+                    remainingObligation: { amount: '2.34', currency: 'USD' },
+                  },
+                  {
+                    userId: MEMBER_B,
+                    cumulativeRefundShare: { amount: '1.00', currency: 'USD' },
+                    remainingObligation: { amount: '2.33', currency: 'USD' },
+                  },
+                  {
+                    userId: MEMBER_C,
+                    cumulativeRefundShare: { amount: '1.00', currency: 'USD' },
+                    remainingObligation: { amount: '2.33', currency: 'USD' },
+                  },
+                ],
+              },
+            }),
+          );
+        return jsonResponse(activeAllocation());
+      },
+      balancesGet: () => {
+        balanceReads += 1;
+        if (balanceReads === 2)
+          return new Promise<Response>((resolve) => {
+            finishOldBalances = resolve;
+          });
+        return balanceResponse(balanceReads === 1 ? '6.66' : '4.66');
+      },
+    });
+    const balances = screen.getByRole('region', { name: 'Member balances' });
+    await within(balances).findByText('6.66 USD');
+    await screen.findByText('Allocated');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Allocation for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Allocation for Groceries',
+    });
+    await within(panel).findByText(/Cumulative posted refunds: 0.00 USD/);
+    expect(allocationReads).toBe(2);
+    expect(balanceReads).toBe(1);
+
+    version = 2;
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() => expect(finishOldAllocation).toBeDefined());
+    await waitFor(() => expect(finishOldBalances).toBeDefined());
+    expect(
+      within(panel).queryByText(/Cumulative posted refunds: 0.00 USD/),
+    ).toBeNull();
+    version = 3;
+    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    await waitFor(() => expect(allocationReads).toBe(4));
+    await within(balances).findByText('4.66 USD');
+    await within(panel).findByText(/Cumulative posted refunds: 3.00 USD/);
+    expect(balanceCalls(calls)).toHaveLength(3);
+
+    await act(async () => {
+      finishOldAllocation!(
+        jsonResponse(activeAllocation({ transactionVersion: 2 })),
+      );
+      finishOldBalances!(balanceResponse('5.34'));
+    });
+    expect(within(balances).getByText('4.66 USD')).toBeInTheDocument();
+    expect(within(balances).queryByText('5.34 USD')).toBeNull();
+    expect(
+      within(panel).getByText(/Cumulative posted refunds: 3.00 USD/),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).queryByText(/Cumulative posted refunds: 0.00 USD/),
+    ).toBeNull();
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole('radio', { name: 'My transactions' }),
+      ).toBeEnabled(),
+    );
+    version = 2;
+    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole('radio', { name: 'Household feed' }),
+      ).toBeEnabled(),
+    );
+    expect(balanceCalls(calls)).toHaveLength(3);
+    expect(allocationReads).toBe(4);
+  });
+
+  it('reconciles cached refund impact on a newer background feed without probing unchanged rows', async () => {
+    const otherId = '40000000-0000-4000-8000-000000000009';
+    let expenseVersion = 1;
+    let allocationReads = 0;
+    let finishRefresh: ((response: Response) => void) | undefined;
+    const { calls } = renderSection({
+      transactionsGet: () =>
+        transactionPage([
+          householdExpense({ version: expenseVersion }),
+          householdExpense({ id: otherId, description: 'Other', version: 1 }),
+        ]),
+      transactionGet: (id) =>
+        jsonResponse(householdExpense({ id, version: expenseVersion })),
+      allocationsGet: (id) => {
+        if (id === otherId) return allocationNotFound();
+        allocationReads += 1;
+        if (allocationReads === 3)
+          return new Promise<Response>((resolve) => {
+            finishRefresh = resolve;
+          });
+        return jsonResponse(activeAllocation());
+      },
+    });
+    await screen.findByText('Groceries');
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.endsWith(`${otherId}/allocation`)),
+      ).toHaveLength(1),
+    );
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Allocation for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Allocation for Groceries',
+    });
+    await within(panel).findByText(/Cumulative posted refunds: 0.00 USD/);
+    expenseVersion = 2;
+    await waitFor(() =>
+      expect(
+        screen.getByRole('radio', { name: 'Household feed' }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() => expect(finishRefresh).toBeDefined());
+    expect(
+      within(panel).queryByText(/Cumulative posted refunds: 0.00 USD/),
+    ).toBeNull();
+    expect(
+      calls.filter(({ url }) => url.endsWith(`${otherId}/allocation`)),
+    ).toHaveLength(1);
+    await act(async () => {
+      finishRefresh!(
+        jsonResponse(
+          activeAllocation({
+            transactionVersion: 2,
+            impact: {
+              cumulativeRefundAmount: { amount: '2.00', currency: 'USD' },
+              payerCredit: { amount: '8.00', currency: 'USD' },
+              participants: [
+                {
+                  userId: ACTOR_ID,
+                  cumulativeRefundShare: { amount: '0.68', currency: 'USD' },
+                  remainingObligation: { amount: '2.66', currency: 'USD' },
+                },
+                {
+                  userId: MEMBER_B,
+                  cumulativeRefundShare: { amount: '0.66', currency: 'USD' },
+                  remainingObligation: { amount: '2.67', currency: 'USD' },
+                },
+                {
+                  userId: MEMBER_C,
+                  cumulativeRefundShare: { amount: '0.66', currency: 'USD' },
+                  remainingObligation: { amount: '2.67', currency: 'USD' },
+                },
+              ],
+            },
+          }),
+        ),
+      );
+    });
+    expect(
+      within(panel).getByText(/Cumulative posted refunds: 2.00 USD/),
+    ).toBeInTheDocument();
+    expenseVersion = 1;
+    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.includes('view=OWN&status=ALL')),
+      ).toHaveLength(2),
+    );
+    expect(
+      within(panel).getByText(/Cumulative posted refunds: 2.00 USD/),
+    ).toBeInTheDocument();
+    expect(
+      calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
+    ).toHaveLength(3);
+  });
+
+  it('rechecks a cached none only after a newer expense version reveals an external allocation', async () => {
+    const otherId = '40000000-0000-4000-8000-000000000009';
+    let version = 1;
+    let created = false;
+    const { calls } = renderSection({
+      transactionsGet: () =>
+        transactionPage([
+          householdExpense({ version }),
+          householdExpense({ id: otherId, description: 'Other', version: 1 }),
+        ]),
+      allocationsGet: (id) =>
+        id === EXPENSE_ID && created
+          ? jsonResponse(activeAllocation({ transactionVersion: 2 }))
+          : allocationNotFound(),
+      balancesGet: () =>
+        jsonResponse(
+          created
+            ? {
+                currencies: [
+                  {
+                    currency: 'USD',
+                    balances: [
+                      {
+                        userId: ACTOR_ID,
+                        membershipStatus: 'CURRENT',
+                        amount: '6.66',
+                      },
+                      {
+                        userId: MEMBER_B,
+                        membershipStatus: 'CURRENT',
+                        amount: '-6.66',
+                      },
+                    ],
+                  },
+                ],
+              }
+            : { currencies: [] },
+        ),
+    });
+    await screen.findByText('Groceries');
+    const reads = (id: string) =>
+      calls.filter(({ url }) => url.endsWith(`${id}/allocation`)).length;
+    await waitFor(() => expect(reads(EXPENSE_ID)).toBe(1));
+    await waitFor(() => expect(reads(otherId)).toBe(1));
+    const balances = screen.getByRole('region', { name: 'Member balances' });
+    await within(balances).findByText(/No member balances/);
+    expect(balanceCalls(calls)).toHaveLength(1);
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole('radio', { name: 'My transactions' }),
+      ).toBeEnabled(),
+    );
+    expect(reads(EXPENSE_ID)).toBe(1);
+    expect(balanceCalls(calls)).toHaveLength(1);
+    created = true;
+    version = 2;
+    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    await waitFor(() => expect(reads(EXPENSE_ID)).toBe(2));
+    expect(reads(otherId)).toBe(1);
+    expect(await screen.findByText('Allocated')).toBeInTheDocument();
+    await within(balances).findByText('6.66 USD');
+    expect(balanceCalls(calls)).toHaveLength(2);
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Allocation for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Allocation for Groceries',
+    });
+    await within(panel).findByText(/Cumulative posted refunds: 0.00 USD/);
+    expect(
+      within(panel).queryByRole('button', { name: 'Create allocation' }),
+    ).toBeNull();
+  });
+
+  it('refreshes balances after a newer source revokes its active allocation even when the impact probe returns 404', async () => {
+    let version = 1;
+    const { calls } = renderSection({
+      transactionsGet: () => transactionPage([householdExpense({ version })]),
+      allocationsGet: () =>
+        version === 1 ? jsonResponse(activeAllocation()) : allocationNotFound(),
+      balancesGet: () =>
+        jsonResponse(
+          version === 1
+            ? {
+                currencies: [
+                  {
+                    currency: 'USD',
+                    balances: [
+                      {
+                        userId: ACTOR_ID,
+                        membershipStatus: 'CURRENT',
+                        amount: '6.66',
+                      },
+                      {
+                        userId: MEMBER_B,
+                        membershipStatus: 'CURRENT',
+                        amount: '-6.66',
+                      },
+                    ],
+                  },
+                ],
+              }
+            : { currencies: [] },
+        ),
+    });
+    const balances = screen.getByRole('region', { name: 'Member balances' });
+    await within(balances).findByText('6.66 USD');
+    await screen.findByText('Groceries');
+    await screen.findByText('Allocated');
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
+      ).toHaveLength(1),
+    );
+    version = 2;
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await within(balances).findByText(/No member balances/);
+    expect(balanceCalls(calls)).toHaveLength(2);
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
+      ).toHaveLength(2),
+    );
+  });
+
+  it('reconciles an authorized off-page source detail without restoring impact from a late read', async () => {
+    const refund = transaction({
+      id: REFUND_ID,
+      kind: 'REFUND',
+      money: { amount: '2.00', currency: 'USD' },
+      refundOfTransactionId: EXPENSE_ID,
+      description: 'Old refund',
+      visibility: 'HOUSEHOLD',
+    });
+    let version = 1;
+    let reads = 0;
+    let releaseOld: ((response: Response) => void) | undefined;
+    const { calls } = renderSection({
+      transactionsGet: () => transactionPage([refund]),
+      transactionGet: (id) =>
+        jsonResponse(
+          id === EXPENSE_ID
+            ? householdExpense({ description: 'Older source', version })
+            : refund,
+        ),
+      allocationsGet: (id) => {
+        if (id !== EXPENSE_ID) throw new Error('off-page source only');
+        reads += 1;
+        if (reads === 2)
+          return new Promise<Response>((resolve) => {
+            releaseOld = resolve;
+          });
+        if (reads === 3)
+          return jsonResponse(
+            { code: 'NETWORK_ERROR', message: 'Could not check allocation.' },
+            503,
+          );
+        return jsonResponse(activeAllocation({ transactionVersion: version }));
+      },
+    });
+    await screen.findByText('Old refund');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Old refund' }),
+    );
+    fireEvent.click(
+      within(
+        await screen.findByRole('group', { name: 'Details for Old refund' }),
+      ).getByRole('button', { name: 'View source expense' }),
+    );
+    const sourcePanel = await screen.findByRole('group', {
+      name: 'Details for Older source',
+    });
+    await within(sourcePanel).findByRole('region', {
+      name: 'Current refund impact',
+    });
+    expect(reads).toBe(1);
+    version = 2;
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() => expect(releaseOld).toBeDefined());
+    expect(
+      within(sourcePanel).queryByRole('region', {
+        name: 'Current refund impact',
+      }),
+    ).toBeNull();
+    version = 3;
+    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    await waitFor(() => expect(reads).toBe(3));
+    await act(async () => {
+      releaseOld!(jsonResponse(activeAllocation({ transactionVersion: 2 })));
+    });
+    expect(
+      within(sourcePanel).queryByRole('region', {
+        name: 'Current refund impact',
+      }),
+    ).toBeNull();
+    expect(
+      within(sourcePanel).getByText('3', { selector: 'dd' }),
+    ).toBeInTheDocument();
+    expect(
+      calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
+    ).toHaveLength(3);
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.includes('view=HOUSEHOLD&status=ALL')),
+      ).toHaveLength(2),
+    );
+    expect(reads).toBe(3);
+    version = 4;
+    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    await waitFor(() => expect(reads).toBe(4));
+    await within(sourcePanel).findByRole('region', {
+      name: 'Current refund impact',
+    });
+    expect(
+      within(sourcePanel).getByText('4', { selector: 'dd' }),
+    ).toBeInTheDocument();
+  });
+
+  it('drops revoked impact, leaves failed refetch unknown, and retries on the next feed commit', async () => {
+    let version = 1;
+    let response: Response = jsonResponse(activeAllocation());
+    let reads = 0;
+    const { calls } = renderSection({
+      transactionsGet: () => transactionPage([householdExpense({ version })]),
+      transactionGet: () => jsonResponse(householdExpense({ version })),
+      allocationsGet: () => {
+        reads += 1;
+        return response;
+      },
+    });
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Details for Groceries' }),
+    );
+    await screen.findByRole('group', { name: 'Details for Groceries' });
+    await screen.findByRole('region', { name: 'Current refund impact' });
+    version = 2;
+    response = jsonResponse(
+      { code: 'NETWORK_ERROR', message: 'Could not check allocation.' },
+      503,
+    );
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() => expect(reads).toBe(2));
+    expect(
+      screen.queryByRole('region', { name: 'Current refund impact' }),
+    ).toBeNull();
+    expect(screen.getByText('2', { selector: 'dd' })).toBeInTheDocument();
+    version = 3;
+    response = allocationNotFound();
+    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    await waitFor(() => expect(reads).toBe(3));
+    expect(
+      screen.queryByRole('region', { name: 'Current refund impact' }),
+    ).toBeNull();
+    expect(
+      calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
+    ).toHaveLength(3);
+  });
+
+  it('ignores a delayed older allocation response after a newer feed projection', async () => {
+    let version = 1;
+    let read = 0;
+    let releaseOld: ((response: Response) => void) | undefined;
+    const { calls } = renderSection({
+      transactionsGet: () => transactionPage([householdExpense({ version })]),
+      allocationsGet: () => {
+        read += 1;
+        if (read === 1)
+          return new Promise<Response>((resolve) => {
+            releaseOld = resolve;
+          });
+        return jsonResponse(activeAllocation({ transactionVersion: 2 }));
+      },
+    });
+    await screen.findByText('Groceries');
+    await waitFor(() => expect(releaseOld).toBeDefined());
+    version = 2;
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() => expect(read).toBe(2));
+    await act(async () => {
+      releaseOld!(jsonResponse(activeAllocation({ transactionVersion: 1 })));
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Allocation for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Allocation for Groceries',
+    });
+    await within(panel).findByText(/Cumulative posted refunds: 0.00 USD/);
+    expect(within(panel).getByText(/2 — informational/)).toBeInTheDocument();
+    expect(
+      calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
+    ).toHaveLength(3);
+  });
+
+  it('clears scoped impact on refresh 401 and ignores a late earlier read', async () => {
+    let version = 1;
+    let read = 0;
+    let releaseOld: ((response: Response) => void) | undefined;
+    const { onSessionExpired } = renderSection({
+      transactionsGet: () => transactionPage([householdExpense({ version })]),
+      allocationsGet: () => {
+        read += 1;
+        if (read === 1)
+          return new Promise<Response>((resolve) => {
+            releaseOld = resolve;
+          });
+        if (read === 3)
+          return jsonResponse(
+            { code: 'UNAUTHENTICATED', message: 'Signed out.' },
+            401,
+          );
+        return jsonResponse(activeAllocation());
+      },
+    });
+    await screen.findByText('Groceries');
+    await waitFor(() => expect(releaseOld).toBeDefined());
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Allocation for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Allocation for Groceries',
+    });
+    await within(panel).findByText(/Cumulative posted refunds: 0.00 USD/);
+    version = 2;
+    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      releaseOld!(jsonResponse(activeAllocation()));
+    });
+    expect(
+      screen.queryByRole('group', { name: 'Allocation for Groceries' }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole('region', { name: 'Current refund impact' }),
+    ).toBeNull();
+  });
 
   it('offers the allocation action only for own posted household expenses', async () => {
     renderSection({
@@ -4103,10 +4894,194 @@ describe('allocations', () => {
         name: `${MEMBER_C_EMAIL} ${MEMBER_C}`,
       }),
     ).toBeChecked();
-    // The exact equal-division preview in minor units.
-    await within(panel).findByText(
-      'Divides the full 10.00 USD exactly: 3.34 USD + 3.33 USD + 3.33 USD across 3 participants.',
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
     );
+    await within(panel).findByText(/Server preview for expense version 0/);
+  });
+
+  it.each(['EQUAL', 'EXACT'] as const)(
+    'keeps the %s preview focused through deferred failure and retry without duplicate requests',
+    async (method) => {
+      const pending: Array<(response: Response) => void> = [];
+      const calls = renderSection({
+        transactionsGet: () => transactionPage([householdExpense()]),
+        allocationsGet: () => allocationNotFound(),
+        membersGet: () => jsonResponse({ members: ROSTER }),
+        allocationsPreview: () =>
+          new Promise<Response>((resolve) => {
+            pending.push(resolve);
+          }),
+      }).calls;
+      await screen.findByText('Groceries');
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Allocation for Groceries' }),
+      );
+      const panel = await screen.findByRole('group', {
+        name: 'Allocation for Groceries',
+      });
+      await within(panel).findByRole('checkbox', {
+        name: `${ACTOR_EMAIL} — you (payer) ${ACTOR_ID}`,
+      });
+      if (method === 'EXACT') {
+        fireEvent.click(
+          within(panel).getByRole('radio', { name: 'Exact amounts' }),
+        );
+        for (const member of ROSTER) {
+          fireEvent.change(
+            within(panel).getByRole('textbox', {
+              name: `Exact share for ${member.email} (USD; zero allowed)`,
+            }),
+            {
+              target: { value: member.userId === ACTOR_ID ? '10.00' : '0.00' },
+            },
+          );
+        }
+      }
+      const previewCalls = () =>
+        calls.filter(({ url }) => url.endsWith('/allocation/preview'));
+      const resultBody = {
+        transactionId: EXPENSE_ID,
+        transactionVersion: 0,
+        method,
+        refundPolicy: method === 'EQUAL' ? 'EQUAL_V1' : 'EXACT_JEFFERSON_V1',
+        originalAmount: { amount: '10.00', currency: 'USD' },
+        participants: ROSTER.map((member) => ({
+          userId: member.userId,
+          share: {
+            amount: member.userId === ACTOR_ID ? '10.00' : '0.00',
+            currency: 'USD',
+          },
+        })),
+        impact: {
+          cumulativeRefundAmount: { amount: '0.00', currency: 'USD' },
+          payerCredit: { amount: '10.00', currency: 'USD' },
+          participants: ROSTER.map((member) => ({
+            userId: member.userId,
+            cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+            remainingObligation: {
+              amount: member.userId === ACTOR_ID ? '10.00' : '0.00',
+              currency: 'USD',
+            },
+          })),
+        },
+      };
+      const preview = within(panel).getByRole('button', {
+        name: 'Preview current allocation',
+      });
+      preview.focus();
+      fireEvent.keyDown(preview, { key: 'Enter' });
+      fireEvent.click(preview);
+      await waitFor(() => expect(previewCalls()).toHaveLength(1));
+      const loading = within(panel).getByRole('button', {
+        name: 'Previewing…',
+      });
+      expect(loading).toHaveFocus();
+      expect(loading).toHaveAttribute('aria-disabled', 'true');
+      expect(loading).toBeEnabled();
+      expect(
+        within(panel).getByRole('button', { name: 'Create allocation' }),
+      ).toBeDisabled();
+      // A second Enter activation while pending must not start another POST.
+      fireEvent.keyDown(loading, { key: 'Enter' });
+      fireEvent.click(loading);
+      expect(previewCalls()).toHaveLength(1);
+      await act(async () => {
+        pending[0]!(
+          jsonResponse(
+            { code: 'PREVIEW_UNAVAILABLE', message: 'Try again.' },
+            503,
+          ),
+        );
+      });
+      expect(preview).toHaveFocus();
+      expect(preview).toHaveTextContent('Preview current allocation');
+      expect(
+        within(panel).getByRole('button', { name: 'Create allocation' }),
+      ).toBeDisabled();
+
+      fireEvent.click(preview);
+      await waitFor(() => expect(previewCalls()).toHaveLength(2));
+      expect(preview).toHaveFocus();
+      await act(async () => {
+        pending[1]!(jsonResponse(resultBody));
+      });
+      expect(preview).toHaveFocus();
+      expect(
+        within(panel).getByRole('button', { name: 'Create allocation' }),
+      ).toBeEnabled();
+
+      fireEvent.click(preview);
+      await waitFor(() => expect(previewCalls()).toHaveLength(3));
+      expect(
+        within(panel).getByRole('button', { name: 'Create allocation' }),
+      ).toBeDisabled();
+      const cancel = within(panel).getByRole('button', { name: 'Cancel' });
+      cancel.focus();
+      await act(async () => {
+        pending[2]!(jsonResponse(resultBody));
+      });
+      expect(cancel).toHaveFocus();
+      expect(preview).not.toHaveFocus();
+      expect(
+        within(panel).getByRole('button', { name: 'Create allocation' }),
+      ).toBeEnabled();
+    },
+  );
+
+  it('ignores a late preview after closing and reopening the split panel', async () => {
+    let finishPreview: ((response: Response) => void) | undefined;
+    const calls = renderSection({
+      transactionsGet: () => transactionPage([householdExpense()]),
+      allocationsGet: () => allocationNotFound(),
+      membersGet: () => jsonResponse({ members: ROSTER }),
+      allocationsPreview: () =>
+        new Promise<Response>((resolve) => {
+          finishPreview = resolve;
+        }),
+    }).calls;
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Allocation for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Allocation for Groceries',
+    });
+    await within(panel).findByRole('checkbox', {
+      name: `${ACTOR_EMAIL} — you (payer) ${ACTOR_ID}`,
+    });
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await waitFor(() =>
+      expect(
+        calls.filter(({ url }) => url.endsWith('/allocation/preview')),
+      ).toHaveLength(1),
+    );
+    fireEvent.click(within(panel).getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Allocation for Groceries' }),
+    );
+    const reopened = await screen.findByRole('group', {
+      name: 'Allocation for Groceries',
+    });
+    await within(reopened).findByRole('checkbox', {
+      name: `${ACTOR_EMAIL} — you (payer) ${ACTOR_ID}`,
+    });
+    await act(async () => {
+      finishPreview!(
+        jsonResponse({ code: 'FAILED', message: 'Stale preview' }, 503),
+      );
+    });
+    expect(within(reopened).queryByText('Stale preview')).toBeNull();
+    expect(
+      within(reopened).getByRole('button', {
+        name: 'Preview current allocation',
+      }),
+    ).toBeEnabled();
+    expect(
+      within(reopened).getByRole('button', { name: 'Create allocation' }),
+    ).toBeDisabled();
   });
 
   it('updates the exact preview as participants change and rejects an empty selection', async () => {
@@ -4122,16 +5097,19 @@ describe('allocations', () => {
     const panel = await screen.findByRole('group', {
       name: 'Allocation for Groceries',
     });
-    await within(panel).findByText(/3\.34 USD \+ 3\.33 USD \+ 3\.33 USD/);
-    // Omitting the payer updates the exact split to the two members.
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
+    // Omitting the payer invalidates the previous server preview.
     fireEvent.click(
       within(panel).getByRole('checkbox', {
         name: `${ACTOR_EMAIL} — you (payer) ${ACTOR_ID}`,
       }),
     );
-    await within(panel).findByText(
-      /5\.00 USD \+ 5\.00 USD across 2 participants/,
-    );
+    expect(
+      within(panel).queryByText(/Server preview for expense version/),
+    ).toBeNull();
     // Unchecking everyone rejects the empty draft locally.
     fireEvent.click(
       within(panel).getByRole('checkbox', {
@@ -4143,12 +5121,180 @@ describe('allocations', () => {
         name: `${MEMBER_C_EMAIL} ${MEMBER_C}`,
       }),
     );
+    expect(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    ).toBeDisabled();
+    expect(
+      within(panel).getByRole('button', { name: 'Create allocation' }),
+    ).toBeDisabled();
+    expect(allocationPostCalls(calls)).toHaveLength(0);
+  });
+
+  it('sends exact shares only after preview and invalidates them on amount change', async () => {
+    const exactShares = [
+      { userId: ACTOR_ID, share: { amount: '7.00', currency: 'USD' } },
+      { userId: MEMBER_B, share: { amount: '3.00', currency: 'USD' } },
+    ];
+    const impact = {
+      cumulativeRefundAmount: { amount: '1.00', currency: 'USD' },
+      payerCredit: { amount: '9.00', currency: 'USD' },
+      participants: [
+        {
+          userId: ACTOR_ID,
+          cumulativeRefundShare: { amount: '0.70', currency: 'USD' },
+          remainingObligation: { amount: '6.30', currency: 'USD' },
+        },
+        {
+          userId: MEMBER_B,
+          cumulativeRefundShare: { amount: '0.30', currency: 'USD' },
+          remainingObligation: { amount: '2.70', currency: 'USD' },
+        },
+      ],
+    };
+    const calls = renderSection({
+      transactionsGet: () => transactionPage([householdExpense()]),
+      allocationsGet: () => allocationNotFound(),
+      membersGet: () => jsonResponse({ members: ROSTER }),
+      allocationsPreview: () =>
+        jsonResponse({
+          transactionId: EXPENSE_ID,
+          transactionVersion: 0,
+          method: 'EXACT',
+          refundPolicy: 'EXACT_JEFFERSON_V1',
+          originalAmount: { amount: '10.00', currency: 'USD' },
+          participants: exactShares,
+          impact,
+        }),
+      allocationsPost: () =>
+        jsonResponse(
+          activeAllocation({
+            method: 'EXACT',
+            refundPolicy: 'EXACT_JEFFERSON_V1',
+            participants: exactShares,
+            impact,
+          }),
+          201,
+        ),
+    }).calls;
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Allocation for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Allocation for Groceries',
+    });
+    await within(panel).findByRole('checkbox', {
+      name: `${MEMBER_C_EMAIL} ${MEMBER_C}`,
+    });
+    fireEvent.click(
+      within(panel).getByRole('radio', { name: 'Exact amounts' }),
+    );
+    const memberCCheckbox = within(panel).getByRole('checkbox', {
+      name: `${MEMBER_C_EMAIL} ${MEMBER_C}`,
+    });
+    expect(memberCCheckbox).toBeChecked();
+    fireEvent.click(memberCCheckbox);
+    expect(memberCCheckbox).not.toBeChecked();
+    expect(
+      within(panel).queryByRole('textbox', {
+        name: `Exact share for ${MEMBER_C_EMAIL} (USD; zero allowed)`,
+      }),
+    ).toBeNull();
+    expect(
+      within(panel).getByRole('checkbox', {
+        name: `${ACTOR_EMAIL} — you (payer) ${ACTOR_ID}`,
+      }),
+    ).toBeChecked();
+    const payerInput = within(panel).getByRole('textbox', {
+      name: `Exact share for ${ACTOR_EMAIL} (USD; zero allowed)`,
+    });
+    const memberInput = within(panel).getByRole('textbox', {
+      name: `Exact share for ${MEMBER_B_EMAIL} (USD; zero allowed)`,
+    });
+    expect(payerInput).toBeEnabled();
+    expect(memberInput).toBeEnabled();
+    fireEvent.change(payerInput, { target: { value: '7.00' } });
+    fireEvent.change(memberInput, { target: { value: '2.99' } });
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    expect(
+      await within(panel).findByText(/Shares must total exactly 10.00 USD/),
+    ).toBeInTheDocument();
+    const fieldError = within(panel).getByText(
+      /Shares must total exactly 10.00 USD/,
+    );
+    expect(fieldError.id).toBe(`finance-allocation-field-error-${EXPENSE_ID}`);
+    expect(memberInput).toHaveAttribute('aria-describedby', fieldError.id);
+    expect(
+      calls.filter(({ url }) => url.endsWith('/allocation/preview')),
+    ).toHaveLength(0);
+    fireEvent.change(memberInput, { target: { value: '3.00' } });
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    expect(
+      await within(panel).findByText(/Highest-averages rounding/),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/remaining cost 6.30 USD/),
+    ).toBeInTheDocument();
+    fireEvent.change(memberInput, { target: { value: '3.01' } });
+    expect(
+      within(panel).getByRole('button', { name: 'Create allocation' }),
+    ).toBeDisabled();
+    fireEvent.change(memberInput, { target: { value: '3.00' } });
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
     fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
+    await waitFor(() => expect(allocationPostCalls(calls)).toHaveLength(1));
     expect(
-      await within(panel).findByText('Select at least one participant.'),
+      JSON.parse(String(allocationPostCalls(calls)[0]?.init?.body)),
+    ).toEqual({
+      expectedVersion: 0,
+      participantShares: exactShares,
+    });
+  });
+
+  it('blocks creation when a concurrent refund makes preview stale', async () => {
+    const calls = renderSection({
+      transactionsGet: () => transactionPage([householdExpense()]),
+      allocationsGet: () => allocationNotFound(),
+      membersGet: () => jsonResponse({ members: ROSTER }),
+      allocationsPreview: () =>
+        jsonResponse(
+          {
+            code: 'RESOURCE_VERSION_CONFLICT',
+            message: 'The expense changed.',
+          },
+          409,
+        ),
+    }).calls;
+    await screen.findByText('Groceries');
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Allocation for Groceries' }),
+    );
+    const panel = await screen.findByRole('group', {
+      name: 'Allocation for Groceries',
+    });
+    await within(panel).findByRole('checkbox', {
+      name: `${ACTOR_EMAIL} — you (payer) ${ACTOR_ID}`,
+    });
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    expect(
+      await within(panel).findByText(
+        /expense, refund group, or allocation changed/,
+      ),
     ).toBeInTheDocument();
+    expect(
+      within(panel).getByRole('button', { name: 'Create allocation' }),
+    ).toBeDisabled();
     expect(allocationPostCalls(calls)).toHaveLength(0);
   });
 
@@ -4169,6 +5315,10 @@ describe('allocations', () => {
     await waitFor(() =>
       expect(within(panel).getAllByRole('checkbox').length).toBeGreaterThan(0),
     );
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
     fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
@@ -4226,6 +5376,10 @@ describe('allocations', () => {
     await waitFor(() =>
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
     // From here the bounded client wait is under controlled timers.
     vi.useFakeTimers();
     try {
@@ -4308,6 +5462,10 @@ describe('allocations', () => {
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
     fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
+    fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
     expect(
@@ -4357,6 +5515,10 @@ describe('allocations', () => {
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
     fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
+    fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
     expect(
@@ -4394,6 +5556,7 @@ describe('allocations', () => {
             status: 'REVOKED',
             revokedAt: '2026-09-17T00:00:00Z',
             transactionVersion: 2,
+            impact: null,
           }),
         );
       },
@@ -4409,6 +5572,10 @@ describe('allocations', () => {
     await waitFor(() =>
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
     fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
@@ -4471,6 +5638,10 @@ describe('allocations', () => {
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
     fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
+    fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
     const posts = await waitFor(() => {
@@ -4507,6 +5678,17 @@ describe('allocations', () => {
                 share: { amount: '89.90', currency: 'BRL' },
               },
             ],
+            impact: {
+              cumulativeRefundAmount: { amount: '0.00', currency: 'BRL' },
+              payerCredit: { amount: '89.90', currency: 'BRL' },
+              participants: [
+                {
+                  userId: '22222222-3333-4444-8555-666666666666',
+                  cumulativeRefundShare: { amount: '0.00', currency: 'BRL' },
+                  remainingObligation: { amount: '89.90', currency: 'BRL' },
+                },
+              ],
+            },
           }),
         ),
     });
@@ -4579,6 +5761,7 @@ describe('allocations', () => {
       allocationsGet: () => jsonResponse(activeAllocation()),
     }).calls;
     await screen.findByText('Groceries');
+    await screen.findByText('Allocated');
     fireEvent.click(screen.getByRole('button', { name: 'Edit Groceries' }));
     fireEvent.change(
       screen.getByLabelText('Amount', {
@@ -4692,6 +5875,10 @@ describe('allocations', () => {
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
     fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
+    fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
     expect(
@@ -4734,6 +5921,10 @@ describe('allocations', () => {
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
     fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
+    fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
     expect(
@@ -4768,6 +5959,10 @@ describe('allocations', () => {
     await waitFor(() =>
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
     vi.useFakeTimers();
     try {
       fireEvent.click(
@@ -4864,6 +6059,10 @@ describe('allocations', () => {
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
     fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
+    fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
     await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
@@ -4900,6 +6099,10 @@ describe('allocations', () => {
     await waitFor(() =>
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
     fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
@@ -4967,6 +6170,10 @@ describe('allocations', () => {
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
     const balancesBefore = balanceCalls(calls).length;
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
     fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
@@ -5170,6 +6377,10 @@ describe('allocations', () => {
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
     fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
+    fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
     expect(
@@ -5211,6 +6422,10 @@ describe('allocations', () => {
     await waitFor(() =>
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
+    fireEvent.click(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    );
+    await within(panel).findByText(/Server preview for expense version 0/);
     fireEvent.click(
       within(panel).getByRole('button', { name: 'Create allocation' }),
     );
@@ -5293,9 +6508,9 @@ describe('allocations', () => {
     });
     // One minor unit to the first canonical participant and an exact zero
     // share to the last, with no invented rounding.
-    await within(panel).findByText(
-      'Divides the full 0.01 USD exactly: 0.01 USD + 0.00 USD across 2 participants.',
-    );
+    expect(
+      within(panel).getByRole('button', { name: 'Preview current allocation' }),
+    ).toBeEnabled();
   });
 
   it('refetches the roster each time the allocation creation form opens', async () => {

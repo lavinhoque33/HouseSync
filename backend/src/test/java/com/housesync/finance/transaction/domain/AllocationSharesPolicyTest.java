@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.housesync.finance.account.domain.SupportedCurrency;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -220,6 +221,79 @@ class AllocationSharesPolicyTest {
                 AllocationSharesPolicy.equalShares(
                     amount("10.00", SupportedCurrency.USD), SupportedCurrency.USD, 0))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void jeffersonMatchesExhaustivePriorityOracleAcrossSmallSharesAndEveryCurrency() {
+    List<UUID> ids =
+        List.of(
+            UUID.fromString("00000000-0000-0000-0000-000000000001"),
+            UUID.fromString("00000000-0000-0000-0000-000000000002"),
+            UUID.fromString("00000000-0000-0000-0000-000000000003"));
+    for (SupportedCurrency currency : ALL_CURRENCIES) {
+      for (int a = 0; a <= 6; a++)
+        for (int b = 0; b <= 6; b++)
+          for (int c = 0; c <= 6; c++) {
+            int total = a + b + c;
+            if (total == 0) continue;
+            int[] originals = {a, b, c};
+            List<BigDecimal> shares =
+                Arrays.stream(originals)
+                    .mapToObj(value -> BigDecimal.valueOf(value, currency.scale()))
+                    .toList();
+            List<int[]> priorities = new ArrayList<>();
+            for (int i = 0; i < 3; i++)
+              for (int k = 1; k <= originals[i]; k++) priorities.add(new int[] {i, k});
+            priorities.sort(
+                (left, right) -> {
+                  int comparison =
+                      Integer.compare(originals[right[0]] * left[1], originals[left[0]] * right[1]);
+                  return comparison != 0 ? comparison : Integer.compare(left[0], right[0]);
+                });
+            int[] expected = {0, 0, 0};
+            for (int refund = 0; refund <= total; refund++) {
+              if (refund != 0) expected[priorities.get(refund - 1)[0]]++;
+              List<BigDecimal> actual =
+                  AllocationSharesPolicy.refundShares(
+                      AllocationRefundPolicy.EXACT_JEFFERSON_V1,
+                      BigDecimal.valueOf(total, currency.scale()),
+                      shares,
+                      BigDecimal.valueOf(refund, currency.scale()),
+                      currency,
+                      ids);
+              for (int i = 0; i < 3; i++)
+                assertThat(actual.get(i))
+                    .isEqualByComparingTo(BigDecimal.valueOf(expected[i], currency.scale()));
+            }
+          }
+    }
+  }
+
+  @Test
+  void exactLargeProductsDoNotOverflowAndEqualPolicyKeepsOldRemainders() {
+    SupportedCurrency currency = SupportedCurrency.KWD;
+    List<UUID> ids =
+        List.of(
+            UUID.fromString("00000000-0000-0000-0000-000000000001"),
+            UUID.fromString("00000000-0000-0000-0000-000000000002"),
+            UUID.fromString("00000000-0000-0000-0000-000000000003"));
+    BigDecimal first = new BigDecimal("999999999999.998");
+    BigDecimal second = new BigDecimal("0.001");
+    BigDecimal total = first.add(second);
+    List<BigDecimal> originals = List.of(first, second, BigDecimal.ZERO.setScale(3));
+    assertThat(
+            AllocationSharesPolicy.refundShares(
+                AllocationRefundPolicy.EXACT_JEFFERSON_V1, total, originals, total, currency, ids))
+        .containsExactlyElementsOf(originals);
+    assertThat(
+            AllocationSharesPolicy.refundShares(
+                AllocationRefundPolicy.EQUAL_V1,
+                total,
+                originals,
+                new BigDecimal("0.002"),
+                currency,
+                ids))
+        .containsExactly(new BigDecimal("0.001"), new BigDecimal("0.001"), new BigDecimal("0.000"));
   }
 
   private static List<BigDecimal> subtract(List<BigDecimal> original, List<BigDecimal> refunds) {

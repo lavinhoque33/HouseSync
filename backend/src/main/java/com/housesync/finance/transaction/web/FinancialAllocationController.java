@@ -57,10 +57,9 @@ public class FinancialAllocationController {
     if (body == null) {
       throw new ValidationFailedException(
           Map.of(
-              "expectedVersion",
-              "Provide the current transaction version.",
-              "participantUserIds",
-              "Choose the participants sharing this expense."));
+              "expectedVersion", "Provide the current transaction version.",
+              "participantUserIds", "Provide exactly one participant list.",
+              "participantShares", "Provide exactly one participant list."));
     }
     CreateResult result =
         allocations.create(
@@ -72,8 +71,45 @@ public class FinancialAllocationController {
                 body.expectedVersion(),
                 body.expectedVersionPresent(),
                 body.participantUserIds(),
-                body.participantUserIdsPresent()));
+                body.participantUserIdsPresent(),
+                body.participantShares(),
+                body.participantSharesPresent()));
     return noCache(result.replayed() ? HttpStatus.OK : HttpStatus.CREATED, result.allocation());
+  }
+
+  @PostMapping(path = "/preview", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public ResponseEntity<FinancialAllocationPreviewResponse> preview(
+      @PathVariable UUID householdId,
+      @PathVariable UUID transactionId,
+      @RequestParam MultiValueMap<String, String> query,
+      @RequestHeader(name = "Idempotency-Key", required = false) String rawKey,
+      @RequestBody(required = false) CreateAllocationRequest body,
+      Authentication authentication) {
+    rejectQuery(query);
+    if (rawKey != null) {
+      throw new ValidationFailedException(
+          Map.of("idempotencyKey", "Preview does not accept a request key."));
+    }
+    if (body == null) {
+      throw new ValidationFailedException(
+          Map.of(
+              "expectedVersion", "Provide the current transaction version.",
+              "participantShares", "Provide exactly one participant list.",
+              "participantUserIds", "Provide exactly one participant list."));
+    }
+    return noCache(
+        HttpStatus.OK,
+        allocations.preview(
+            householdId,
+            transactionId,
+            actorId(authentication),
+            new CreateFields(
+                body.expectedVersion(),
+                body.expectedVersionPresent(),
+                body.participantUserIds(),
+                body.participantUserIdsPresent(),
+                body.participantShares(),
+                body.participantSharesPresent())));
   }
 
   @GetMapping

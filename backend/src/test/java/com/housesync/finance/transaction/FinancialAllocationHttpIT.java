@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -370,6 +371,85 @@ class FinancialAllocationHttpIT {
   }
 
   @Test
+  void legacyEqualUuidSpellingsReplayNormalizedIntentAfterRevocation() throws Exception {
+    Agent owner = signedInAgent("legacy-uuid-owner");
+    String householdId = createHousehold(owner, "Legacy UUID home");
+    Agent member = signedInAgent("legacy-uuid-member");
+    jdbc.update(
+        "INSERT INTO household_members (household_id, user_id, role) VALUES (?::uuid, ?::uuid, 'MEMBER')",
+        householdId,
+        member.userId());
+    String account = createAccount(owner, householdId, "Owner card", "CASH", "USD");
+    String expenseId =
+        created(
+            owner.createTransaction(
+                householdId,
+                UUID.randomUUID(),
+                datedEntry(
+                    account,
+                    "EXPENSE",
+                    "-10.00",
+                    "USD",
+                    "Legacy split",
+                    "2026-09-16",
+                    "HOUSEHOLD")));
+    String path = allocationPath(householdId, expenseId);
+    UUID key = UUID.randomUUID();
+    String legacyBody =
+        createBody("0", participantArray(member.userId().toUpperCase(Locale.ROOT), owner.userId()));
+    Resp created = owner.request("POST", path, legacyBody, owner.csrfToken, key);
+    assertThat(created.status).as(created.body).isEqualTo(201);
+    String allocationId = created.json().path("id").asText();
+    assertThat(created.json().path("method").asText()).isEqualTo("EQUAL");
+    assertThat(allocationCount(expenseId)).isEqualTo(1);
+    assertThat(allocationKeyCount(owner.userId(), householdId)).isEqualTo(1);
+
+    Resp normalizedReplay =
+        owner.request(
+            "POST",
+            path,
+            createBody("0", participantArray(owner.userId(), member.userId())),
+            owner.csrfToken,
+            key);
+    assertThat(normalizedReplay.status).as(normalizedReplay.body).isEqualTo(200);
+    assertThat(normalizedReplay.json().path("id").asText()).isEqualTo(allocationId);
+
+    Resp duplicateAfterNormalization =
+        owner.request(
+            "POST",
+            path,
+            createBody(
+                "0", participantArray(member.userId(), member.userId().toUpperCase(Locale.ROOT))),
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(duplicateAfterNormalization.status).isEqualTo(400);
+    assertThat(duplicateAfterNormalization.json().path("fieldErrors").propertyNames())
+        .containsExactly("participantUserIds");
+
+    Resp revoked =
+        owner.request(
+            "PATCH", path, "{\"expectedVersion\":1,\"status\":\"REVOKED\"}", owner.csrfToken, null);
+    assertThat(revoked.status).as(revoked.body).isEqualTo(200);
+    Resp replayAfterRevoke = owner.request("POST", path, legacyBody, owner.csrfToken, key);
+    assertThat(replayAfterRevoke.status).as(replayAfterRevoke.body).isEqualTo(200);
+    assertThat(replayAfterRevoke.json().path("id").asText()).isEqualTo(allocationId);
+    assertThat(replayAfterRevoke.json().path("status").asText()).isEqualTo("REVOKED");
+    assertThat(replayAfterRevoke.json().path("transactionVersion").asInt()).isEqualTo(2);
+    assertThat(allocationCount(expenseId)).isEqualTo(1);
+    assertThat(allocationKeyCount(owner.userId(), householdId)).isEqualTo(1);
+
+    Resp changedIntent =
+        owner.request(
+            "POST",
+            path,
+            createBody("1", participantArray(owner.userId(), member.userId())),
+            owner.csrfToken,
+            key);
+    assertThat(changedIntent.status).isEqualTo(409);
+    assertThat(changedIntent.json().path("code").asText()).isEqualTo("IDEMPOTENCY_CONFLICT");
+  }
+
+  @Test
   void versionExhaustedCreateFailsSafelyBeforeAnyKeyReservation() throws Exception {
     Agent owner = signedInAgent("exhaust-owner");
     String householdId = createHousehold(owner, "Exhaust home");
@@ -457,7 +537,12 @@ class FinancialAllocationHttpIT {
             "status",
             "createdAt",
             "revokedAt",
-            "transactionVersion");
+            "transactionVersion",
+            "method",
+            "refundPolicy",
+            "impact");
+    assertThat(allocation.path("method").asText()).isEqualTo("EQUAL");
+    assertThat(allocation.path("refundPolicy").asText()).isEqualTo("EQUAL_V1");
     assertThat(allocation.path("transactionId").asText()).isEqualTo(expenseId);
     assertThat(allocation.path("householdId").asText()).isEqualTo(householdId);
     assertThat(allocation.path("payerUserId").asText()).isEqualTo(owner.userId());
@@ -1079,6 +1164,129 @@ class FinancialAllocationHttpIT {
         "SELECT revoked_at FROM financial_transaction_allocations WHERE id = ?::uuid",
         java.time.Instant.class,
         UUID.fromString(allocationId));
+  }
+
+  @Test
+  void exactPreviewAndCreateProjectCompleteRefundAndPreserveOwnerOnlyRights() throws Exception {
+    Agent owner = signedInAgent("exact-owner");
+    String household = createHousehold(owner, "Exact home");
+    Agent member = signedInAgent("exact-member");
+    jdbc.update(
+        "INSERT INTO household_members (household_id, user_id, role)"
+            + " VALUES (?::uuid, ?::uuid, 'MEMBER')",
+        household,
+        member.userId());
+    String account = createAccount(owner, household, "Exact card", "CASH", "USD");
+    String expense =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                datedEntry(
+                    account,
+                    "EXPENSE",
+                    "-10.00",
+                    "USD",
+                    "Split purchase",
+                    "2026-09-16",
+                    "HOUSEHOLD")));
+    String refund =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                refundEntry(account, expense, "1.00", "USD", "Partial return")));
+    String path = allocationPath(household, expense);
+    String first = owner.userId();
+    String second = member.userId();
+    String body =
+        "{\"expectedVersion\":1,\"participantShares\":["
+            + "{\"userId\":\""
+            + second
+            + "\",\"share\":{\"amount\":\"3\",\"currency\":\"USD\"}},"
+            + "{\"userId\":\""
+            + first
+            + "\",\"share\":{\"amount\":\"7.00\",\"currency\":\"USD\"}}]}";
+    int originalVersion = version(expense);
+    Resp denied = member.post(path + "/preview", body, member.csrfToken);
+    assertThat(denied.status).isEqualTo(403);
+    assertThat(owner.post(path + "/preview", body, null).status).isEqualTo(403);
+    Resp invalidUnion =
+        owner.post(
+            path + "/preview",
+            "{\"expectedVersion\":1,\"participantUserIds\":[],\"participantShares\":[]}",
+            owner.csrfToken);
+    assertThat(invalidUnion.status).isEqualTo(400);
+    Resp invalidSum =
+        owner.post(path + "/preview", body.replace("\"3\"", "\"2\""), owner.csrfToken);
+    assertThat(invalidSum.status).isEqualTo(400);
+    assertThat(invalidSum.json().path("fieldErrors").has("participantShares")).isTrue();
+    Resp preview = owner.post(path + "/preview", body, owner.csrfToken);
+    assertThat(preview.status).as(preview.body).isEqualTo(200);
+    assertThat(preview.json().path("impact").path("cumulativeRefundAmount").path("amount").asText())
+        .isEqualTo("1.00");
+    assertThat(preview.json().path("impact").path("payerCredit").path("amount").asText())
+        .isEqualTo("9.00");
+    assertThat(version(expense)).isEqualTo(originalVersion);
+    assertThat(allocationCount(expense)).isZero();
+    assertThat(allocationKeyCount(owner.userId(), household)).isZero();
+    UUID key = UUID.randomUUID();
+    Resp created = owner.request("POST", path, body, owner.csrfToken, key);
+    assertThat(created.status).as(created.body).isEqualTo(201);
+    assertThat(created.json().path("method").asText()).isEqualTo("EXACT");
+    assertThat(created.json().path("refundPolicy").asText()).isEqualTo("EXACT_JEFFERSON_V1");
+    assertThat(created.json().path("impact")).isEqualTo(preview.json().path("impact"));
+    assertThat(member.get(path).json().path("impact")).isEqualTo(preview.json().path("impact"));
+    assertThat(owner.request("POST", path, body, owner.csrfToken, key).status).isEqualTo(200);
+    String normalized = body.replace("\"amount\":\"3\"", "\"amount\":\"3.00\"");
+    assertThat(owner.request("POST", path, normalized, owner.csrfToken, key).status).isEqualTo(200);
+    Resp changedExactIntent =
+        owner.request(
+            "POST",
+            path,
+            body.replace("\"amount\":\"3\"", "\"amount\":\"4\"")
+                .replace("\"amount\":\"7.00\"", "\"amount\":\"6.00\""),
+            owner.csrfToken,
+            key);
+    assertThat(changedExactIntent.status).isEqualTo(409);
+    assertThat(changedExactIntent.json().path("code").asText()).isEqualTo("IDEMPOTENCY_CONFLICT");
+    Resp noncanonicalExact =
+        owner.request(
+            "POST",
+            path,
+            body.replace(second, second.toUpperCase(Locale.ROOT)),
+            owner.csrfToken,
+            key);
+    assertThat(noncanonicalExact.status).isEqualTo(400);
+    assertThat(noncanonicalExact.json().path("fieldErrors").propertyNames())
+        .containsExactly("participantShares");
+    Resp balances = member.get("/api/households/" + household + "/member-balances");
+    assertThat(balances.status).isEqualTo(200);
+    Resp corrected =
+        owner.patchTransaction(
+            household,
+            refund,
+            "{\"expectedVersion\":0,\"money\":{\"amount\":\"2.00\",\"currency\":\"USD\"}}");
+    assertThat(corrected.status).as(corrected.body).isEqualTo(200);
+    assertThat(
+            member
+                .get(path)
+                .json()
+                .path("impact")
+                .path("cumulativeRefundAmount")
+                .path("amount")
+                .asText())
+        .isEqualTo("2.00");
+    assertThat(member.get(path).json().path("impact").path("participants").size()).isEqualTo(2);
+    assertThat(balances.body).contains("\"amount\":\"2.70\"");
+    Resp revoked =
+        owner.request(
+            "PATCH", path, "{\"expectedVersion\":3,\"status\":\"REVOKED\"}", owner.csrfToken, null);
+    assertThat(revoked.status).as(revoked.body).isEqualTo(200);
+    assertThat(revoked.json().path("impact").isNull()).isTrue();
+    assertThat(
+            owner.request("POST", path, body, owner.csrfToken, key).json().path("impact").isNull())
+        .isTrue();
   }
 
   private String allocationPath(String householdId, String transactionId) {

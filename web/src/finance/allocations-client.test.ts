@@ -5,6 +5,7 @@ import {
   fetchTransactionAllocation,
   patchAllocationRevoke,
   postTransactionAllocation,
+  previewTransactionAllocation,
   type CreateAllocationInput,
 } from '../auth/client';
 
@@ -42,6 +43,29 @@ function validAllocation(overrides: Record<string, unknown> = {}) {
     createdAt: '2026-09-16T12:00:00Z',
     revokedAt: null,
     transactionVersion: 1,
+    method: 'EQUAL',
+    refundPolicy: 'EQUAL_V1',
+    impact: {
+      cumulativeRefundAmount: { amount: '0.00', currency: 'USD' },
+      payerCredit: { amount: '10.00', currency: 'USD' },
+      participants: [
+        {
+          userId: PAYER_ID,
+          cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+          remainingObligation: { amount: '3.34', currency: 'USD' },
+        },
+        {
+          userId: PARTICIPANT_B,
+          cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+          remainingObligation: { amount: '3.33', currency: 'USD' },
+        },
+        {
+          userId: PARTICIPANT_C,
+          cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+          remainingObligation: { amount: '3.33', currency: 'USD' },
+        },
+      ],
+    },
     ...overrides,
   };
 }
@@ -90,12 +114,36 @@ describe('allocation typed client', () => {
     });
   });
 
-  it('rejects a response outside the exact 11-field allocation contract', async () => {
+  it('rejects a response outside the exact 14-field allocation contract', async () => {
     const malformed: Array<Record<string, unknown>> = [
       // Unsupported status.
       validAllocation({ status: 'PENDING' }),
       // ACTIVE must never carry a revokedAt timestamp.
       validAllocation({ revokedAt: '2026-09-17T00:00:00Z' }),
+      validAllocation({ method: 'EXACT', refundPolicy: 'EQUAL_V1' }),
+      validAllocation({ impact: null }),
+      validAllocation({
+        impact: {
+          ...validAllocation().impact,
+          participants: [
+            {
+              userId: PAYER_ID,
+              cumulativeRefundShare: { amount: '0.01', currency: 'USD' },
+              remainingObligation: { amount: '3.33', currency: 'USD' },
+            },
+            {
+              userId: PARTICIPANT_B,
+              cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+              remainingObligation: { amount: '3.33', currency: 'USD' },
+            },
+            {
+              userId: PARTICIPANT_C,
+              cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+              remainingObligation: { amount: '3.33', currency: 'USD' },
+            },
+          ],
+        },
+      }),
       // REVOKED must carry a revokedAt timestamp.
       validAllocation({ status: 'REVOKED' }),
       // Shares are never negative.
@@ -167,7 +215,7 @@ describe('allocation typed client', () => {
       validAllocation({ transactionVersion: 2147483648 }),
       // Missing recorded timestamp.
       { ...validAllocation(), createdAt: undefined },
-      // Extra top-level field: the DTO is exactly 11 fields.
+      // Extra top-level field: the DTO is exactly 14 fields.
       {
         ...validAllocation(),
         roster: [],
@@ -206,6 +254,22 @@ describe('allocation typed client', () => {
               share: { amount: '0.00', currency: 'USD' },
             },
           ],
+          impact: {
+            cumulativeRefundAmount: { amount: '0.00', currency: 'USD' },
+            payerCredit: { amount: '0.01', currency: 'USD' },
+            participants: [
+              {
+                userId: PAYER_ID,
+                cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+                remainingObligation: { amount: '0.01', currency: 'USD' },
+              },
+              {
+                userId: PARTICIPANT_B,
+                cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+                remainingObligation: { amount: '0.00', currency: 'USD' },
+              },
+            ],
+          },
         }),
       ),
     );
@@ -253,6 +317,306 @@ describe('allocation typed client', () => {
       CSRF,
     );
     expect(replayed.transactionVersion).toBe(2);
+  });
+
+  it('previews exact USD A7/B3 with a cumulative 1.00 refund, CSRF and no durable key', async () => {
+    const input: CreateAllocationInput = {
+      expectedVersion: 0,
+      participantShares: [
+        { userId: PAYER_ID, share: { amount: '7.00', currency: 'USD' } },
+        { userId: PARTICIPANT_B, share: { amount: '3.00', currency: 'USD' } },
+      ],
+    };
+    const expected = {
+      transactionId: TRANSACTION_ID,
+      transactionVersion: 0,
+      method: 'EXACT',
+      refundPolicy: 'EXACT_JEFFERSON_V1',
+      originalAmount: { amount: '10.00', currency: 'USD' },
+      participants: input.participantShares,
+      impact: {
+        cumulativeRefundAmount: { amount: '1.00', currency: 'USD' },
+        payerCredit: { amount: '9.00', currency: 'USD' },
+        participants: [
+          {
+            userId: PAYER_ID,
+            cumulativeRefundShare: { amount: '0.70', currency: 'USD' },
+            remainingObligation: { amount: '6.30', currency: 'USD' },
+          },
+          {
+            userId: PARTICIPANT_B,
+            cumulativeRefundShare: { amount: '0.30', currency: 'USD' },
+            remainingObligation: { amount: '2.70', currency: 'USD' },
+          },
+        ],
+      },
+    };
+    const calls = stubFetch(() => jsonResponse(expected));
+    expect(
+      await previewTransactionAllocation(
+        HOUSEHOLD_ID,
+        TRANSACTION_ID,
+        input,
+        CSRF,
+      ),
+    ).toEqual(expected);
+    expect(calls[0]?.url).toBe(`${ALLOCATION_URL}/preview`);
+    expect(calls[0]?.init?.method).toBe('POST');
+    expect(calls[0]?.init?.headers).toMatchObject({
+      'X-CSRF-TOKEN': CSRF.token,
+    });
+    expect(calls[0]?.init?.headers).not.toHaveProperty('Idempotency-Key');
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual(input);
+    const createCalls = stubFetch(() =>
+      jsonResponse(
+        {
+          ...validAllocation({
+            participants: expected.participants,
+            method: 'EXACT',
+            refundPolicy: 'EXACT_JEFFERSON_V1',
+            impact: expected.impact,
+          }),
+        },
+        201,
+      ),
+    );
+    expect(
+      (
+        await postTransactionAllocation(
+          HOUSEHOLD_ID,
+          TRANSACTION_ID,
+          input,
+          '11111111-2222-4333-8444-555555555555',
+          CSRF,
+        )
+      ).method,
+    ).toBe('EXACT');
+    expect(JSON.parse(String(createCalls[0]?.init?.body))).toEqual(input);
+  });
+
+  it.each([
+    ['JPY', '6', '2', '4', '1', '1', '2', '0', '0'],
+    [
+      'KWD',
+      '0.006',
+      '0.002',
+      '0.004',
+      '0.001',
+      '0.001',
+      '0.002',
+      '0.000',
+      '0.000',
+    ],
+    ['CAD', '0.03', '0.01', '0.02', '0.00', '0.01', '0.01', '0.00', '0.00'],
+  ])(
+    'accepts %s exact-scale zero shares and conserved preview impact',
+    async (currency, total, refunded, a, b, c, refundA, refundB, refundC) => {
+      const units = (value: string) => BigInt(value.replace('.', ''));
+      const value = (amount: bigint) => {
+        const scale = currency === 'JPY' ? 0 : currency === 'KWD' ? 3 : 2;
+        const digits = amount.toString().padStart(scale + 1, '0');
+        return scale
+          ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}`
+          : digits;
+      };
+      const shares = [a, b, c];
+      const refunds = [refundA, refundB, refundC];
+      const code = currency as 'JPY' | 'KWD' | 'CAD';
+      const participants = [PAYER_ID, PARTICIPANT_B, PARTICIPANT_C].map(
+        (userId, index) => ({
+          userId,
+          share: { amount: shares[index]!, currency: code },
+        }),
+      );
+      const preview = {
+        transactionId: TRANSACTION_ID,
+        transactionVersion: 0,
+        method: 'EXACT',
+        refundPolicy: 'EXACT_JEFFERSON_V1',
+        originalAmount: { amount: total, currency },
+        participants,
+        impact: {
+          cumulativeRefundAmount: { amount: refunded, currency },
+          payerCredit: {
+            amount: value(units(total) - units(refunded)),
+            currency,
+          },
+          participants: participants.map(({ userId }, index) => ({
+            userId,
+            cumulativeRefundShare: { amount: refunds[index], currency },
+            remainingObligation: {
+              amount: value(units(shares[index]!) - units(refunds[index]!)),
+              currency,
+            },
+          })),
+        },
+      };
+      stubFetch(() => jsonResponse(preview));
+      expect(
+        (
+          await previewTransactionAllocation(
+            HOUSEHOLD_ID,
+            TRANSACTION_ID,
+            { expectedVersion: 0, participantShares: participants },
+            CSRF,
+          )
+        ).impact,
+      ).toEqual(preview.impact);
+    },
+  );
+
+  it('rejects inconsistent current refund impact and revoked impact on replay', async () => {
+    stubFetch(() =>
+      jsonResponse(
+        validAllocation({
+          status: 'REVOKED',
+          revokedAt: '2026-09-17T00:00:00Z',
+          impact: null,
+        }),
+        200,
+      ),
+    );
+    const replay = await postTransactionAllocation(
+      HOUSEHOLD_ID,
+      TRANSACTION_ID,
+      CREATE_INPUT,
+      '11111111-2222-4333-8444-555555555555',
+      CSRF,
+    );
+    expect(replay.impact).toBeNull();
+    stubFetch(() =>
+      jsonResponse(
+        validAllocation({
+          impact: {
+            ...validAllocation().impact,
+            payerCredit: { amount: '8.00', currency: 'USD' },
+          },
+        }),
+      ),
+    );
+    await expect(
+      fetchTransactionAllocation(HOUSEHOLD_ID, TRANSACTION_ID),
+    ).rejects.toMatchObject({
+      message: 'The server returned an unexpected allocation response.',
+    });
+  });
+
+  it('accepts payer-absent, payer-only, and zero-share exact allocations without inventing a payer portion', async () => {
+    const examples = [
+      {
+        participants: [
+          {
+            userId: PARTICIPANT_B,
+            share: { amount: '10.00', currency: 'USD' },
+          },
+        ],
+        impact: {
+          cumulativeRefundAmount: { amount: '0.00', currency: 'USD' },
+          payerCredit: { amount: '10.00', currency: 'USD' },
+          participants: [
+            {
+              userId: PARTICIPANT_B,
+              cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+              remainingObligation: { amount: '10.00', currency: 'USD' },
+            },
+          ],
+        },
+      },
+      {
+        participants: [
+          { userId: PAYER_ID, share: { amount: '10.00', currency: 'USD' } },
+        ],
+        impact: {
+          cumulativeRefundAmount: { amount: '0.00', currency: 'USD' },
+          payerCredit: { amount: '10.00', currency: 'USD' },
+          participants: [
+            {
+              userId: PAYER_ID,
+              cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+              remainingObligation: { amount: '10.00', currency: 'USD' },
+            },
+          ],
+        },
+      },
+      {
+        participants: [
+          { userId: PAYER_ID, share: { amount: '10.00', currency: 'USD' } },
+          { userId: PARTICIPANT_B, share: { amount: '0.00', currency: 'USD' } },
+        ],
+        impact: {
+          cumulativeRefundAmount: { amount: '0.00', currency: 'USD' },
+          payerCredit: { amount: '10.00', currency: 'USD' },
+          participants: [
+            {
+              userId: PAYER_ID,
+              cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+              remainingObligation: { amount: '10.00', currency: 'USD' },
+            },
+            {
+              userId: PARTICIPANT_B,
+              cumulativeRefundShare: { amount: '0.00', currency: 'USD' },
+              remainingObligation: { amount: '0.00', currency: 'USD' },
+            },
+          ],
+        },
+      },
+    ];
+    for (const example of examples) {
+      stubFetch(() =>
+        jsonResponse(
+          validAllocation({
+            method: 'EXACT',
+            refundPolicy: 'EXACT_JEFFERSON_V1',
+            ...example,
+          }),
+        ),
+      );
+      const resource = await fetchTransactionAllocation(
+        HOUSEHOLD_ID,
+        TRANSACTION_ID,
+      );
+      expect(resource.participants).toEqual(example.participants);
+      expect(resource.impact).toEqual(example.impact);
+    }
+  });
+
+  it('rejects stale preview and preview response drift before a create key is issued', async () => {
+    stubFetch(() =>
+      jsonResponse(
+        { code: 'RESOURCE_VERSION_CONFLICT', message: 'Refund changed.' },
+        409,
+      ),
+    );
+    await expect(
+      previewTransactionAllocation(
+        HOUSEHOLD_ID,
+        TRANSACTION_ID,
+        CREATE_INPUT,
+        CSRF,
+      ),
+    ).rejects.toMatchObject({ code: 'RESOURCE_VERSION_CONFLICT' });
+    const allocation = validAllocation();
+    stubFetch(() =>
+      jsonResponse({
+        transactionId: allocation.transactionId,
+        transactionVersion: allocation.transactionVersion,
+        method: allocation.method,
+        refundPolicy: allocation.refundPolicy,
+        originalAmount: allocation.originalAmount,
+        participants: allocation.participants,
+        impact: null,
+      }),
+    );
+    await expect(
+      previewTransactionAllocation(
+        HOUSEHOLD_ID,
+        TRANSACTION_ID,
+        CREATE_INPUT,
+        CSRF,
+      ),
+    ).rejects.toMatchObject({
+      message: 'The server returned an unexpected allocation response.',
+    });
   });
 
   it('preserves safe creation errors including allocation conflicts', async () => {
@@ -344,7 +708,15 @@ describe('allocation typed client', () => {
   it('patches a revoke with only expectedVersion and REVOKED, no key header', async () => {
     const calls = stubFetch((url) => {
       expect(url).toBe(ALLOCATION_URL);
-      return jsonResponse(validAllocation({ transactionVersion: 3 }), 200);
+      return jsonResponse(
+        validAllocation({
+          transactionVersion: 3,
+          status: 'REVOKED',
+          revokedAt: '2026-09-17T00:00:00Z',
+          impact: null,
+        }),
+        200,
+      );
     });
     const revoked = await patchAllocationRevoke(
       HOUSEHOLD_ID,

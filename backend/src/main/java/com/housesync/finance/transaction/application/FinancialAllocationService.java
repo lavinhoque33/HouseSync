@@ -2,11 +2,14 @@ package com.housesync.finance.transaction.application;
 
 import static com.housesync.finance.transaction.domain.AllocationSharesPolicy.CANONICAL_USER_ORDER;
 import static com.housesync.finance.transaction.domain.AllocationSharesPolicy.equalShares;
+import static com.housesync.finance.transaction.domain.AllocationSharesPolicy.refundShares;
 
 import com.housesync.finance.account.domain.SupportedCurrency;
 import com.housesync.finance.account.persistence.FinancialAccountRepository;
 import com.housesync.finance.account.web.FinancialAccountExceptions.FinancialAccountNotFoundException;
 import com.housesync.finance.categorization.application.CategorizationReviewService;
+import com.housesync.finance.transaction.domain.AllocationMethod;
+import com.housesync.finance.transaction.domain.AllocationRefundPolicy;
 import com.housesync.finance.transaction.domain.AllocationStatus;
 import com.housesync.finance.transaction.domain.TransactionKind;
 import com.housesync.finance.transaction.domain.TransactionStatus;
@@ -19,7 +22,11 @@ import com.housesync.finance.transaction.persistence.FinancialTransactionAllocat
 import com.housesync.finance.transaction.persistence.FinancialTransactionAllocationRepository;
 import com.housesync.finance.transaction.persistence.FinancialTransactionEntity;
 import com.housesync.finance.transaction.persistence.FinancialTransactionRepository;
+import com.housesync.finance.transaction.web.FinancialAllocationPreviewResponse;
+import com.housesync.finance.transaction.web.FinancialAllocationRequests.ExactShareRequest;
 import com.housesync.finance.transaction.web.FinancialAllocationResponse;
+import com.housesync.finance.transaction.web.FinancialAllocationResponse.ImpactParticipantResponse;
+import com.housesync.finance.transaction.web.FinancialAllocationResponse.ImpactResponse;
 import com.housesync.finance.transaction.web.FinancialAllocationResponse.MoneyResponse;
 import com.housesync.finance.transaction.web.FinancialAllocationResponse.ParticipantResponse;
 import com.housesync.finance.transaction.web.FinancialTransactionExceptions.AllocationConflictException;
@@ -52,21 +59,16 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Basic allocation use cases (ADR 0007): one active equal allocation per owner-created
- * {@code POSTED} {@code HOUSEHOLD} expense, frozen participant shares, durable create idempotency,
- * owner-only revoke, and derived per-currency member balances.
- *
- * <p>Locking follows the documented order: the household lifecycle lock first, then the expense's
- * account, then the expense row, then linked refund rows (held by the transaction service), then
- * the allocation row. Balances read under the lifecycle lock from one consistent authorized
- * snapshot; refund shares are derived at read time from the cumulative posted refund magnitude with
- * the same equal-division rule and are never persisted.
+ * Allocation creation, preview, revocation and zero-sum balances. Lifecycle/account/expense/group
+ * locks precede allocation locks. Original shares are immutable; current cumulative refund shares
+ * are derived from the allocation's persisted policy rather than individual refund records.
  */
 @Service
 public class FinancialAllocationService {
@@ -110,7 +112,9 @@ public class FinancialAllocationService {
       Integer expectedVersion,
       boolean expectedVersionPresent,
       List<String> rawParticipantUserIds,
-      boolean participantUserIdsPresent) {}
+      boolean participantUserIdsPresent,
+      List<ExactShareRequest> rawParticipantShares,
+      boolean participantSharesPresent) {}
 
   public record CreateResult(FinancialAllocationResponse allocation, boolean replayed) {}
 
@@ -118,13 +122,16 @@ public class FinancialAllocationService {
   public CreateResult create(
       UUID householdId, UUID transactionId, UUID actorId, UUID idempotencyKey, CreateFields raw) {
     CreateValues values = validateCreate(raw);
+    // Group locks precede allocation locks; impact is calculated from the entire refund group.
     households.lockForFinance(householdId, actorId);
 
     FinancialAllocationIdempotencyKey key =
         new FinancialAllocationIdempotencyKey(
             actorId, householdId, CREATE_OPERATION, idempotencyKey);
     String fingerprint =
-        fingerprint(transactionId, values.expectedVersion(), values.participants());
+        values.method() == AllocationMethod.EQUAL
+            ? fingerprint(transactionId, values.expectedVersion(), values.participants())
+            : exactFingerprint(transactionId, values);
     var existing = idempotency.findById(key);
     if (existing.isPresent()) {
       if (!existing.get().getRequestFingerprint().equals(fingerprint)) {
@@ -145,7 +152,7 @@ public class FinancialAllocationService {
           transactions
               .findOwnedScoped(householdId, allocation.getTransactionId(), actorId)
               .orElseThrow(TransactionNotFoundException::new);
-      return new CreateResult(toResponse(allocation, expense.getVersion()), true);
+      return new CreateResult(toResponse(allocation, expense.getVersion(), householdId), true);
     }
 
     // Membership is already confirmed under the lifecycle lock; a resource miss is a
@@ -172,6 +179,7 @@ public class FinancialAllocationService {
         transactions
             .findOwnedForUpdate(householdId, transactionId, actorId)
             .orElseThrow(TransactionNotFoundException::new);
+    transactions.findGroupForUpdate(transactionId);
 
     // The roster bounds the participant set, and the lifecycle lock held here means the
     // checked membership cannot be removed before the allocation commits.
@@ -179,7 +187,11 @@ public class FinancialAllocationService {
     for (UUID participant : values.participants()) {
       if (!roster.contains(participant)) {
         throw new ValidationFailedException(
-            Map.of("participantUserIds", "Choose the participants sharing this expense."));
+            Map.of(
+                values.method() == AllocationMethod.EXACT
+                    ? "participantShares"
+                    : "participantUserIds",
+                "Choose current household participants."));
       }
     }
     if (allocations.findActiveForUpdate(transactionId, AllocationStatus.ACTIVE).isPresent()) {
@@ -197,7 +209,10 @@ public class FinancialAllocationService {
     List<UUID> ordered = values.participants();
     SupportedCurrency currency = expense.getCurrency();
     BigDecimal magnitude = expense.getAmount().abs();
-    List<BigDecimal> shares = equalShares(magnitude, currency, ordered.size());
+    List<BigDecimal> shares =
+        values.method() == AllocationMethod.EQUAL
+            ? equalShares(magnitude, currency, ordered.size())
+            : validatedExactShares(values, currency, magnitude);
     Instant now = now();
     FinancialTransactionAllocationEntity allocation =
         new FinancialTransactionAllocationEntity(
@@ -207,6 +222,10 @@ public class FinancialAllocationService {
             expense.getOwnerUserId(),
             currency,
             magnitude,
+            values.method(),
+            values.method() == AllocationMethod.EQUAL
+                ? AllocationRefundPolicy.EQUAL_V1
+                : AllocationRefundPolicy.EXACT_JEFFERSON_V1,
             now);
     allocations.save(allocation);
     for (int index = 0; index < ordered.size(); index++) {
@@ -223,11 +242,12 @@ public class FinancialAllocationService {
     transactions.flush();
     allocations.flush();
     idempotency.flush();
-    return new CreateResult(toResponse(allocation, expense.getVersion()), false);
+    return new CreateResult(toResponse(allocation, expense.getVersion(), householdId), false);
   }
 
-  @Transactional(readOnly = true)
+  @Transactional
   public FinancialAllocationResponse get(UUID householdId, UUID transactionId, UUID actorId) {
+    households.lockForFinance(householdId, actorId);
     FinancialTransactionEntity expense =
         transactions
             .findVisibleScoped(householdId, transactionId, actorId)
@@ -243,7 +263,73 @@ public class FinancialAllocationService {
         allocations
             .findActiveByTransactionId(transactionId, AllocationStatus.ACTIVE)
             .orElseThrow(AllocationNotFoundException::new);
-    return toResponse(allocation, expense.getVersion());
+    return toResponse(allocation, expense.getVersion(), householdId);
+  }
+
+  /**
+   * Read-only calculation under the same lifecycle/account/expense/refund-group ordering as create.
+   */
+  @Transactional
+  public FinancialAllocationPreviewResponse preview(
+      UUID householdId, UUID transactionId, UUID actorId, CreateFields raw) {
+    CreateValues values = validateCreate(raw);
+    households.lockForFinance(householdId, actorId);
+    FinancialTransactionEntity peek =
+        transactions
+            .findVisibleScoped(householdId, transactionId, actorId)
+            .orElseThrow(TransactionNotFoundException::new);
+    if (!peek.getOwnerUserId().equals(actorId)) throw new TransactionForbiddenException();
+    if (peek.getKind() != TransactionKind.EXPENSE
+        || peek.getStatus() != TransactionStatus.POSTED
+        || !HOUSEHOLD_VISIBILITY.equals(peek.getVisibility()))
+      throw new AllocationConflictException();
+    accounts
+        .findOwnedForUpdate(householdId, peek.getAccountId(), actorId)
+        .orElseThrow(FinancialAccountNotFoundException::new);
+    FinancialTransactionEntity expense =
+        transactions
+            .findOwnedForUpdate(householdId, transactionId, actorId)
+            .orElseThrow(TransactionNotFoundException::new);
+    List<FinancialTransactionEntity> group = transactions.findGroupForUpdate(transactionId);
+    Set<UUID> roster = households.currentMemberUserIds(householdId);
+    if (!roster.containsAll(values.participants())) {
+      throw new ValidationFailedException(
+          Map.of(
+              values.method() == AllocationMethod.EXACT
+                  ? "participantShares"
+                  : "participantUserIds",
+              "Choose current household participants."));
+    }
+    if (allocations.findActiveForUpdate(transactionId, AllocationStatus.ACTIVE).isPresent())
+      throw new AllocationConflictException();
+    if (expense.getVersion() != values.expectedVersion())
+      throw new TransactionVersionConflictException();
+    if (expense.getVersion() == Integer.MAX_VALUE) throw new TransactionVersionExhaustedException();
+    SupportedCurrency currency = expense.getCurrency();
+    BigDecimal magnitude = expense.getAmount().abs();
+    List<BigDecimal> shares =
+        values.method() == AllocationMethod.EQUAL
+            ? equalShares(magnitude, currency, values.participants().size())
+            : validatedExactShares(values, currency, magnitude);
+    AllocationRefundPolicy policy =
+        values.method() == AllocationMethod.EQUAL
+            ? AllocationRefundPolicy.EQUAL_V1
+            : AllocationRefundPolicy.EXACT_JEFFERSON_V1;
+    List<ParticipantResponse> frozen =
+        participantResponses(values.participants(), shares, currency);
+    BigDecimal refunded =
+        group.stream()
+            .filter(row -> row.getStatus() == TransactionStatus.POSTED)
+            .map(FinancialTransactionEntity::getAmount)
+            .reduce(BigDecimal.ZERO, BigDecimal::add);
+    return new FinancialAllocationPreviewResponse(
+        transactionId,
+        expense.getVersion(),
+        values.method().name(),
+        policy.name(),
+        money(magnitude, currency),
+        frozen,
+        impact(magnitude, refunded, policy, frozen, expense.getOwnerUserId(), currency));
   }
 
   /** Revoke input: exactly {@code expectedVersion} plus {@code status: "REVOKED"}. */
@@ -293,7 +379,7 @@ public class FinancialAllocationService {
     transactions.saveAndFlush(expense);
     allocations.save(allocation);
     allocations.flush();
-    return toResponse(allocation, expense.getVersion());
+    return toResponse(allocation, expense.getVersion(), householdId);
   }
 
   /**
@@ -306,11 +392,17 @@ public class FinancialAllocationService {
   @Transactional
   public MemberBalancesResponse memberBalances(UUID householdId, UUID actorId) {
     households.lockForFinance(householdId, actorId);
+    Map<String, Map<UUID, BigDecimal>> ledger = allocationBalanceDeltasLocked(householdId);
+    Set<UUID> currentMembers = households.currentMemberUserIds(householdId);
+    return renderBalances(ledger, currentMembers);
+  }
+
+  /** Raw zero-sum deltas; caller MUST hold the household finance lifecycle lock. */
+  public Map<String, Map<UUID, BigDecimal>> allocationBalanceDeltasLocked(UUID householdId) {
     List<FinancialTransactionAllocationEntity> actives =
         allocations.findActiveByHouseholdId(householdId, AllocationStatus.ACTIVE);
-    if (actives.isEmpty()) {
-      return new MemberBalancesResponse(List.of());
-    }
+    Map<String, Map<UUID, BigDecimal>> ledger = new TreeMap<>();
+    if (actives.isEmpty()) return ledger;
     List<UUID> allocationIds =
         actives.stream().map(FinancialTransactionAllocationEntity::getId).toList();
     Map<UUID, List<FinancialTransactionAllocationParticipantEntity>> frozen =
@@ -326,10 +418,6 @@ public class FinancialAllocationService {
     Map<UUID, BigDecimal> postedRefundSums =
         transactions.sumPostedRefunds(expenseIds, TransactionStatus.POSTED).stream()
             .collect(Collectors.toMap(row -> (UUID) row[0], row -> (BigDecimal) row[1]));
-    Set<UUID> currentMembers = households.currentMemberUserIds(householdId);
-
-    // Code-ordered ledger of exact-scale obligations per user per currency.
-    Map<String, Map<UUID, BigDecimal>> ledger = new TreeMap<>();
     for (FinancialTransactionAllocationEntity allocation : actives) {
       FinancialTransactionEntity expense = expensesById.get(allocation.getTransactionId());
       if (expense == null
@@ -349,15 +437,31 @@ public class FinancialAllocationService {
       BigDecimal refunded = postedRefundSums.getOrDefault(expense.getId(), BigDecimal.ZERO);
       addBalance(
           ledger, currency.name(), allocation.getPayerUserId(), magnitude.subtract(refunded));
-      List<BigDecimal> refundShares = equalShares(refunded, currency, ordered.size());
+      List<BigDecimal> reversed =
+          refundShares(
+              allocation.getRefundPolicy(),
+              magnitude,
+              ordered.stream()
+                  .map(FinancialTransactionAllocationParticipantEntity::getShare)
+                  .toList(),
+              refunded,
+              currency,
+              ordered.stream()
+                  .map(FinancialTransactionAllocationParticipantEntity::getUserId)
+                  .toList());
       for (int index = 0; index < ordered.size(); index++) {
         // A participant owes their original share minus their cumulative refund share, so
         // the obligation enters the ledger as a negative "is owed" amount.
         BigDecimal obligation =
-            ordered.get(index).getShare().subtract(refundShares.get(index)).negate();
+            ordered.get(index).getShare().subtract(reversed.get(index)).negate();
         addBalance(ledger, currency.name(), ordered.get(index).getUserId(), obligation);
       }
     }
+    return ledger;
+  }
+
+  private static MemberBalancesResponse renderBalances(
+      Map<String, Map<UUID, BigDecimal>> ledger, Set<UUID> currentMembers) {
 
     List<CurrencyBalancesResponse> currencies = new ArrayList<>();
     for (Map.Entry<String, Map<UUID, BigDecimal>> entry : ledger.entrySet()) {
@@ -409,46 +513,120 @@ public class FinancialAllocationService {
     return raw.expectedVersion();
   }
 
+  private static final Pattern SHARE_AMOUNT = Pattern.compile("(0|[1-9][0-9]{0,11})(\\.[0-9]+)?");
+
   private CreateValues validateCreate(CreateFields raw) {
     Map<String, String> errors = new LinkedHashMap<>();
-    if (!raw.expectedVersionPresent()
-        || raw.expectedVersion() == null
-        || raw.expectedVersion() < 0) {
+    if (!raw.expectedVersionPresent() || raw.expectedVersion() == null || raw.expectedVersion() < 0)
       errors.put("expectedVersion", "Provide the current transaction version.");
+    boolean equal = raw.participantUserIdsPresent();
+    boolean exact = raw.participantSharesPresent();
+    if (equal == exact) {
+      errors.put("participantShares", "Provide exactly one participant list.");
+      errors.put("participantUserIds", "Provide exactly one participant list.");
     }
-    List<UUID> participants = new ArrayList<>();
-    if (!raw.participantUserIdsPresent() || raw.rawParticipantUserIds() == null) {
-      errors.put("participantUserIds", "Choose the participants sharing this expense.");
-    } else if (raw.rawParticipantUserIds().isEmpty()) {
-      errors.put("participantUserIds", "Choose the participants sharing this expense.");
-    } else {
-      Set<UUID> seen = new LinkedHashSet<>();
-      boolean invalid = false;
-      for (String rawId : raw.rawParticipantUserIds()) {
-        if (rawId == null) {
-          invalid = true;
+    String field = exact && !equal ? "participantShares" : "participantUserIds";
+    List<UUID> ids = new ArrayList<>();
+    Map<UUID, ExactValue> exactValues = new LinkedHashMap<>();
+    Set<UUID> seen = new LinkedHashSet<>();
+    List<String> rawIds = equal ? raw.rawParticipantUserIds() : null;
+    List<ExactShareRequest> rawShares = exact ? raw.rawParticipantShares() : null;
+    int count =
+        equal ? (rawIds == null ? 0 : rawIds.size()) : (rawShares == null ? 0 : rawShares.size());
+    if (count == 0) errors.put(field, "Choose the participants sharing this expense.");
+    for (int i = 0; i < count; i++) {
+      ExactShareRequest entry = equal ? null : rawShares.get(i);
+      String text = equal ? rawIds.get(i) : entry == null ? null : entry.userId();
+      UUID id;
+      try {
+        id = UUID.fromString(text);
+        if ((!equal && !id.toString().equals(text)) || !seen.add(id))
+          throw new IllegalArgumentException("Noncanonical or duplicate participant.");
+      } catch (IllegalArgumentException | NullPointerException rejected) {
+        errors.put(
+            field,
+            equal
+                ? "Choose distinct household participants."
+                : "Choose distinct canonical household participants.");
+        continue;
+      }
+      ids.add(id);
+      if (!equal) {
+        var share = entry.share();
+        SupportedCurrency currency = null;
+        if (share != null && share.currency() != null) {
+          try {
+            currency = SupportedCurrency.valueOf(share.currency());
+          } catch (IllegalArgumentException rejected) {
+            // Safe field error below.
+          }
+        }
+        String amount = share == null ? null : share.amount();
+        if (currency == null
+            || amount == null
+            || amount.length() > 17
+            || !SHARE_AMOUNT.matcher(amount).matches()) {
+          errors.put(field, "Enter nonnegative shares in a supported currency.");
           continue;
         }
-        try {
-          UUID parsed = UUID.fromString(rawId);
-          // Duplicates are rejected before normalization rather than silently deduplicated.
-          if (!seen.add(parsed)) {
-            invalid = true;
-          }
-        } catch (IllegalArgumentException rejected) {
-          invalid = true;
+        BigDecimal parsed = new BigDecimal(amount);
+        if (parsed.scale() > currency.scale()) {
+          errors.put(field, "Enter shares at the currency's exact scale.");
+          continue;
         }
-      }
-      if (invalid) {
-        errors.put("participantUserIds", "Choose the participants sharing this expense.");
-      } else {
-        participants.addAll(seen.stream().sorted(CANONICAL_USER_ORDER).toList());
+        exactValues.put(id, new ExactValue(currency, parsed.setScale(currency.scale())));
       }
     }
-    if (!errors.isEmpty()) {
-      throw new ValidationFailedException(errors);
+    if (!errors.isEmpty()) throw new ValidationFailedException(errors);
+    ids.sort(CANONICAL_USER_ORDER);
+    return new CreateValues(
+        raw.expectedVersion(),
+        ids,
+        exact ? AllocationMethod.EXACT : AllocationMethod.EQUAL,
+        exactValues);
+  }
+
+  private static List<BigDecimal> validatedExactShares(
+      CreateValues values, SupportedCurrency currency, BigDecimal magnitude) {
+    List<BigDecimal> shares = new ArrayList<>(values.participants().size());
+    BigDecimal total = BigDecimal.ZERO;
+    for (UUID id : values.participants()) {
+      ExactValue value = values.exactValues().get(id);
+      if (value.currency() != currency || value.amount().compareTo(magnitude) > 0)
+        throw new ValidationFailedException(
+            Map.of("participantShares", "Shares must match the expense."));
+      shares.add(value.amount());
+      total = total.add(value.amount());
     }
-    return new CreateValues(raw.expectedVersion(), participants);
+    if (total.compareTo(magnitude) != 0)
+      throw new ValidationFailedException(
+          Map.of("participantShares", "Shares must total the expense."));
+    return shares;
+  }
+
+  private static String exactFingerprint(UUID transactionId, CreateValues values) {
+    List<String> fields = new ArrayList<>();
+    fields.add("EXACT_V1");
+    fields.add(transactionId.toString());
+    fields.add(values.expectedVersion().toString());
+    for (UUID id : values.participants()) {
+      ExactValue value = values.exactValues().get(id);
+      fields.add(id.toString());
+      fields.add(value.currency().name());
+      fields.add(value.amount().toPlainString());
+    }
+    return sha256(String.join("\u0000", fields));
+  }
+
+  private static String sha256(String canonical) {
+    try {
+      return HexFormat.of()
+          .formatHex(
+              MessageDigest.getInstance("SHA-256")
+                  .digest(canonical.getBytes(StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException impossible) {
+      throw new IllegalStateException("SHA-256 is required by the Java platform", impossible);
+    }
   }
 
   /**
@@ -480,38 +658,88 @@ public class FinancialAllocationService {
 
   /** Exact documented representation; shares are the persisted frozen originals in order. */
   private FinancialAllocationResponse toResponse(
-      FinancialTransactionAllocationEntity allocation, int transactionVersion) {
+      FinancialTransactionAllocationEntity allocation, int transactionVersion, UUID householdId) {
+    SupportedCurrency currency = allocation.getCurrency();
     List<ParticipantResponse> ordered =
         participants.findByAllocationIdIn(List.of(allocation.getId())).stream()
             .sorted(Comparator.comparing(row -> row.getUserId().toString()))
-            .map(
-                row ->
-                    new ParticipantResponse(
-                        row.getUserId(),
-                        new MoneyResponse(
-                            row.getShare()
-                                .setScale(allocation.getCurrency().scale())
-                                .toPlainString(),
-                            allocation.getCurrency().name())))
+            .map(row -> new ParticipantResponse(row.getUserId(), money(row.getShare(), currency)))
             .toList();
+    ImpactResponse current =
+        allocation.getStatus() == AllocationStatus.REVOKED
+            ? null
+            : impact(
+                allocation.getOriginalAmount(),
+                refundSum(allocation.getTransactionId()),
+                allocation.getRefundPolicy(),
+                ordered,
+                allocation.getPayerUserId(),
+                currency);
     return new FinancialAllocationResponse(
         allocation.getId(),
         allocation.getTransactionId(),
-        allocation.getHouseholdId(),
+        householdId,
         allocation.getPayerUserId(),
-        allocation.getCurrency().name(),
-        new MoneyResponse(
-            allocation
-                .getOriginalAmount()
-                .setScale(allocation.getCurrency().scale())
-                .toPlainString(),
-            allocation.getCurrency().name()),
+        currency.name(),
+        money(allocation.getOriginalAmount(), currency),
         ordered,
         allocation.getStatus().name(),
         allocation.getCreatedAt(),
         allocation.getRevokedAt(),
-        transactionVersion);
+        transactionVersion,
+        allocation.getMethod().name(),
+        allocation.getRefundPolicy().name(),
+        current);
   }
 
-  private record CreateValues(Integer expectedVersion, List<UUID> participants) {}
+  private BigDecimal refundSum(UUID transactionId) {
+    return transactions.sumPostedRefunds(List.of(transactionId), TransactionStatus.POSTED).stream()
+        .map(row -> (BigDecimal) row[1])
+        .findFirst()
+        .orElse(BigDecimal.ZERO);
+  }
+
+  private static List<ParticipantResponse> participantResponses(
+      List<UUID> ids, List<BigDecimal> shares, SupportedCurrency currency) {
+    List<ParticipantResponse> result = new ArrayList<>(ids.size());
+    for (int i = 0; i < ids.size(); i++)
+      result.add(new ParticipantResponse(ids.get(i), money(shares.get(i), currency)));
+    return result;
+  }
+
+  private static MoneyResponse money(BigDecimal value, SupportedCurrency currency) {
+    return new MoneyResponse(value.setScale(currency.scale()).toPlainString(), currency.name());
+  }
+
+  private static ImpactResponse impact(
+      BigDecimal original,
+      BigDecimal refunded,
+      AllocationRefundPolicy policy,
+      List<ParticipantResponse> frozen,
+      UUID payer,
+      SupportedCurrency currency) {
+    List<UUID> ids = frozen.stream().map(ParticipantResponse::userId).toList();
+    List<BigDecimal> shares =
+        frozen.stream().map(row -> new BigDecimal(row.share().amount())).toList();
+    List<BigDecimal> reversals = refundShares(policy, original, shares, refunded, currency, ids);
+    List<ImpactParticipantResponse> entries = new ArrayList<>(ids.size());
+    for (int i = 0; i < ids.size(); i++)
+      entries.add(
+          new ImpactParticipantResponse(
+              ids.get(i),
+              money(reversals.get(i), currency),
+              money(shares.get(i).subtract(reversals.get(i)), currency)));
+    return new ImpactResponse(
+        money(refunded, currency),
+        money(original.subtract(refunded), currency),
+        List.copyOf(entries));
+  }
+
+  private record ExactValue(SupportedCurrency currency, BigDecimal amount) {}
+
+  private record CreateValues(
+      Integer expectedVersion,
+      List<UUID> participants,
+      AllocationMethod method,
+      Map<UUID, ExactValue> exactValues) {}
 }

@@ -217,6 +217,7 @@ function safeFieldErrors(value: unknown): ApiFieldErrors | undefined {
         key === 'view' ||
         key === 'refundOfTransactionId' ||
         key === 'participantUserIds' ||
+        key === 'participantShares' ||
         key === 'reportingTimeZone' ||
         key === 'from' ||
         key === 'to' ||
@@ -3722,14 +3723,20 @@ export interface AllocationParticipantShare {
   share: Money;
 }
 
-/**
- * The active allocation of one expense, exactly the 11 documented response
- * fields. Participants are frozen at creation in ascending canonical user
- * UUID order with their persisted exact shares, which always sum to the
- * original positive magnitude. Revoked allocations are never returned by
- * any route; this type is reached for ACTIVE allocations and, on same-key
- * replay, for a since-revoked creation.
- */
+export type AllocationMethod = 'EQUAL' | 'EXACT';
+export type AllocationRefundPolicy = 'EQUAL_V1' | 'EXACT_JEFFERSON_V1';
+
+export interface AllocationImpact {
+  cumulativeRefundAmount: Money;
+  payerCredit: Money;
+  participants: Array<{
+    userId: string;
+    cumulativeRefundShare: Money;
+    remainingObligation: Money;
+  }>;
+}
+
+/** Active allocation, or a since-revoked durable creation replay. */
 export interface TransactionAllocation {
   id: string;
   transactionId: string;
@@ -3742,12 +3749,32 @@ export interface TransactionAllocation {
   createdAt: string;
   revokedAt: string | null;
   transactionVersion: number;
+  method: AllocationMethod;
+  refundPolicy: AllocationRefundPolicy;
+  impact: AllocationImpact | null;
 }
 
-export interface CreateAllocationInput {
-  expectedVersion: number;
-  participantUserIds: string[];
-}
+export type CreateAllocationInput =
+  | {
+      expectedVersion: number;
+      participantUserIds: string[];
+      participantShares?: never;
+    }
+  | {
+      expectedVersion: number;
+      participantShares: AllocationParticipantShare[];
+      participantUserIds?: never;
+    };
+
+export type AllocationPreview = Pick<
+  TransactionAllocation,
+  | 'transactionId'
+  | 'transactionVersion'
+  | 'method'
+  | 'refundPolicy'
+  | 'originalAmount'
+  | 'participants'
+> & { impact: AllocationImpact };
 
 export interface MemberBalanceEntry {
   userId: string;
@@ -3807,6 +3834,199 @@ function isShareMoney(
   );
 }
 
+function parseAllocationParticipants(
+  value: unknown,
+  currency: FinancialAccountCurrency,
+): AllocationParticipantShare[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const participants: AllocationParticipantShare[] = [];
+  let previousUserId: string | undefined;
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry))
+      return undefined;
+    const participant = entry as Record<string, unknown>;
+    if (
+      Object.keys(participant).length !== 2 ||
+      typeof participant.userId !== 'string' ||
+      !UUID_PATTERN.test(participant.userId) ||
+      !isShareMoney(participant.share, currency)
+    )
+      return undefined;
+    const canonical = participant.userId.toLowerCase();
+    if (previousUserId !== undefined && canonical <= previousUserId)
+      return undefined;
+    previousUserId = canonical;
+    participants.push({ userId: participant.userId, share: participant.share });
+  }
+  return participants;
+}
+
+function isAllocationPolicy(
+  method: unknown,
+  policy: unknown,
+): method is AllocationMethod {
+  return (
+    (method === 'EQUAL' && policy === 'EQUAL_V1') ||
+    (method === 'EXACT' && policy === 'EXACT_JEFFERSON_V1')
+  );
+}
+
+function parseAllocationImpact(
+  value: unknown,
+  currency: FinancialAccountCurrency,
+  original: Money,
+  participants: AllocationParticipantShare[],
+): AllocationImpact | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).length !== 3 ||
+    !isShareMoney(record.cumulativeRefundAmount, currency) ||
+    !isShareMoney(record.payerCredit, currency) ||
+    !Array.isArray(record.participants) ||
+    record.participants.length !== participants.length
+  )
+    return undefined;
+  const total = minorUnitsOfMagnitude(original.amount, currency);
+  const refund = minorUnitsOfMagnitude(
+    record.cumulativeRefundAmount.amount,
+    currency,
+  );
+  if (
+    refund > total ||
+    minorUnitsOfMagnitude(record.payerCredit.amount, currency) !==
+      total - refund
+  )
+    return undefined;
+  let refunded = 0n;
+  const entries: AllocationImpact['participants'] = [];
+  for (let index = 0; index < participants.length; index += 1) {
+    const value = record.participants[index];
+    const participant = participants[index];
+    if (
+      typeof value !== 'object' ||
+      value === null ||
+      Array.isArray(value) ||
+      !participant
+    )
+      return undefined;
+    const entry = value as Record<string, unknown>;
+    if (
+      Object.keys(entry).length !== 3 ||
+      entry.userId !== participant.userId ||
+      !isShareMoney(entry.cumulativeRefundShare, currency) ||
+      !isShareMoney(entry.remainingObligation, currency)
+    )
+      return undefined;
+    const partRefund = minorUnitsOfMagnitude(
+      entry.cumulativeRefundShare.amount,
+      currency,
+    );
+    const obligation = minorUnitsOfMagnitude(
+      entry.remainingObligation.amount,
+      currency,
+    );
+    if (
+      partRefund + obligation !==
+      minorUnitsOfMagnitude(participant.share.amount, currency)
+    )
+      return undefined;
+    refunded += partRefund;
+    entries.push({
+      userId: participant.userId,
+      cumulativeRefundShare: entry.cumulativeRefundShare,
+      remainingObligation: entry.remainingObligation,
+    });
+  }
+  if (refunded !== refund) return undefined;
+  return {
+    cumulativeRefundAmount: record.cumulativeRefundAmount,
+    payerCredit: record.payerCredit,
+    participants: entries,
+  };
+}
+
+function parseAllocationPreview(value: unknown): AllocationPreview | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).length !== 7 ||
+    typeof record.transactionId !== 'string' ||
+    !UUID_PATTERN.test(record.transactionId) ||
+    !Number.isInteger(record.transactionVersion) ||
+    (record.transactionVersion as number) < 0 ||
+    (record.transactionVersion as number) > 2147483647 ||
+    !isAllocationPolicy(record.method, record.refundPolicy) ||
+    !isMoney(record.originalAmount)
+  )
+    return undefined;
+  const originalAmount = record.originalAmount as Money;
+  if (originalAmount.amount.startsWith('-')) return undefined;
+  const currency = originalAmount.currency;
+  const participants = parseAllocationParticipants(
+    record.participants,
+    currency,
+  );
+  if (
+    !participants ||
+    participants.reduce(
+      (sum, part) => sum + minorUnitsOfMagnitude(part.share.amount, currency),
+      0n,
+    ) !== minorUnitsOfMagnitude(originalAmount.amount, currency)
+  )
+    return undefined;
+  const impact = parseAllocationImpact(
+    record.impact,
+    currency,
+    originalAmount,
+    participants,
+  );
+  if (!impact) return undefined;
+  return {
+    transactionId: record.transactionId,
+    transactionVersion: record.transactionVersion as number,
+    method: record.method,
+    refundPolicy: record.refundPolicy as AllocationRefundPolicy,
+    originalAmount,
+    participants,
+    impact,
+  };
+}
+
+export async function previewTransactionAllocation(
+  householdId: string,
+  transactionId: string,
+  input: CreateAllocationInput,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+  timeoutMs: number = AUTH_TIMEOUT_MS,
+): Promise<AllocationPreview> {
+  const response = await apiFetch(
+    `${allocationPath(householdId, transactionId)}/preview`,
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify(input),
+    },
+    signal,
+    timeoutMs,
+  );
+  if (response.status !== 200)
+    throw await parseErrorResponse(
+      response,
+      response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
+      'Allocation preview could not be completed.',
+    );
+  const preview = parseAllocationPreview(await readJson<unknown>(response));
+  if (!preview || preview.transactionId !== transactionId)
+    throw unexpectedAllocationResponse(response.status);
+  return preview;
+}
+
 function parseTransactionAllocation(
   value: unknown,
 ): TransactionAllocation | undefined {
@@ -3814,10 +4034,9 @@ function parseTransactionAllocation(
     return undefined;
   }
   const record = value as Record<string, unknown>;
-  // Exactly the documented 11-field allocation DTO; any extra or missing
-  // key is contract drift and must fail loudly rather than reach the UI.
+  // Reject drift: exactly the 14 documented resource fields.
   if (
-    Object.keys(record).length !== 11 ||
+    Object.keys(record).length !== 14 ||
     typeof record.id !== 'string' ||
     !UUID_PATTERN.test(record.id) ||
     typeof record.transactionId !== 'string' ||
@@ -3827,9 +4046,8 @@ function parseTransactionAllocation(
     typeof record.payerUserId !== 'string' ||
     !UUID_PATTERN.test(record.payerUserId) ||
     !isFinancialAccountCurrency(record.currency) ||
+    !isAllocationPolicy(record.method, record.refundPolicy) ||
     !isMoney(record.originalAmount) ||
-    !Array.isArray(record.participants) ||
-    record.participants.length === 0 ||
     (record.status !== 'ACTIVE' && record.status !== 'REVOKED') ||
     (record.revokedAt !== null && typeof record.revokedAt !== 'string') ||
     (record.status === 'ACTIVE' && record.revokedAt !== null) ||
@@ -3846,47 +4064,37 @@ function parseTransactionAllocation(
     return undefined;
   }
   const currency = record.currency as FinancialAccountCurrency;
-  const participants: AllocationParticipantShare[] = [];
-  let previousUserId: string | undefined;
-  for (const entry of record.participants) {
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      return undefined;
-    }
-    const participant = entry as Record<string, unknown>;
-    if (
-      Object.keys(participant).length !== 2 ||
-      typeof participant.userId !== 'string' ||
-      !UUID_PATTERN.test(participant.userId) ||
-      !isShareMoney(participant.share, currency)
-    ) {
-      return undefined;
-    }
-    const userId = participant.userId;
-    // The response is ordered ascending by canonical user UUID with no
-    // duplicates; ordering is part of the contract, not presentation.
-    const canonical = userId.toLowerCase();
-    if (previousUserId !== undefined && canonical <= previousUserId) {
-      return undefined;
-    }
-    previousUserId = canonical;
-    participants.push({
-      userId,
-      share: {
-        amount: (participant.share as Money).amount,
-        currency: (participant.share as Money).currency,
-      },
-    });
-  }
-  // Shares sum exactly to the original positive magnitude.
-  let sum = 0n;
-  for (const participant of participants) {
-    sum += minorUnitsOfMagnitude(participant.share.amount, currency);
-  }
+  const participants = parseAllocationParticipants(
+    record.participants,
+    currency,
+  );
+  if (!participants) return undefined;
   const originalAmount = record.originalAmount as Money;
-  if (originalAmount.amount.startsWith('-')) return undefined;
-  if (sum !== minorUnitsOfMagnitude(originalAmount.amount, currency)) {
+  if (
+    originalAmount.currency !== currency ||
+    originalAmount.amount.startsWith('-') ||
+    participants.reduce(
+      (sum, participant) =>
+        sum + minorUnitsOfMagnitude(participant.share.amount, currency),
+      0n,
+    ) !== minorUnitsOfMagnitude(originalAmount.amount, currency)
+  )
     return undefined;
-  }
+  const impact =
+    record.impact === null
+      ? null
+      : parseAllocationImpact(
+          record.impact,
+          currency,
+          originalAmount,
+          participants,
+        );
+  if (
+    impact === undefined ||
+    (record.status === 'ACTIVE' && impact === null) ||
+    (record.status === 'REVOKED' && impact !== null)
+  )
+    return undefined;
   return {
     id: record.id,
     transactionId: record.transactionId,
@@ -3902,6 +4110,9 @@ function parseTransactionAllocation(
     createdAt: record.createdAt,
     revokedAt: record.revokedAt === null ? null : (record.revokedAt as string),
     transactionVersion: record.transactionVersion,
+    method: record.method as AllocationMethod,
+    refundPolicy: record.refundPolicy as AllocationRefundPolicy,
+    impact,
   };
 }
 

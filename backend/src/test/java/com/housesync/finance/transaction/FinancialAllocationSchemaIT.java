@@ -376,6 +376,72 @@ class FinancialAllocationSchemaIT {
     }
   }
 
+  @Test
+  void v18UpgradeTagsActiveAndRevokedWithoutChangingKeysAndEnforcesPolicyPairs() throws Exception {
+    runMigrations("18");
+    UUID active;
+    UUID revoked;
+    UUID key;
+    try (Connection connection = openConnection()) {
+      UUID user = insertUser(connection);
+      UUID household = insertHousehold(connection, user);
+      UUID account = insertAccount(connection, household, user, "CAD");
+      UUID expense =
+          insertTransaction(connection, household, user, account, "EXPENSE", "-10.00", "CAD", null);
+      active = insertAllocation(connection, expense, household, user, "CAD", "10.00", "ACTIVE");
+      insertParticipant(connection, active, user, "CAD", "10.00");
+      key = UUID.randomUUID();
+      insertAllocationKey(connection, user, household, key, active);
+      revoked = UUID.randomUUID();
+      jdbcUpdate(
+          connection,
+          "INSERT INTO financial_transaction_allocations (id, transaction_id, household_id,"
+              + " payer_user_id, currency, original_amount, status, created_at, revoked_at)"
+              + " SELECT ?, transaction_id, household_id, payer_user_id, currency,"
+              + " original_amount, 'REVOKED', created_at, CURRENT_TIMESTAMP"
+              + " FROM financial_transaction_allocations WHERE id = ?",
+          revoked,
+          active);
+    }
+    runMigrations(null);
+    try (Connection connection = openConnection()) {
+      for (UUID id : java.util.List.of(active, revoked))
+        assertThat(
+                queryString(
+                    connection,
+                    "SELECT method || ':' || refund_policy FROM financial_transaction_allocations WHERE id = '"
+                        + id
+                        + "'"))
+            .isEqualTo("EQUAL:EQUAL_V1");
+      assertThat(
+              queryString(
+                  connection,
+                  "SELECT request_fingerprint FROM financial_allocation_idempotency_keys WHERE idempotency_key = '"
+                      + key
+                      + "'"))
+          .isEqualTo("b".repeat(64));
+      assertThatThrownBy(
+              () ->
+                  jdbcUpdate(
+                      connection,
+                      "UPDATE financial_transaction_allocations SET method = 'EXACT' WHERE id = ?",
+                      active))
+          .isInstanceOf(Exception.class);
+      jdbcUpdate(
+          connection,
+          "UPDATE financial_transaction_allocations SET method = 'EXACT',"
+              + " refund_policy = 'EXACT_JEFFERSON_V1' WHERE id = ?",
+          active);
+      assertThatThrownBy(
+              () ->
+                  jdbcUpdate(
+                      connection,
+                      "UPDATE financial_transaction_allocations SET refund_policy = 'FUTURE' WHERE id = ?",
+                      active))
+          .isInstanceOf(Exception.class);
+    }
+  }
+
   private static void runMigrations(String target) {
     // Flyway's target must be set only for historical checkpoints; the default target is
     // the latest migration, and a null here is an unconditional-fresh request.

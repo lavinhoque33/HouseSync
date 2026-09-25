@@ -552,11 +552,8 @@ code {
   cursor: wait;
 }
 
-/*
- * A control that is busy but must keep its place in the tab order (the feed
- * pagers) uses aria-disabled instead of disabled, so it needs the same
- * treatment as a natively disabled button.
- */
+/* Busy buttons that must retain keyboard focus use aria-disabled rather than
+   native disabled; keep the appearance while activation is guarded in code. */
 .household-button[aria-disabled='true'] {
   opacity: 0.6;
   cursor: wait;
@@ -1562,6 +1559,12 @@ code {
   margin: 0;
 }
 
+.finance-participant-row {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
 .finance-participant-option {
   display: grid;
   grid-template-columns: 1.35rem minmax(0, 1fr);
@@ -1597,6 +1600,37 @@ code {
   border: 1px solid var(--color-line);
   border-radius: 0.75rem;
   background: var(--color-surface);
+  overflow-wrap: anywhere;
+}
+
+.finance-share-preview > .household-button {
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.finance-exact-share {
+  display: grid;
+  gap: var(--space-1);
+  width: min(100%, 20rem);
+  min-width: 0;
+}
+
+.finance-exact-share > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.finance-exact-share input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: 44px;
+}
+
+.finance-allocation-impact {
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
@@ -1845,6 +1879,22 @@ code {
 
   .finance-create-grid {
     grid-template-columns: 1fr;
+  }
+  /* At 200% zoom the CSS viewport can be only 160px wide. Reclaim the
+     nested split-panel gutters so the preview action fits whole words. */
+  .shell:has(.finance-allocation-panel),
+  .finance-transactions:has(.finance-allocation-panel),
+  .finance-transaction-card:has(> .finance-allocation-panel),
+  .finance-allocation-panel,
+  .finance-allocation-panel .finance-participants-fieldset,
+  .finance-allocation-panel .finance-share-preview,
+  .finance-allocation-panel .finance-allocation-shares {
+    padding-inline: 4px;
+  }
+
+  .finance-allocation-panel .finance-share-preview > .household-button {
+    width: 100%;
+    padding-inline: 4px;
   }
 }
 

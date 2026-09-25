@@ -20,11 +20,22 @@ public record FinancialAllocationResponse(
     String status,
     Instant createdAt,
     Instant revokedAt,
-    int transactionVersion) {
+    int transactionVersion,
+    String method,
+    String refundPolicy,
+    ImpactResponse impact) {
 
   /** Exact money boundary: plain decimal amount string plus uppercase currency code. */
   public record MoneyResponse(String amount, String currency) {}
 
   /** One frozen participant share in ascending canonical user-UUID order. */
   public record ParticipantResponse(UUID userId, MoneyResponse share) {}
+
+  public record ImpactResponse(
+      MoneyResponse cumulativeRefundAmount,
+      MoneyResponse payerCredit,
+      List<ImpactParticipantResponse> participants) {}
+
+  public record ImpactParticipantResponse(
+      UUID userId, MoneyResponse cumulativeRefundShare, MoneyResponse remainingObligation) {}
 }
