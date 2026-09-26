@@ -123,6 +123,7 @@ export function BudgetSection({
   onHouseholdAccessChanged,
   pending,
   setPending,
+  onChanged,
 }: {
   household: Household;
   month: string;
@@ -135,6 +136,7 @@ export function BudgetSection({
   onHouseholdAccessChanged: () => void;
   pending: PendingBudgetCreate | null;
   setPending: Dispatch<SetStateAction<PendingBudgetCreate | null>>;
+  onChanged?: () => void;
 }) {
   const owner = household.role === 'OWNER';
   const [progress, setProgress] = useState<BudgetProgress | null>(null);
@@ -454,6 +456,7 @@ export function BudgetSection({
           ? `${label(saved.bucket)} creation was already recorded and is now archived; current progress is refreshing.`
           : `${label(saved.bucket)} target ${editing ? 'updated' : 'created'} for ${saved.month}. Current progress is refreshing.`,
       );
+      onChanged?.();
       setRevision((before) => before + 1);
     } catch (failure) {
       if (request.signal.aborted || generation.current !== current) return;
@@ -510,6 +513,7 @@ export function BudgetSection({
       setMessage(
         `${label(target.bucket)} target archived. Current progress is refreshing.`,
       );
+      onChanged?.();
       setRevision((before) => before + 1);
     } catch (failure) {
       if (request.signal.aborted || generation.current !== current) return;
@@ -572,6 +576,8 @@ export function BudgetSection({
     : [];
   return (
     <section
+      id={`insights-budget-${household.id}`}
+      tabIndex={-1}
       className="budget-section"
       aria-label="Monthly household budget targets"
     >

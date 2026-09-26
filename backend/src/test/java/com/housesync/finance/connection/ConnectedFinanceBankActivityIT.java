@@ -400,6 +400,11 @@ class ConnectedFinanceBankActivityIT extends ConnectedFinanceITSupport {
   void connectedRefundRulesAndSharedDisclosure() throws Exception {
     Agent owner = signedInAgent("activity-refund");
     String householdId = createHousehold(owner, "Refund home");
+    Agent second = signedInAgent("activity-refund-member");
+    Agent third = signedInAgent("activity-refund-third");
+    Agent outsider = signedInAgent("activity-refund-outsider");
+    addMember(householdId, second.userId(), "MEMBER");
+    addMember(householdId, third.userId(), "MEMBER");
     ConnectedLink link = linkAndSelect(owner, householdId, true, true);
 
     importPage(
@@ -531,6 +536,7 @@ class ConnectedFinanceBankActivityIT extends ConnectedFinanceITSupport {
     assertThat(undisclosed.status()).isEqualTo(400);
     assertThat(undisclosed.json().path("fieldErrors").has("acknowledgeDisclosure")).isTrue();
 
+    UUID refundKey = UUID.randomUUID();
     Resp refund =
         owner.request(
             "POST",
@@ -540,8 +546,21 @@ class ConnectedFinanceBankActivityIT extends ConnectedFinanceITSupport {
                 + expenseId
                 + "\",\"acknowledgeDisclosure\":true}",
             owner.csrfToken,
-            UUID.randomUUID());
+            refundKey);
     assertThat(refund.status()).isEqualTo(201);
+    Resp refundReplay =
+        owner.request(
+            "POST",
+            "/api/households/" + householdId + "/bank-activity/" + creditObservation + "/confirm",
+            "{\"expectedVersion\":0,\"kind\":\"REFUND\",\"description\":\"Bank credit\","
+                + "\"refundOfTransactionId\":\""
+                + expenseId
+                + "\",\"acknowledgeDisclosure\":true}",
+            owner.csrfToken,
+            refundKey);
+    assertThat(refundReplay.status()).isEqualTo(200);
+    assertThat(refundReplay.json().path("transactionId").asText())
+        .isEqualTo(refund.json().path("transactionId").asText());
     assertThat(
             jdbc.queryForObject(
                 "SELECT visibility FROM financial_transactions WHERE id = ?::uuid",
@@ -555,6 +574,59 @@ class ConnectedFinanceBankActivityIT extends ConnectedFinanceITSupport {
                     refund.json().path("transactionId").asText())
                 .toString())
         .isEqualTo(expenseId);
+    String base = "/api/households/" + householdId;
+    String summaryPath =
+        base + "/insights/summary?month=2026-09&baselineMonth=2026-08&currency=USD";
+    Resp ownerSummary = owner.get(summaryPath);
+    assertThat(ownerSummary.status()).as(ownerSummary.body()).isEqualTo(200);
+    JsonNode summary = ownerSummary.json();
+    assertThat(summary.path("current").path("expenseTotal").asText()).isEqualTo("12.34");
+    assertThat(summary.path("current").path("refundTotal").asText()).isEqualTo("5.00");
+    assertThat(summary.path("current").path("netSpending").asText()).isEqualTo("7.34");
+    assertThat(summary.path("budget").path("totals").path("netSpending").asText())
+        .isEqualTo("7.34");
+    // The linked refund inherits its disclosed source's merchant group, not private bank-credit
+    // text.
+    assertThat(summary.path("merchantDrivers").path("increases").size()).isEqualTo(1);
+    assertThat(
+            summary
+                .path("merchantDrivers")
+                .path("increases")
+                .get(0)
+                .path("change")
+                .path("delta")
+                .asText())
+        .isEqualTo("7.34");
+    assertThat(summary.path("merchantDrivers").path("decreases").size()).isZero();
+    assertThat(summary.path("merchantDrivers").path("otherDelta").asText()).isEqualTo("0.00");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT source FROM financial_transactions WHERE id = ?::uuid",
+                String.class,
+                expenseId))
+        .isEqualTo("CONNECTED");
+    for (Agent member : List.of(second, third)) {
+      JsonNode memberSummary = member.get(summaryPath).json();
+      assertThat(memberSummary.path("snapshot").asText())
+          .isEqualTo(summary.path("snapshot").asText());
+      assertThat(memberSummary.path("current").path("netSpending").asText()).isEqualTo("7.34");
+      Resp memberInbox = member.get(base + "/bank-activity");
+      assertThat(memberInbox.status()).isEqualTo(200);
+      assertThat(memberInbox.json().path("items").size()).isZero();
+      assertThat(
+              member
+                  .get(base + "/transactions/" + manualExpense.json().path("id").asText())
+                  .status())
+          .isEqualTo(404);
+    }
+    assertThat(owner.get(summaryPath).json().path("snapshot").asText())
+        .isEqualTo(summary.path("snapshot").asText());
+    assertThat(outsider.get(summaryPath).status()).isEqualTo(404);
+    JsonNode m2 = second.get(base + "/spending-summary?from=2026-09-01&to=2026-10-01").json();
+    assertThat(m2.path("currencies").get(0).path("netSpending").asText()).isEqualTo("7.34");
+    JsonNode m5 =
+        third.get(base + "/contribution-summary?from=2026-09-01&to=2026-10-01&currency=USD").json();
+    assertThat(m5.path("totals").path("netSpending").asText()).isEqualTo("7.34");
   }
 
   private void importPage(

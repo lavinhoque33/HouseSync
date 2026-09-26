@@ -581,7 +581,7 @@ export function parsePlanPage(
     return;
   return value as PlanPage;
 }
-function projection(
+export function projection(
   value: unknown,
   householdId: string,
   currency: FinancialAccountCurrency,

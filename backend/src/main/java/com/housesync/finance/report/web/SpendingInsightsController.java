@@ -1,6 +1,7 @@
 package com.housesync.finance.report.web;
 
 import com.housesync.finance.account.domain.SupportedCurrency;
+import com.housesync.finance.report.application.InsightsSummaryService;
 import com.housesync.finance.report.application.SpendingInsightsService;
 import com.housesync.identity.application.HouseSyncUserDetails;
 import com.housesync.identity.web.IdentityExceptions.UnauthenticatedException;
@@ -26,9 +27,26 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/households/{householdId}/insights")
 public class SpendingInsightsController {
   private final SpendingInsightsService insights;
+  private final InsightsSummaryService summaries;
 
-  public SpendingInsightsController(SpendingInsightsService insights) {
+  public SpendingInsightsController(
+      SpendingInsightsService insights, InsightsSummaryService summaries) {
     this.insights = insights;
+    this.summaries = summaries;
+  }
+
+  @GetMapping("/summary")
+  public ResponseEntity<InsightsSummaryResponse> summary(
+      @PathVariable UUID householdId,
+      @RequestParam MultiValueMap<String, String> query,
+      Authentication authentication) {
+    keys(query, Set.of("month", "baselineMonth", "currency"));
+    YearMonth month = SpendingInsightsService.parseMonth(required(query, "month"), false);
+    YearMonth baseline =
+        SpendingInsightsService.parseMonth(required(query, "baselineMonth"), false);
+    if (month.equals(baseline)) throw invalid();
+    SupportedCurrency currency = currency(query);
+    return ok(summaries.summary(householdId, actor(authentication), month, baseline, currency));
   }
 
   @GetMapping("/spending-series")

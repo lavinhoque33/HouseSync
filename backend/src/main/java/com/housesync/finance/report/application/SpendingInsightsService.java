@@ -100,6 +100,12 @@ public class SpendingInsightsService {
         household, currency, zone, LocalDate.now(clock.withZone(ZoneId.of(zone))), actor);
   }
 
+  private Context context(UUID household, UUID actor, SupportedCurrency currency, LocalDate today) {
+    households.lockForFinance(household, actor);
+    String zone = households.financeSettings(household).reportingTimeZone();
+    return new Context(household, currency, zone, today, actor);
+  }
+
   @Transactional
   public Series series(
       UUID household,
@@ -157,7 +163,28 @@ public class SpendingInsightsService {
       String dimension,
       int limit,
       String cursor) {
-    Context ctx = context(household, actor, currency);
+    return comparison(household, actor, month, baseline, currency, dimension, limit, cursor, null);
+  }
+
+  /**
+   * Internal summary projection: same complete A grouping and ordering, with one captured reporting
+   * date.
+   */
+  @Transactional
+  public Comparison comparison(
+      UUID household,
+      UUID actor,
+      YearMonth month,
+      YearMonth baseline,
+      SupportedCurrency currency,
+      String dimension,
+      int limit,
+      String cursor,
+      LocalDate today) {
+    Context ctx =
+        today == null
+            ? context(household, actor, currency)
+            : context(household, actor, currency, today);
     YearMonth first = month.isBefore(baseline) ? month : baseline;
     YearMonth last = month.isAfter(baseline) ? month : baseline;
     Amounts current = new Amounts(), previous = new Amounts();
@@ -323,7 +350,16 @@ public class SpendingInsightsService {
   @Transactional
   public MonthlySpending monthlySpending(
       UUID household, UUID actor, YearMonth month, SupportedCurrency currency) {
-    Context ctx = context(household, actor, currency);
+    return monthlySpending(household, actor, month, currency, null);
+  }
+
+  @Transactional
+  public MonthlySpending monthlySpending(
+      UUID household, UUID actor, YearMonth month, SupportedCurrency currency, LocalDate today) {
+    Context ctx =
+        today == null
+            ? context(household, actor, currency)
+            : context(household, actor, currency, today);
     Amounts total = new Amounts();
     Map<String, Amounts> groups = new TreeMap<>();
     read(

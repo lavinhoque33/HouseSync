@@ -128,6 +128,7 @@ public class SecurityConfiguration {
                         "/api/households/*/insights/spending-series",
                         "/api/households/*/insights/spending-comparison",
                         "/api/households/*/insights/spending-evidence",
+                        "/api/households/*/insights/summary",
                         "/api/households/*/insights/recurring-candidates",
                         "/api/households/*/insights/recurring-evidence",
                         "/api/households/*/insights/recurring-plans",

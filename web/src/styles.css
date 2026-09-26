@@ -2490,6 +2490,50 @@ code {
   overflow-wrap: anywhere;
 }
 
+.insights-summary {
+  min-width: 0;
+  margin-block: 1rem 1.5rem;
+  padding: clamp(0.5rem, 2vw, 1rem);
+  border: 2px solid var(--color-line);
+  border-radius: 0.75rem;
+}
+
+.insights-summary-breakdown {
+  min-width: 0;
+}
+
+.insights-summary .insights-scroll {
+  overscroll-behavior-x: contain;
+}
+
+.insights-summary .insights-scroll th,
+.insights-summary .insights-scroll td {
+  overflow-wrap: anywhere;
+}
+
+.insights-summary-budget table {
+  min-width: 72rem;
+}
+
+.insights-summary .insights-summary-budget th,
+.insights-summary .insights-summary-budget td {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.insights-summary-budget th:first-child {
+  min-width: 8rem;
+}
+
+.insights-scroll:focus-visible,
+.insights-m5:focus-visible,
+.budget-section:focus-visible,
+.recurring-section:focus-visible,
+.recurring-cards li:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
 .insights-section h4,
 .insights-section h5,
 .insights-section h6 {

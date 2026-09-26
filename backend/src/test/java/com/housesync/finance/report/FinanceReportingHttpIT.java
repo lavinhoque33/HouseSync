@@ -1236,6 +1236,14 @@ class FinanceReportingHttpIT {
         .isEqualTo(first.json().path("snapshot").asText());
     String merchant = candidate.path("merchantKey").asText();
     String fingerprint = candidate.path("candidateFingerprint").asText();
+    String historicalSummary =
+        base + "/insights/summary?month=2026-02&baselineMonth=2026-01&currency=USD";
+    JsonNode historical = member.get(historicalSummary).json();
+    assertThat(historical.path("current").path("netSpending").asText()).isEqualTo("0.00");
+    assertThat(historical.path("recurring").path("evidenceTo").asText()).isEqualTo("2026-09-26");
+    assertThat(historical.path("recurring").path("openCandidateCount").asText()).isEqualTo("1");
+    assertThat(historical.path("recurring").path("activePlanCount").asText()).isEqualTo("0");
+    String recurringSnapshot = historical.path("snapshot").asText();
     assertThat(outsider.get(candidates).json().path("code").asText())
         .isEqualTo("HOUSEHOLD_NOT_FOUND");
     java.sql.Timestamp old =
@@ -1307,6 +1315,18 @@ class FinanceReportingHttpIT {
         .isEqualTo(1);
     assertThat(member.get(candidates).json().path("items").size()).isZero();
     assertThat(owner.get(candidates).json().path("items").size()).isEqualTo(1);
+    JsonNode dismissedOverview = member.get(historicalSummary).json();
+    assertThat(dismissedOverview.path("recurring").path("openCandidateCount").asText())
+        .isEqualTo("0");
+    assertThat(dismissedOverview.path("snapshot").asText()).isNotEqualTo(recurringSnapshot);
+    assertThat(
+            owner
+                .get(historicalSummary)
+                .json()
+                .path("recurring")
+                .path("openCandidateCount")
+                .asText())
+        .isEqualTo("1");
     assertThat(
             member
                 .get(candidates + "&review=DISMISSED")
@@ -1362,6 +1382,24 @@ class FinanceReportingHttpIT {
     assertThat(
             member.get(base + "/insights/recurring-plans?currency=USD").json().path("items").size())
         .isEqualTo(1);
+    JsonNode trackedOverview = member.get(historicalSummary).json();
+    assertThat(trackedOverview.path("recurring").path("openCandidateCount").asText())
+        .isEqualTo("0");
+    assertThat(trackedOverview.path("recurring").path("activePlanCount").asText()).isEqualTo("1");
+    assertThat(
+            trackedOverview.path("recurring").path("items").get(0).path("plan").path("id").asText())
+        .isEqualTo(id);
+    assertThat(trackedOverview.path("snapshot").asText())
+        .isNotEqualTo(dismissedOverview.path("snapshot").asText());
+    assertThat(trackedOverview.path("current").path("netSpending").asText()).isEqualTo("0.00");
+    assertThat(
+            owner
+                .get(historicalSummary)
+                .json()
+                .path("recurring")
+                .path("openCandidateCount")
+                .asText())
+        .isEqualTo("0");
     String ownerSnapshot = owner.get(candidates).json().path("snapshot").asText();
     created(
         owner.createTransaction(
@@ -1551,6 +1589,48 @@ class FinanceReportingHttpIT {
   }
 
   @Test
+  void summaryBoundsCurrentActivePlansWithoutLosingFullCountOrProjectionOrder() throws Exception {
+    recurrenceClock.freeze();
+    Agent owner = signedInAgent("summary-plan-owner");
+    String home = createHousehold(owner, "Six tracked plans");
+    Agent member = signedInAgent("summary-plan-member");
+    addMember(home, member.userId());
+    String base = "/api/households/" + home;
+    for (int i = 1; i <= 6; i++) {
+      String label = "Tracked bill " + i;
+      String body =
+          "{\"label\":\""
+              + label
+              + "\",\"kind\":\"BILL\","
+              + "\"currency\":\"USD\",\"matchDescription\":\""
+              + label
+              + "\","
+              + "\"cadence\":\"MONTHLY\",\"anchorOn\":\"2026-09-"
+              + String.format("%02d", i + 10)
+              + "\",\"calendarAnchor\":\"DAY_OF_MONTH\",\"expectedAmount\":null,"
+              + "\"acknowledgeHouseholdDisclosure\":true}";
+      Resp created =
+          owner.request(
+              "POST", base + "/recurring-plans", body, owner.csrfToken, UUID.randomUUID());
+      assertThat(created.status()).as(created.body()).isEqualTo(201);
+    }
+    JsonNode active = member.get(base + "/insights/recurring-plans?currency=USD").json();
+    JsonNode summary =
+        member
+            .get(base + "/insights/summary?month=2026-02&baselineMonth=2026-01&currency=USD")
+            .json();
+    JsonNode overview = summary.path("recurring");
+    assertThat(overview.path("activePlanCount").asText()).isEqualTo("6");
+    assertThat(overview.path("openCandidateCount").asText()).isEqualTo("0");
+    assertThat(overview.path("items").size()).isEqualTo(5);
+    assertThat(overview.path("hasMore").asBoolean()).isTrue();
+    for (int i = 0; i < 5; i++)
+      assertThat(overview.path("items").get(i).path("plan").path("id").asText())
+          .isEqualTo(active.path("items").get(i).path("plan").path("id").asText());
+    assertThat(overview.path("evidenceTo").asText()).isEqualTo("2026-09-26");
+  }
+
+  @Test
   void recurrenceDetectorRequiresEveryAnchoredOccurrenceAndUsesLowerMedian() throws Exception {
     recurrenceClock.freeze();
     Agent owner = signedInAgent("recurrence-policy");
@@ -1705,6 +1785,27 @@ class FinanceReportingHttpIT {
     assertThat(evidence.json().path("items").get(0).path("description").asText())
         .isEqualTo("Different refund text");
     assertThat(evidence.json().path("items").get(0).size()).isEqualTo(8);
+    String summaryPath = base + "summary?month=2026-02&baselineMonth=2026-01&currency=USD";
+    Resp summary = member.get(summaryPath);
+    assertThat(summary.status()).as(summary.body()).isEqualTo(200);
+    assertThat(summary.cacheControl()).contains("no-store");
+    assertThat(summary.json().path("policyVersion").asText())
+        .isEqualTo("SUMMARY_V1/SPENDING_V1/RECURRENCE_V1/BUDGETS_V1/PUBLIC_DESCRIPTION_V1");
+    assertThat(summary.json().path("change").path("delta").asText()).isEqualTo("-90.00");
+    assertThat(summary.json().path("merchantDrivers").path("decreases").get(0).path("key").asText())
+        .isEqualTo(key);
+    assertThat(summary.json().path("merchantDrivers").path("otherDelta").asText())
+        .isEqualTo("0.00");
+    assertThat(summary.json().path("recurring").path("openCandidateCount").asText()).isEqualTo("0");
+    String summaryBefore = summary.json().path("snapshot").asText();
+    assertThat(outsider.get(summaryPath).json().path("code").asText())
+        .isEqualTo("HOUSEHOLD_NOT_FOUND");
+    assertThat(anonymousGet(summaryPath).status()).isEqualTo(401);
+    assertThat(member.get(summaryPath + "&currency=USD").status()).isEqualTo(400);
+    assertThat(member.get(summaryPath + "&limit=100").status()).isEqualTo(400);
+    assertThat(
+            member.get(base + "summary?month=9999-12&baselineMonth=2026-01&currency=USD").status())
+        .isEqualTo(400);
     assertThat(outsider.get(comparison).status).isEqualTo(404);
     assertThat(anonymousGet(comparison).status).isEqualTo(401);
     assertThat(
@@ -1728,9 +1829,69 @@ class FinanceReportingHttpIT {
             UUID.randomUUID(),
             privateEntry(account, "EXPENSE", "-40.00", "USD", "Another secret", "2026-02-03")));
     assertThat(member.get(comparison).json().path("snapshot").asText()).isEqualTo(before);
+    assertThat(member.get(summaryPath).json().path("snapshot").asText()).isEqualTo(summaryBefore);
     assertThat(member.removeMember(household, owner.userId()).status).isEqualTo(403);
     assertThat(owner.removeMember(household, member.userId()).status).isEqualTo(204);
     assertThat(member.get(comparison).status).isEqualTo(404);
+    assertThat(member.get(summaryPath).json().path("code").asText())
+        .isEqualTo("HOUSEHOLD_NOT_FOUND");
+  }
+
+  @Test
+  void insightsSummarySerializesMembershipRemovalWithCompleteFinancialProjection()
+      throws Exception {
+    Agent owner = signedInAgent("summary-race-owner");
+    String home = createHousehold(owner, "Summary race");
+    Agent member = signedInAgent("summary-race-member");
+    addMember(home, member.userId());
+    String account = createAccount(owner, home, "Card", "CASH", "USD");
+    created(
+        owner.createTransaction(
+            home,
+            UUID.randomUUID(),
+            datedEntry(account, "EXPENSE", "-12.00", "USD", "Shared purchase", "2026-09-02")));
+    String path =
+        "/api/households/"
+            + home
+            + "/insights/summary?month=2026-09&baselineMonth=2026-08&currency=USD";
+    CountDownLatch start = new CountDownLatch(1);
+    try (ExecutorService pool = Executors.newFixedThreadPool(2)) {
+      Future<List<Resp>> reads =
+          pool.submit(
+              () -> {
+                start.await();
+                List<Resp> responses = new ArrayList<>();
+                for (int i = 0; i < 12; i++) responses.add(member.get(path));
+                return responses;
+              });
+      Future<Resp> removal =
+          pool.submit(
+              () -> {
+                start.await();
+                return owner.removeMember(home, member.userId());
+              });
+      start.countDown();
+      assertThat(removal.get(30, TimeUnit.SECONDS).status()).isEqualTo(204);
+      for (Resp response : reads.get(30, TimeUnit.SECONDS)) {
+        assertThat(response.status()).as(response.body()).isIn(200, 404);
+        if (response.status() == 200) {
+          JsonNode snapshot = response.json();
+          assertThat(snapshot.path("current").path("netSpending").asText()).isEqualTo("12.00");
+          assertThat(snapshot.path("budget").path("totals").path("netSpending").asText())
+              .isEqualTo("12.00");
+          assertThat(
+                  snapshot
+                      .path("categoryDrivers")
+                      .path("increases")
+                      .get(0)
+                      .path("change")
+                      .path("delta")
+                      .asText())
+              .isEqualTo("12.00");
+        } else assertThat(response.json().path("code").asText()).isEqualTo("HOUSEHOLD_NOT_FOUND");
+      }
+    }
+    assertThat(member.get(path).json().path("code").asText()).isEqualTo("HOUSEHOLD_NOT_FOUND");
   }
 
   @Test
@@ -1757,6 +1918,18 @@ class FinanceReportingHttpIT {
     assertThat(first.path("current").path("expenseCount").asText()).isEqualTo("102");
     String cursor = first.path("nextCursor").asText();
     assertThat(cursor).isNotEmpty();
+    String summaryPath =
+        "/api/households/"
+            + household
+            + "/insights/summary?month=2026-02&baselineMonth=2026-01&currency=USD";
+    JsonNode summary = owner.get(summaryPath).json();
+    assertThat(summary.path("current").path("netSpending").asText()).isEqualTo("102.00");
+    assertThat(summary.path("merchantDrivers").path("increases").size()).isEqualTo(5);
+    assertThat(summary.path("merchantDrivers").path("decreases").size()).isZero();
+    assertThat(summary.path("merchantDrivers").path("otherDelta").asText()).isEqualTo("97.00");
+    assertThat(summary.path("categoryDrivers").path("otherDelta").asText()).isEqualTo("0.00");
+    assertThat(summary.path("budget").path("overall").isNull()).isTrue();
+    String summarySnapshot = summary.path("snapshot").asText();
     JsonNode second = owner.get(comparison + "&cursor=" + cursor).json();
     assertThat(second.path("items").size()).isEqualTo(2);
     assertThat(second.path("nextCursor").isNull()).isTrue();
@@ -1780,6 +1953,9 @@ class FinanceReportingHttpIT {
         owner.patchTransaction(
             household, ids.get(0), "{\"expectedVersion\":0,\"description\":\"Another merchant\"}");
     assertThat(changed.status).as(changed.body).isEqualTo(200);
+    JsonNode revisedSummary = owner.get(summaryPath).json();
+    assertThat(revisedSummary.path("current").path("netSpending").asText()).isEqualTo("102.00");
+    assertThat(revisedSummary.path("snapshot").asText()).isNotEqualTo(summarySnapshot);
     assertThat(owner.get(comparison).json().path("current").path("netSpending").asText())
         .isEqualTo("102.00");
     Resp stale = owner.get(comparison + "&cursor=" + cursor);
@@ -2107,6 +2283,23 @@ class FinanceReportingHttpIT {
         .isEqualTo("HOUSEHOLD_NOT_FOUND");
     JsonNode projection = member.get(progress).json();
     assertThat(projection.path("policyVersion").asText()).isEqualTo("BUDGETS_V1");
+    String summaryPath =
+        "/api/households/"
+            + home
+            + "/insights/summary?month=2026-10&baselineMonth=2026-09&currency=USD";
+    JsonNode initialSummary = member.get(summaryPath).json();
+    assertThat(
+            initialSummary
+                .path("budget")
+                .path("overall")
+                .path("target")
+                .path("money")
+                .path("amount")
+                .asText())
+        .isEqualTo("0.00");
+    assertThat(initialSummary.path("budget").path("totals").path("netSpending").asText())
+        .isEqualTo("-20.00");
+    String initialSummarySnapshot = initialSummary.path("snapshot").asText();
     Resp categoryTarget =
         owner.request(
             "POST",
@@ -2124,6 +2317,19 @@ class FinanceReportingHttpIT {
     JsonNode grouped = member.get(progress).json();
     assertThat(grouped.path("categories").get(0).path("actual").path("netSpending").asText())
         .isEqualTo("-20.00");
+    JsonNode groupedSummary = member.get(summaryPath).json();
+    assertThat(
+            groupedSummary
+                .path("budget")
+                .path("categories")
+                .get(0)
+                .path("actual")
+                .path("netSpending")
+                .asText())
+        .isEqualTo("-20.00");
+    assertThat(groupedSummary.path("budget").path("untargeted").path("netSpending").asText())
+        .isEqualTo("0.00");
+    assertThat(groupedSummary.path("snapshot").asText()).isNotEqualTo(initialSummarySnapshot);
     assertThat(grouped.path("untargeted").path("netSpending").asText()).isEqualTo("0.00");
     assertThat(
             owner
@@ -2140,6 +2346,18 @@ class FinanceReportingHttpIT {
                 .path("netSpending")
                 .asText())
         .isEqualTo("0.00");
+    JsonNode restatedSummary = member.get(summaryPath).json();
+    assertThat(
+            restatedSummary
+                .path("budget")
+                .path("categories")
+                .get(0)
+                .path("actual")
+                .path("netSpending")
+                .asText())
+        .isEqualTo("0.00");
+    assertThat(restatedSummary.path("budget").path("untargeted").path("netSpending").asText())
+        .isEqualTo("-20.00");
     assertThat(projection.path("period").path("state").asText()).isEqualTo("FUTURE");
     assertThat(projection.path("totals").path("netSpending").asText()).isEqualTo("-20.00");
     assertThat(projection.path("totals").has("incomeTotal")).isFalse();

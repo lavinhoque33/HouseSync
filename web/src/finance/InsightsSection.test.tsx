@@ -25,6 +25,7 @@ const household: Household = {
 const fetchComparison = vi.fn();
 const fetchSeries = vi.fn();
 const fetchEvidence = vi.fn();
+const fetchSummary = vi.fn();
 vi.mock('../auth/client', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
   return {
@@ -32,6 +33,7 @@ vi.mock('../auth/client', async (importOriginal) => {
     fetchInsightComparison: (...args: unknown[]) => fetchComparison(...args),
     fetchInsightSeries: (...args: unknown[]) => fetchSeries(...args),
     fetchInsightEvidence: (...args: unknown[]) => fetchEvidence(...args),
+    fetchInsightSummary: (...args: unknown[]) => fetchSummary(...args),
   };
 });
 const zero = {
@@ -87,6 +89,27 @@ const series = () => ({
   groupKey: null,
   items: [],
 });
+const summary = () => ({
+  ...meta,
+  policyVersion:
+    'SUMMARY_V1/SPENDING_V1/RECURRENCE_V1/BUDGETS_V1/PUBLIC_DESCRIPTION_V1',
+  period: { ...period('2026-09'), state: 'IN_PROGRESS' },
+  baselinePeriod: period('2026-08'),
+  current: totals,
+  baseline: totals,
+  change: unchanged,
+  categoryDrivers: { increases: [], decreases: [], otherDelta: '0.00' },
+  merchantDrivers: { increases: [], decreases: [], otherDelta: '0.00' },
+  budget: { totals: zero, overall: null, categories: [], untargeted: zero },
+  recurring: {
+    evidenceFrom: '2023-09-25',
+    evidenceTo: '2026-09-26',
+    openCandidateCount: '0',
+    activePlanCount: '0',
+    items: [],
+    hasMore: false,
+  },
+});
 function mount(
   refreshSignal = 0,
   onSessionExpired = vi.fn(),
@@ -108,6 +131,7 @@ function mount(
     />,
   );
 }
+fetchSummary.mockImplementation(async () => summary());
 afterEach(() => {
   vi.clearAllMocks();
 });
@@ -397,5 +421,200 @@ describe('household insights interactions', () => {
     expect(
       await screen.findByRole('button', { name: /View trend and evidence/ }),
     ).toBeInTheDocument();
+  });
+  it('shows the applied merchant breakdown after opening its summary evidence', async () => {
+    const actual = {
+      expenseTotal: '2.00',
+      refundTotal: '0.00',
+      netSpending: '2.00',
+      expenseCount: '1',
+      refundCount: '0',
+    };
+    const increase = {
+      delta: '2.00',
+      direction: 'INCREASE',
+      percentChange: null,
+      percentUnavailableReason: 'BASELINE_ZERO',
+    };
+    const merchant = {
+      key: 'b'.repeat(64),
+      label: 'Public grocer',
+      current: actual,
+      baseline: zero,
+      change: increase,
+    };
+    fetchSummary.mockImplementation(async () => ({
+      ...summary(),
+      current: { ...actual, incomeTotal: '0.00' },
+      change: increase,
+      categoryDrivers: {
+        increases: [{ ...merchant, key: 'GROCERIES' }],
+        decreases: [],
+        otherDelta: '0.00',
+      },
+      merchantDrivers: {
+        increases: [merchant],
+        decreases: [],
+        otherDelta: '0.00',
+      },
+      budget: {
+        totals: actual,
+        overall: null,
+        categories: [],
+        untargeted: actual,
+      },
+    }));
+    fetchComparison.mockImplementation(
+      async (_id, _month, _baseline, _currency, dimension) => ({
+        ...comparison(
+          [
+            dimension === 'MERCHANT'
+              ? merchant
+              : { ...merchant, key: 'GROCERIES' },
+          ],
+          null,
+        ),
+        dimension,
+        current: { ...actual, incomeTotal: '0.00' },
+        change: increase,
+      }),
+    );
+    fetchSeries.mockImplementation(async () => series());
+    fetchEvidence.mockImplementation(
+      async (_id, month, _currency, dimension, key) => ({
+        ...meta,
+        period: period(month),
+        dimension,
+        groupKey: key,
+        totals: month === '2026-09' ? actual : zero,
+        items:
+          month === '2026-09'
+            ? [
+                {
+                  id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee3',
+                  version: 0,
+                  kind: 'EXPENSE',
+                  occurredOn: '2026-09-12',
+                  money: { amount: '-2.00', currency: 'USD' },
+                  description: 'Public grocer',
+                  category: 'GROCERIES',
+                  refundOfTransactionId: null,
+                },
+              ]
+            : [],
+        nextCursor: null,
+      }),
+    );
+    mount();
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /Open Public description-group changes comparison, trend and both months' evidence for Public grocer/,
+      }),
+    );
+    await screen.findByRole('heading', {
+      name: 'Merchant / description groups · comparison',
+    });
+    expect(screen.getByLabelText('Breakdown')).toHaveValue('MERCHANT');
+  });
+
+  it('opens a summary driver in the matching A evidence and removes it after remote unshare refresh without applying draft month', async () => {
+    const refund = {
+      expenseTotal: '0.00',
+      refundTotal: '2.00',
+      netSpending: '-2.00',
+      expenseCount: '0',
+      refundCount: '1',
+    };
+    const delta = {
+      delta: '-2.00',
+      direction: 'DECREASE',
+      percentChange: null,
+      percentUnavailableReason: 'BASELINE_ZERO',
+    };
+    const driver = {
+      key: 'GROCERIES',
+      label: 'Shared groceries',
+      current: refund,
+      baseline: zero,
+      change: delta,
+    };
+    let shared = true;
+    fetchSummary.mockImplementation(async () =>
+      shared
+        ? {
+            ...summary(),
+            current: { ...refund, incomeTotal: '0.00' },
+            change: delta,
+            categoryDrivers: {
+              increases: [],
+              decreases: [driver],
+              otherDelta: '0.00',
+            },
+            merchantDrivers: {
+              increases: [],
+              decreases: [],
+              otherDelta: '-2.00',
+            },
+            budget: {
+              totals: refund,
+              overall: null,
+              categories: [],
+              untargeted: refund,
+            },
+          }
+        : summary(),
+    );
+    fetchComparison.mockImplementation(async () => comparison([], null));
+    fetchSeries.mockImplementation(async () => series());
+    fetchEvidence.mockImplementation(async (_id, month) => ({
+      ...meta,
+      period: period(month),
+      dimension: 'CATEGORY',
+      groupKey: 'GROCERIES',
+      totals: shared && month === '2026-09' ? refund : zero,
+      items:
+        shared && month === '2026-09'
+          ? [
+              {
+                id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee1',
+                version: 1,
+                kind: 'REFUND',
+                occurredOn: '2026-09-12',
+                money: { amount: '2.00', currency: 'USD' },
+                description: 'Shared groceries refund',
+                category: 'GROCERIES',
+                refundOfTransactionId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee2',
+              },
+            ]
+          : [],
+      nextCursor: null,
+    }));
+    mount();
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: /Open Category changes comparison, trend and both months' evidence for Shared groceries/,
+      }),
+    );
+    expect(
+      await screen.findByText('Shared groceries refund'),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Month'), {
+      target: { value: '2026-07' },
+    });
+    shared = false;
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Refresh current records' }),
+    );
+    await waitFor(() => expect(fetchSummary).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Shared groceries refund'),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole('button', { name: /Shared groceries/ }),
+    ).not.toBeInTheDocument();
+    expect(fetchSummary.mock.calls[1]?.[1]).toBe('2026-09');
+    expect(screen.getByLabelText('Month')).toHaveValue('2026-07');
   });
 });

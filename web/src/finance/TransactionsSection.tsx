@@ -5259,6 +5259,18 @@ export function TransactionsSection({
         onSessionExpired={onSessionExpired}
         onHouseholdAccessChanged={onHouseholdAccessChanged}
       />
+      <div
+        id={`insights-m5-${household.id}`}
+        className="insights-m5"
+        role="region"
+        tabIndex={-1}
+        aria-label="Separate member balances and settlement suggestions"
+      >
+        <p>
+          Member balances, settlement suggestions and contributions are separate
+          from Insights spending and budget; these are not payments.
+        </p>
+      </div>
       <SettlementSuggestionsSection
         household={household}
         refreshSignal={balancesRefresh + membershipRefreshSignal}

@@ -13,6 +13,7 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
@@ -278,6 +279,12 @@ public class BudgetTargetService {
   @Transactional
   public Progress progress(
       UUID household, UUID actor, YearMonth month, SupportedCurrency currency) {
+    return progress(household, actor, month, currency, null);
+  }
+
+  @Transactional
+  public Progress progress(
+      UUID household, UUID actor, YearMonth month, SupportedCurrency currency, LocalDate today) {
     households.lockForFinance(household, actor);
     // One lifecycle-locked transaction includes every target and the authoritative A ledger
     // projection.
@@ -289,7 +296,7 @@ public class BudgetTargetService {
             household,
             month.toString(),
             currency.name());
-    var ledger = spending.monthlySpending(household, actor, month, currency);
+    var ledger = spending.monthlySpending(household, actor, month, currency, today);
     List<BudgetProgress> categories = new ArrayList<>();
     Spend untargeted = ledger.totals();
     BudgetProgress overall = null;

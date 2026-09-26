@@ -45,6 +45,7 @@ import {
   type InsightEvidence,
   type InsightDimension,
 } from '../finance/insights';
+import { parseInsightSummary, type InsightSummary } from '../finance/summary';
 import {
   parseCandidatePage,
   parseCandidateEvidence,
@@ -5218,6 +5219,23 @@ async function insightRequest<T>(
       message: 'The server returned an unexpected insights response.',
     });
   return parsed;
+}
+
+export function fetchInsightSummary(
+  householdId: string,
+  month: string,
+  baselineMonth: string,
+  currency: FinancialAccountCurrency,
+  signal?: AbortSignal,
+): Promise<InsightSummary> {
+  return insightRequest(
+    householdId,
+    'summary',
+    new URLSearchParams({ month, baselineMonth, currency }),
+    (body) =>
+      parseInsightSummary(body, householdId, month, baselineMonth, currency),
+    signal,
+  );
 }
 
 export function fetchInsightSeries(

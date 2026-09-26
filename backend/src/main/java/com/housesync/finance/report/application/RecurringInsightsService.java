@@ -55,6 +55,12 @@ public class RecurringInsightsService {
     return new Context(household, actor, currency, zone, today, bounds(today));
   }
 
+  private Context context(UUID household, UUID actor, SupportedCurrency currency, LocalDate today) {
+    households.lockForFinance(household, actor);
+    String zone = households.financeSettings(household).reportingTimeZone();
+    return new Context(household, actor, currency, zone, today, bounds(today));
+  }
+
   private record Row(
       UUID id,
       int version,
@@ -840,6 +846,71 @@ public class RecurringInsightsService {
     h.count(d.matches.size());
     for (Row row : descending(d.matches)) hashRow(h, row, SupportedCurrency.valueOf(p.currency()));
   }
+
+  /**
+   * Complete current evidence and plan projection for the household summary, without paging or N+1
+   * reads.
+   */
+  @Transactional
+  public SummaryProjection summary(
+      UUID household, UUID actor, SupportedCurrency currency, LocalDate today) {
+    Context c = context(household, actor, currency, today);
+    Map<String, List<Row>> evidence = evidence(c);
+    Map<String, Preference> reviews = preferences(c);
+    Map<String, Plan> active = active(c);
+    List<Plan> plans = new ArrayList<>(active.values());
+    Map<UUID, Derived> derived = new HashMap<>();
+    for (Plan plan : plans)
+      derived.put(plan.id(), derive(c, plan, evidence.getOrDefault(plan.merchantKey(), List.of())));
+    plans.sort(
+        Comparator.comparing(
+                (Plan p) -> derived.get(p.id()).expectation.nextExpectedOn(),
+                Comparator.nullsLast(String::compareTo))
+            .thenComparing(Plan::id));
+    long open = 0;
+    try (Hash h = hash("summary-recurring", c, "")) {
+      List<String> keys = new ArrayList<>(evidence.keySet());
+      keys.sort(String::compareTo);
+      h.count(keys.size());
+      for (String key : keys) {
+        List<Row> rows = evidence.get(key);
+        h.add(key);
+        h.count(rows.size());
+        for (Row row : rows) hashRow(h, row, currency);
+        Candidate candidate = candidate(c, key, rows, reviews.get(key), active.get(key));
+        if (candidate != null) {
+          hashCandidate(h, candidate, active.get(key));
+          if (candidate.reviewStatus().equals("OPEN") && candidate.activePlanId() == null) open++;
+        } else h.add((String) null);
+      }
+      h.count(plans.size());
+      for (Plan plan : plans) hashProjection(h, plan, derived.get(plan.id()));
+      return new SummaryProjection(
+          c.zone,
+          c.today.toString(),
+          c.bounds.from().toString(),
+          c.bounds.to().toString(),
+          Long.toString(open),
+          Integer.toString(plans.size()),
+          plans.stream()
+              .limit(5)
+              .map(p -> new PlanProjection(p, derived.get(p.id()).expectation))
+              .toList(),
+          plans.size() > 5,
+          h.finish());
+    }
+  }
+
+  public record SummaryProjection(
+      String reportingTimeZone,
+      String asOfDate,
+      String evidenceFrom,
+      String evidenceTo,
+      String openCandidateCount,
+      String activePlanCount,
+      List<PlanProjection> items,
+      boolean hasMore,
+      String fingerprint) {}
 
   @Transactional
   public ActivePlanPage activePlans(

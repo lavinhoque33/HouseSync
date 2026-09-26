@@ -11,6 +11,7 @@ import {
   fetchInsightComparison,
   fetchInsightEvidence,
   fetchInsightSeries,
+  fetchInsightSummary,
   type Household,
   type CsrfToken,
 } from '../auth/client';
@@ -28,6 +29,8 @@ import {
   type InsightSeries,
   type InsightSpend,
 } from './insights';
+import { SummaryView } from './SummaryView';
+import type { InsightSummary } from './summary';
 import { resolveCalculationZone, todayInZone } from './reporting';
 
 const currencies: FinancialAccountCurrency[] = [
@@ -213,6 +216,7 @@ export function InsightsSection({
   const [custom, setCustom] = useState(false);
   const [validation, setValidation] = useState('');
   const [comparison, setComparison] = useState<InsightComparison | null>(null);
+  const [summary, setSummary] = useState<InsightSummary | null>(null);
   const [series, setSeries] = useState<InsightSeries | null>(null);
   const [groups, setGroups] = useState<InsightGroup[]>([]);
   const [groupCursor, setGroupCursor] = useState<string | null>(null);
@@ -227,9 +231,14 @@ export function InsightsSection({
   const detailControllers = useRef(new Set<AbortController>());
   const generation = useRef(0);
   const detailGeneration = useRef(0);
+  const pendingDriver = useRef<{
+    dimension: InsightDimension;
+    group: InsightGroup;
+  } | null>(null);
   const initializedZone = useRef(reportingZone);
   const noticeRef = useRef<HTMLDivElement>(null);
   const monthRef = useRef<HTMLInputElement>(null);
+  const detailHeadingRef = useRef<HTMLHeadingElement>(null);
   const latestRefresh = useRef(refreshSignal);
   const [revision, setRevision] = useState(0);
   const abortAll = () => {
@@ -249,10 +258,13 @@ export function InsightsSection({
   function scopeFailure(failure: unknown) {
     if (failure instanceof ApiError && failure.status === 401) {
       abortAll();
+      pendingDriver.current = null;
+      clearDetails();
       setComparison(null);
       setSeries(null);
       setGroups([]);
       setEvidence({});
+      setSummary(null);
       onSessionExpired();
       return true;
     }
@@ -261,10 +273,13 @@ export function InsightsSection({
       (failure.status === 404 || failure.code === 'HOUSEHOLD_NOT_FOUND')
     ) {
       abortAll();
+      pendingDriver.current = null;
+      clearDetails();
       setComparison(null);
       setSeries(null);
       setGroups([]);
       setEvidence({});
+      setSummary(null);
       onHouseholdAccessChanged();
       return true;
     }
@@ -285,6 +300,7 @@ export function InsightsSection({
       generation.current++;
       detailGeneration.current++;
       abortAll();
+      pendingDriver.current = null;
       detailControllers.current.clear();
     },
     [],
@@ -334,6 +350,7 @@ export function InsightsSection({
       setComparison(null);
       setSeries(null);
       setGroups([]);
+      setSummary(null);
       setGroupCursor(null);
       clearDetails();
       if (
@@ -373,13 +390,26 @@ export function InsightsSection({
         applied.currency,
         controller.signal,
       ),
+      fetchInsightSummary(
+        household.id,
+        applied.month,
+        applied.baseline,
+        applied.currency,
+        controller.signal,
+      ),
     ])
-      .then(([comp, trend]) => {
+      .then(([comp, trend, snapshot]) => {
         if (controller.signal.aborted || generation.current !== current) return;
         setComparison(comp);
         setSeries(trend);
+        setSummary(snapshot);
         setGroups(comp.items);
         setGroupCursor(comp.nextCursor);
+        const queued = pendingDriver.current;
+        if (queued && queued.dimension === applied.dimension) {
+          pendingDriver.current = null;
+          selectGroup(queued.group);
+        }
       })
       .catch((failure: unknown) => {
         if (controller.signal.aborted || generation.current !== current) return;
@@ -396,6 +426,9 @@ export function InsightsSection({
   useEffect(() => {
     if (error || detailError || validation) noticeRef.current?.focus();
   }, [error, detailError, validation]);
+  useEffect(() => {
+    if (selected) detailHeadingRef.current?.focus();
+  }, [selected]);
   function apply(event: FormEvent) {
     event.preventDefault();
     const months = insightMonthRange(
@@ -415,10 +448,31 @@ export function InsightsSection({
       return;
     }
     setValidation('');
+    pendingDriver.current = null;
     setCustom(true);
     setApplied({ ...draft });
     if (JSON.stringify(applied) === JSON.stringify(draft))
       setRevision((value) => value + 1);
+  }
+  function openDriver(dimension: InsightDimension, group: InsightGroup) {
+    setDraft((choice) => ({ ...choice, dimension }));
+    if (applied.dimension === dimension && comparison) selectGroup(group);
+    else {
+      pendingDriver.current = { dimension, group };
+      setApplied((choice) => ({ ...choice, dimension }));
+    }
+  }
+  function focusSection(id: string) {
+    const destination = id.startsWith('insights-plan-')
+      ? id
+      : `${id}-${household.id}`;
+    const node = document.getElementById(destination);
+    if (node) {
+      node.scrollIntoView({ block: 'start' });
+      node.focus();
+    } else if (id.startsWith('insights-plan-')) {
+      document.getElementById(`insights-recurring-${household.id}`)?.focus();
+    }
   }
   async function nextGroups() {
     if (!groupCursor || paging || busy || !comparison) return;
@@ -448,6 +502,7 @@ export function InsightsSection({
       ) {
         setGroups([]);
         setComparison(null);
+        setSummary(null);
         setGroupCursor(null);
         clearDetails();
         setError(
@@ -462,6 +517,7 @@ export function InsightsSection({
       ) {
         setGroups([]);
         setComparison(null);
+        setSummary(null);
         setGroupCursor(null);
         clearDetails();
         setError('The group pages overlapped. Reload current shared records.');
@@ -478,6 +534,7 @@ export function InsightsSection({
       ) {
         setGroups([]);
         setComparison(null);
+        setSummary(null);
         setGroupCursor(null);
         clearDetails();
       }
@@ -559,6 +616,7 @@ export function InsightsSection({
           failure.code === 'INSIGHT_SNAPSHOT_STALE'
         ) {
           setComparison(null);
+          setSummary(null);
           setSeries(null);
           setGroups([]);
           setGroupCursor(null);
@@ -608,6 +666,7 @@ export function InsightsSection({
         )
       ) {
         setComparison(null);
+        setSummary(null);
         setSeries(null);
         setGroups([]);
         setGroupCursor(null);
@@ -636,6 +695,7 @@ export function InsightsSection({
         failure.code === 'INSIGHT_SNAPSHOT_STALE'
       ) {
         setComparison(null);
+        setSummary(null);
         setSeries(null);
         setGroups([]);
         setGroupCursor(null);
@@ -749,6 +809,7 @@ export function InsightsSection({
           className="household-button household-button--secondary"
           type="button"
           onClick={() => {
+            pendingDriver.current = null;
             const choice = defaultChoice(
               reportingZone,
               nowProvider?.() ?? new Date(),
@@ -801,6 +862,13 @@ export function InsightsSection({
         <p role="status">
           Loading insights for {applied.month} versus {applied.baseline}…
         </p>
+      )}
+      {summary && (
+        <SummaryView
+          summary={summary}
+          onOpenDriver={openDriver}
+          onFocusSection={focusSection}
+        />
       )}
       {comparison && series && (
         <>
@@ -976,7 +1044,9 @@ export function InsightsSection({
       )}
       {selected && (
         <div className="insights-detail">
-          <h5>{selected.label} · disclosed evidence</h5>
+          <h5 ref={detailHeadingRef} tabIndex={-1}>
+            {selected.label} · disclosed evidence
+          </h5>
           <p>
             Descriptions are public ledger text. Each transaction detail is
             reauthorized before opening. A refund follows its source expense’s
@@ -1127,18 +1197,20 @@ export function InsightsSection({
         onHouseholdAccessChanged={onHouseholdAccessChanged}
         pending={budgetPending}
         setPending={setBudgetPending}
+        onChanged={() => setRevision((value) => value + 1)}
       />
       <RecurringSection
         key={`${household.id}:${household.role}:${applied.currency}:${reportingZone}`}
         household={household}
         currency={applied.currency}
         reportingZone={reportingZone}
-        refreshSignal={refreshSignal}
+        refreshSignal={refreshSignal + revision}
         csrf={csrf}
         onCsrfRefreshed={onCsrfRefreshed}
         onSessionExpired={onSessionExpired}
         onHouseholdAccessChanged={onHouseholdAccessChanged}
         onOpenTransaction={onOpenTransaction}
+        onChanged={() => setRevision((value) => value + 1)}
       />
     </section>
   );

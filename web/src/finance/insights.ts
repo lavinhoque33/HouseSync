@@ -162,7 +162,7 @@ function units(value: string, currency: FinancialAccountCurrency): bigint {
     BigInt(fraction || '0');
   return negative ? -magnitude : magnitude;
 }
-function period(value: unknown): value is InsightPeriod {
+export function period(value: unknown): value is InsightPeriod {
   if (!record(value, ['month', 'from', 'to', 'state'])) return false;
   return (
     typeof value.month === 'string' &&
@@ -172,17 +172,17 @@ function period(value: unknown): value is InsightPeriod {
     ['FUTURE', 'IN_PROGRESS', 'COMPLETED'].includes(String(value.state))
   );
 }
-function spend(
+export function spend(
   value: unknown,
   currency: FinancialAccountCurrency,
   total: true,
 ): value is InsightTotals;
-function spend(
+export function spend(
   value: unknown,
   currency: FinancialAccountCurrency,
   total?: false,
 ): value is InsightSpend;
-function spend(
+export function spend(
   value: unknown,
   currency: FinancialAccountCurrency,
   total = false,
@@ -208,7 +208,10 @@ function spend(
     (!total || money(value.incomeTotal, currency))
   );
 }
-function stateMatchesAsOf(periodValue: InsightPeriod, asOf: unknown): boolean {
+export function stateMatchesAsOf(
+  periodValue: InsightPeriod,
+  asOf: unknown,
+): boolean {
   return (
     typeof asOf === 'string' &&
     isCalendarDate(asOf) &&
@@ -220,7 +223,7 @@ function stateMatchesAsOf(periodValue: InsightPeriod, asOf: unknown): boolean {
           : 'COMPLETED')
   );
 }
-function change(
+export function change(
   value: unknown,
   currency: FinancialAccountCurrency,
   current: InsightSpend,

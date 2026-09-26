@@ -170,6 +170,7 @@ export function RecurringSection({
   onSessionExpired,
   onHouseholdAccessChanged,
   onOpenTransaction,
+  onChanged,
 }: {
   household: Household;
   currency: FinancialAccountCurrency;
@@ -180,6 +181,7 @@ export function RecurringSection({
   onSessionExpired: () => void;
   onHouseholdAccessChanged: () => void;
   onOpenTransaction: (id: string) => void;
+  onChanged?: () => void;
 }) {
   const [review, setReview] = useState<'OPEN' | 'DISMISSED'>('OPEN');
   const [candidates, setCandidates] = useState<CandidatePage | null>(null);
@@ -427,6 +429,7 @@ export function RecurringSection({
       if (active.signal.aborted || current !== generation.current) return;
       await action(token, active.signal);
       if (active.signal.aborted || current !== generation.current) return;
+      onChanged?.();
       invalidate();
       setEditing(null);
       setDraft(blankDraft());
@@ -823,6 +826,8 @@ export function RecurringSection({
   return (
     <section
       className="recurring-section"
+      id={`insights-recurring-${household.id}`}
+      tabIndex={-1}
       aria-label="Recurring expenses and household plans"
     >
       <h5>Possible recurring expenses</h5>
@@ -1033,7 +1038,7 @@ export function RecurringSection({
           )}
           <ul className="recurring-cards">
             {planRows.map(({ plan, expectation }) => (
-              <li key={plan.id}>
+              <li id={`insights-plan-${plan.id}`} tabIndex={-1} key={plan.id}>
                 <h6>
                   {plan.label} · {plan.kind.replace('_', ' ').toLowerCase()}
                 </h6>
