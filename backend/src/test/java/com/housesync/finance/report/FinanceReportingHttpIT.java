@@ -1149,6 +1149,441 @@ class FinanceReportingHttpIT {
         userId);
   }
 
+  @Test
+  void insightsConserveSourceRefundAndPageCurrentSharedEvidence() throws Exception {
+    Agent owner = signedInAgent("insights-owner");
+    String household = createHousehold(owner, "Insights household");
+    Agent member = signedInAgent("insights-member");
+    addMember(household, member.userId());
+    Agent outsider = signedInAgent("insights-outsider");
+    String account = createAccount(owner, household, "Owner card", "CASH", "USD");
+    String source =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                datedEntry(account, "EXPENSE", "-50.00", "USD", "ALPHA  Market", "2026-01-31")));
+    String refund =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                refundEntry(
+                    account, source, "40.00", "USD", "Different refund text", "2026-02-01")));
+    created(
+        owner.createTransaction(
+            household,
+            UUID.randomUUID(),
+            privateEntry(account, "EXPENSE", "-50.00", "USD", "Secret", "2026-02-02")));
+    String base = "/api/households/" + household + "/insights/";
+    String comparison =
+        base
+            + "spending-comparison?month=2026-02&baselineMonth=2026-01"
+            + "&currency=USD&dimension=MERCHANT&limit=1";
+    Resp first = member.get(comparison);
+    assertThat(first.status).as(first.body).isEqualTo(200);
+    assertThat(first.cacheControl()).contains("no-store");
+    assertThat(first.json().path("reportingTimeZone").asText()).isEqualTo("Etc/UTC");
+    assertThat(first.json().path("asOfDate").asText())
+        .isEqualTo(java.time.LocalDate.now(java.time.ZoneOffset.UTC).toString());
+    assertThat(first.json().path("current").path("netSpending").asText()).isEqualTo("-40.00");
+    assertThat(first.json().path("baseline").path("netSpending").asText()).isEqualTo("50.00");
+    assertThat(first.json().path("change").path("percentChange").asText()).isEqualTo("-180.00");
+    String key = first.json().path("items").get(0).path("key").asText();
+    assertThat(first.json().path("items").get(0).path("label").asText()).isEqualTo("alpha market");
+    Resp series =
+        member.get(
+            base
+                + "spending-series?fromMonth=2026-01&toMonth=2026-03"
+                + "&currency=USD&dimension=MERCHANT&groupKey="
+                + key);
+    assertThat(series.status).as(series.body).isEqualTo(200);
+    assertThat(series.json().path("items").get(0).path("totals").path("netSpending").asText())
+        .isEqualTo("50.00");
+    assertThat(series.json().path("items").get(1).path("totals").path("netSpending").asText())
+        .isEqualTo("-40.00");
+    Resp unfiltered =
+        member.get(base + "spending-series?fromMonth=2026-01&toMonth=2026-03&currency=USD");
+    assertThat(unfiltered.status).as(unfiltered.body).isEqualTo(200);
+    assertThat(unfiltered.json().path("dimension").isNull()).isTrue();
+    assertThat(unfiltered.json().path("groupKey").isNull()).isTrue();
+    assertThat(unfiltered.json().path("items").get(1).path("totals").path("netSpending").asText())
+        .isEqualTo("-40.00");
+    assertThat(unfiltered.json().path("items").get(1).path("totals").path("expenseCount").asText())
+        .isEqualTo("0");
+    Resp absent =
+        member.get(
+            base
+                + "spending-series?fromMonth=2026-01&toMonth=2026-03"
+                + "&currency=USD&dimension=CATEGORY&groupKey=HEALTHCARE");
+    assertThat(absent.json().path("items").get(1).path("totals").path("netSpending").asText())
+        .isEqualTo("0.00");
+    assertThat(absent.json().path("items").get(1).path("totals").path("incomeTotal").asText())
+        .isEqualTo("0.00");
+    Resp evidence =
+        member.get(
+            base
+                + "spending-evidence?month=2026-02&currency=USD"
+                + "&dimension=MERCHANT&groupKey="
+                + key);
+    assertThat(evidence.status).as(evidence.body).isEqualTo(200);
+    assertThat(evidence.json().path("items").get(0).path("id").asText()).isEqualTo(refund);
+    assertThat(evidence.json().path("items").get(0).path("description").asText())
+        .isEqualTo("Different refund text");
+    assertThat(evidence.json().path("items").get(0).size()).isEqualTo(8);
+    assertThat(outsider.get(comparison).status).isEqualTo(404);
+    assertThat(anonymousGet(comparison).status).isEqualTo(401);
+    assertThat(
+            outsider.get(
+                    base
+                        + "spending-evidence?month=2026-02&currency=USD"
+                        + "&dimension=MERCHANT&groupKey="
+                        + key)
+                .status)
+        .isEqualTo(404);
+    assertThat(member.get(comparison + "&limit=2").status).isEqualTo(400);
+    assertThat(
+            member.get(base + "spending-series?fromMonth=9999-12&toMonth=9999-12&currency=USD")
+                .status)
+        .isEqualTo(400);
+
+    String before = first.json().path("snapshot").asText();
+    created(
+        owner.createTransaction(
+            household,
+            UUID.randomUUID(),
+            privateEntry(account, "EXPENSE", "-40.00", "USD", "Another secret", "2026-02-03")));
+    assertThat(member.get(comparison).json().path("snapshot").asText()).isEqualTo(before);
+    assertThat(member.removeMember(household, owner.userId()).status).isEqualTo(403);
+    assertThat(owner.removeMember(household, member.userId()).status).isEqualTo(204);
+    assertThat(member.get(comparison).status).isEqualTo(404);
+  }
+
+  @Test
+  void insightsPageAllGroupsAndRejectStaleMovementWithoutTotalChange() throws Exception {
+    Agent owner = signedInAgent("insights-pages");
+    String household = createHousehold(owner, "Insights paging household");
+    String account = createAccount(owner, household, "Card", "CASH", "USD");
+    List<String> ids = new ArrayList<>();
+    for (int index = 0; index < 102; index++) {
+      String entry =
+          datedEntry(account, "EXPENSE", "-1.00", "USD", "Shop " + index, "2026-02-01")
+              .replace(
+                  "\"visibility\":\"HOUSEHOLD\"",
+                  "\"visibility\":\"HOUSEHOLD\",\"category\":\"GROCERIES\"");
+      ids.add(created(owner.createTransaction(household, UUID.randomUUID(), entry)));
+    }
+    String comparison =
+        "/api/households/"
+            + household
+            + "/insights/spending-comparison?month=2026-02&baselineMonth=2026-01"
+            + "&currency=USD&dimension=MERCHANT&limit=100";
+    JsonNode first = owner.get(comparison).json();
+    assertThat(first.path("items").size()).isEqualTo(100);
+    assertThat(first.path("current").path("expenseCount").asText()).isEqualTo("102");
+    String cursor = first.path("nextCursor").asText();
+    assertThat(cursor).isNotEmpty();
+    JsonNode second = owner.get(comparison + "&cursor=" + cursor).json();
+    assertThat(second.path("items").size()).isEqualTo(2);
+    assertThat(second.path("nextCursor").isNull()).isTrue();
+    String evidencePath =
+        "/api/households/"
+            + household
+            + "/insights/spending-evidence?month=2026-02&currency=USD&dimension=CATEGORY"
+            + "&groupKey=GROCERIES&limit=100";
+    JsonNode evidence = owner.get(evidencePath).json();
+    assertThat(evidence.path("totals").path("expenseCount").asText()).isEqualTo("102");
+    assertThat(evidence.path("items").size()).isEqualTo(100);
+    assertThat(
+            owner
+                .get(evidencePath + "&cursor=" + evidence.path("nextCursor").asText())
+                .json()
+                .path("items")
+                .size())
+        .isEqualTo(2);
+
+    Resp changed =
+        owner.patchTransaction(
+            household, ids.get(0), "{\"expectedVersion\":0,\"description\":\"Another merchant\"}");
+    assertThat(changed.status).as(changed.body).isEqualTo(200);
+    assertThat(owner.get(comparison).json().path("current").path("netSpending").asText())
+        .isEqualTo("102.00");
+    Resp stale = owner.get(comparison + "&cursor=" + cursor);
+    assertThat(stale.status).as(stale.body).isEqualTo(409);
+    assertThat(stale.json().path("code").asText()).isEqualTo("INSIGHT_SNAPSHOT_STALE");
+    assertThat(stale.cacheControl()).contains("no-store");
+    assertThat(owner.get(evidencePath + "&cursor=" + evidence.path("nextCursor").asText()).status)
+        .isEqualTo(409);
+  }
+
+  @Test
+  void insightsKeepArbitraryPrecisionAndReportOnlyCompleteMonths() throws Exception {
+    Agent owner = signedInAgent("insights-precision");
+    String household = createHousehold(owner, "Precision home");
+    String account = createAccount(owner, household, "Wallet", "CASH", "KWD");
+    created(
+        owner.createTransaction(
+            household,
+            UUID.randomUUID(),
+            datedEntry(account, "EXPENSE", "-999999999999.999", "KWD", "Large A", "9999-11-30")));
+    created(
+        owner.createTransaction(
+            household,
+            UUID.randomUUID(),
+            datedEntry(account, "EXPENSE", "-999999999999.999", "KWD", "Large B", "9999-11-30")));
+    created(
+        owner.createTransaction(
+            household,
+            UUID.randomUUID(),
+            datedEntry(account, "INCOME", "1.001", "KWD", "Pay", "9999-11-30")));
+    String url =
+        "/api/households/"
+            + household
+            + "/insights/spending-series?fromMonth=9999-11&toMonth=9999-12&currency=KWD";
+    Resp report = owner.get(url);
+    assertThat(report.status).as(report.body).isEqualTo(200);
+    JsonNode item = report.json().path("items").get(0);
+    assertThat(item.path("period").path("to").asText()).isEqualTo("9999-12-01");
+    assertThat(item.path("totals").path("expenseTotal").asText()).isEqualTo("1999999999999.998");
+    assertThat(item.path("totals").path("incomeTotal").asText()).isEqualTo("1.001");
+    assertThat(item.path("totals").path("expenseCount").asText()).isEqualTo("2");
+    assertThat(
+            owner.get(
+                    url.replace(
+                        "fromMonth=9999-11&toMonth=9999-12", "fromMonth=9999-12&toMonth=9999-12"))
+                .status)
+        .isEqualTo(400);
+  }
+
+  @Test
+  void insightsMonthBoundsZoneAndCalendarStateAreExplicit() throws Exception {
+    Agent owner = signedInAgent("insights-calendar");
+    String household = createHousehold(owner, "Calendar home");
+    Resp changed =
+        owner.request(
+            "PATCH",
+            settingsPath(household),
+            "{\"reportingTimeZone\":\"Europe/Berlin\",\"expectedVersion\":0}",
+            owner.csrfToken,
+            null);
+    assertThat(changed.status).as(changed.body).isEqualTo(200);
+    String root = "/api/households/" + household + "/insights/spending-series?";
+    Resp single = owner.get(root + "fromMonth=2026-03&toMonth=2026-04&currency=EUR");
+    assertThat(single.status).as(single.body).isEqualTo(200);
+    assertThat(single.json().path("reportingTimeZone").asText()).isEqualTo("Europe/Berlin");
+    assertThat(single.json().path("asOfDate").asText())
+        .isEqualTo(java.time.LocalDate.now(java.time.ZoneId.of("Europe/Berlin")).toString());
+    JsonNode march = single.json().path("items").get(0).path("period");
+    assertThat(march.path("month").asText()).isEqualTo("2026-03");
+    assertThat(march.path("from").asText()).isEqualTo("2026-03-01");
+    assertThat(march.path("to").asText()).isEqualTo("2026-04-01");
+    java.time.LocalDate asOf = java.time.LocalDate.parse(single.json().path("asOfDate").asText());
+    assertThat(march.path("state").asText())
+        .isEqualTo(
+            asOf.isBefore(java.time.LocalDate.of(2026, 3, 1))
+                ? "FUTURE"
+                : asOf.isBefore(java.time.LocalDate.of(2026, 4, 1)) ? "IN_PROGRESS" : "COMPLETED");
+    assertThat(single.json().path("items").size()).isEqualTo(1);
+    Resp twentyFour = owner.get(root + "fromMonth=2024-03&toMonth=2026-03&currency=EUR");
+    assertThat(twentyFour.status).as(twentyFour.body).isEqualTo(200);
+    assertThat(twentyFour.json().path("items").size()).isEqualTo(24);
+    assertThat(twentyFour.json().path("items").get(0).path("period").path("month").asText())
+        .isEqualTo("2024-03");
+    assertThat(twentyFour.json().path("items").get(23).path("totals").path("expenseCount").asText())
+        .isEqualTo("0");
+    assertThat(owner.get(root + "fromMonth=2024-02&toMonth=2026-03&currency=EUR").status)
+        .isEqualTo(400);
+    assertThat(owner.get(root + "fromMonth=2026-03&toMonth=2026-03&currency=EUR").status)
+        .isEqualTo(400);
+    assertThat(owner.get(root + "fromMonth=1899-12&toMonth=1900-01&currency=EUR").status)
+        .isEqualTo(400);
+  }
+
+  @Test
+  void insightsUseEveryCurrencyScaleAndSeparateIncomeFromSpending() throws Exception {
+    Agent owner = signedInAgent("insights-currencies");
+    String household = createHousehold(owner, "Currencies home");
+    java.util.Map<String, String> amounts =
+        java.util.Map.of(
+            "BRL", "1.23",
+            "USD", "1.23",
+            "EUR", "1.23",
+            "GBP", "1.23",
+            "CAD", "1.23",
+            "JPY", "1",
+            "KWD", "1.234");
+    for (var currency : amounts.entrySet()) {
+      String account =
+          createAccount(owner, household, currency.getKey(), "CASH", currency.getKey());
+      created(
+          owner.createTransaction(
+              household,
+              UUID.randomUUID(),
+              datedEntry(
+                      account,
+                      "EXPENSE",
+                      "-" + currency.getValue(),
+                      currency.getKey(),
+                      "Market",
+                      "2026-02-28")
+                  .replace(
+                      "\"visibility\":\"HOUSEHOLD\"",
+                      "\"visibility\":\"HOUSEHOLD\",\"category\":\"GROCERIES\"")));
+      created(
+          owner.createTransaction(
+              household,
+              UUID.randomUUID(),
+              datedEntry(
+                  account, "INCOME", currency.getValue(), currency.getKey(), "Pay", "2026-02-28")));
+      String root =
+          "/api/households/"
+              + household
+              + "/insights/spending-series?fromMonth=2026-02&toMonth=2026-03&currency="
+              + currency.getKey();
+      JsonNode unfiltered = owner.get(root).json().path("items").get(0).path("totals");
+      assertThat(unfiltered.path("expenseTotal").asText()).isEqualTo(currency.getValue());
+      assertThat(unfiltered.path("netSpending").asText()).isEqualTo(currency.getValue());
+      assertThat(unfiltered.path("expenseCount").asText()).isEqualTo("1");
+      assertThat(unfiltered.path("incomeTotal").asText()).isEqualTo(currency.getValue());
+      JsonNode filtered =
+          owner
+              .get(root + "&dimension=CATEGORY&groupKey=GROCERIES")
+              .json()
+              .path("items")
+              .get(0)
+              .path("totals");
+      assertThat(filtered.path("incomeTotal").asText())
+          .isEqualTo(
+              currency.getKey().equals("JPY")
+                  ? "0"
+                  : currency.getKey().equals("KWD") ? "0.000" : "0.00");
+      assertThat(filtered.path("netSpending").asText()).isEqualTo(currency.getValue());
+      if (currency.getKey().equals("USD")) {
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                datedEntry(account, "INCOME", "4.00", "USD", "January pay", "2026-01-31")));
+        JsonNode incomeOnly =
+            owner
+                .get(
+                    root.replace(
+                        "fromMonth=2026-02&toMonth=2026-03", "fromMonth=2026-01&toMonth=2026-02"))
+                .json()
+                .path("items")
+                .get(0)
+                .path("totals");
+        assertThat(incomeOnly.path("incomeTotal").asText()).isEqualTo("4.00");
+        assertThat(incomeOnly.path("expenseTotal").asText()).isEqualTo("0.00");
+        assertThat(incomeOnly.path("netSpending").asText()).isEqualTo("0.00");
+        assertThat(incomeOnly.path("expenseCount").asText()).isEqualTo("0");
+      }
+    }
+  }
+
+  @Test
+  void insightsRefundOnlyMonthUsesOutsideSourceAndNeverDividesByNonpositiveBaseline()
+      throws Exception {
+    Agent owner = signedInAgent("insights-ratio");
+    String household = createHousehold(owner, "Ratios home");
+    String account = createAccount(owner, household, "Card", "CASH", "USD");
+    String source =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                datedEntry(account, "EXPENSE", "-20.00", "USD", "Original seller", "2026-01-31")));
+    String refund =
+        created(
+            owner.createTransaction(
+                household,
+                UUID.randomUUID(),
+                refundEntry(account, source, "20.00", "USD", "Other seller", "2026-02-01")));
+    created(
+        owner.createTransaction(
+            household,
+            UUID.randomUUID(),
+            datedEntry(account, "INCOME", "5.00", "USD", "Pay", "2026-02-14")));
+    String base =
+        "/api/households/"
+            + household
+            + "/insights/spending-comparison?currency=USD&dimension=MERCHANT";
+    JsonNode zeroBaseline = owner.get(base + "&month=2026-02&baselineMonth=2026-03").json();
+    assertThat(zeroBaseline.path("current").path("netSpending").asText()).isEqualTo("-20.00");
+    assertThat(zeroBaseline.path("current").path("incomeTotal").asText()).isEqualTo("5.00");
+    assertThat(zeroBaseline.path("baseline").path("netSpending").asText()).isEqualTo("0.00");
+    assertThat(zeroBaseline.path("change").path("delta").asText()).isEqualTo("-20.00");
+    assertThat(zeroBaseline.path("change").path("percentChange").isNull()).isTrue();
+    assertThat(zeroBaseline.path("change").path("percentUnavailableReason").asText())
+        .isEqualTo("BASELINE_ZERO");
+    JsonNode negativeBaseline = owner.get(base + "&month=2026-03&baselineMonth=2026-02").json();
+    assertThat(negativeBaseline.path("change").path("delta").asText()).isEqualTo("20.00");
+    assertThat(negativeBaseline.path("change").path("direction").asText()).isEqualTo("INCREASE");
+    assertThat(negativeBaseline.path("change").path("percentChange").isNull()).isTrue();
+    assertThat(negativeBaseline.path("change").path("percentUnavailableReason").asText())
+        .isEqualTo("BASELINE_NEGATIVE");
+    String key = zeroBaseline.path("items").get(0).path("key").asText();
+    assertThat(zeroBaseline.path("items").get(0).path("label").asText())
+        .isEqualTo("original seller");
+    JsonNode evidence =
+        owner
+            .get(
+                "/api/households/"
+                    + household
+                    + "/insights/spending-evidence?month=2026-02&currency=USD"
+                    + "&dimension=MERCHANT&groupKey="
+                    + key)
+            .json();
+    assertThat(evidence.path("totals").path("refundCount").asText()).isEqualTo("1");
+    assertThat(evidence.path("items").get(0).path("id").asText()).isEqualTo(refund);
+    assertThat(evidence.path("items").get(0).path("description").asText())
+        .isEqualTo("Other seller");
+  }
+
+  @Test
+  void insightsKeepDistinctPublicDescriptionsAndGroupUnnormalizableText() throws Exception {
+    Agent owner = signedInAgent("insights-normalization");
+    String household = createHousehold(owner, "Description home");
+    String account = createAccount(owner, household, "Card", "CASH", "USD");
+    for (String text : List.of("Shop #12", "SHOP #13", "\uFB03".repeat(70))) {
+      created(
+          owner.createTransaction(
+              household,
+              UUID.randomUUID(),
+              datedEntry(account, "EXPENSE", "-1.00", "USD", text, "2026-02-01")));
+    }
+    JsonNode comparison =
+        owner
+            .get(
+                "/api/households/"
+                    + household
+                    + "/insights/spending-comparison?month=2026-02&baselineMonth=2026-01"
+                    + "&currency=USD&dimension=MERCHANT")
+            .json();
+    assertThat(comparison.path("current").path("expenseTotal").asText()).isEqualTo("3.00");
+    assertThat(comparison.path("items").size()).isEqualTo(3);
+    java.util.Set<String> labels = new java.util.HashSet<>();
+    java.util.Set<String> keys = new java.util.HashSet<>();
+    for (JsonNode group : comparison.path("items")) {
+      labels.add(group.path("label").asText());
+      keys.add(group.path("key").asText());
+      assertThat(group.path("current").path("expenseCount").asText()).isEqualTo("1");
+    }
+    assertThat(labels).containsExactlyInAnyOrder("shop #12", "shop #13", "Ungrouped descriptions");
+    assertThat(keys).hasSize(3).contains("UNGROUPED");
+    JsonNode ungrouped =
+        owner
+            .get(
+                "/api/households/"
+                    + household
+                    + "/insights/spending-evidence?month=2026-02&currency=USD"
+                    + "&dimension=MERCHANT&groupKey=UNGROUPED")
+            .json();
+    assertThat(ungrouped.path("totals").path("netSpending").asText()).isEqualTo("1.00");
+    assertThat(ungrouped.path("items").get(0).path("description").asText())
+        .isEqualTo("\uFB03".repeat(70));
+  }
+
   private static String settingsPath(String householdId) {
     return "/api/households/" + householdId + "/finance-settings";
   }

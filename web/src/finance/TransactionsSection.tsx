@@ -59,6 +59,7 @@ import { RepaymentsSection } from './RepaymentsSection';
 import { SettlementSuggestionsSection } from './SettlementSuggestionsSection';
 import { ReportingSettingsSection } from './ReportingSettingsSection';
 import { SpendingDashboardSection } from './SpendingDashboardSection';
+import { InsightsSection } from './InsightsSection';
 import { ContributionSummarySection } from './ContributionSummarySection';
 import {
   isFutureDateInZone,
@@ -464,6 +465,9 @@ export function TransactionsSection({
   // refetches the spending dashboard after relevant mutations.
   const [reportingZone, setReportingZone] = useState('Etc/UTC');
   const [reportingRefresh, setReportingRefresh] = useState(0);
+  // Category-only decisions reclassify Insights groups without changing ledger totals.
+  const [insightsRefresh, setInsightsRefresh] = useState(0);
+  const [showInsights, setShowInsights] = useState(false);
   // A revoked share vanishes from a newly authorized feed rather than
   // returning an incremented version. Retain only the previous first page.
   const householdFirstPageRef = useRef<Map<string, number> | null>(null);
@@ -1394,6 +1398,7 @@ export function TransactionsSection({
     // Owner-only provenance follows the committed decision, so the panel
     // explains the new origin without being reopened.
     if (detail?.id === transaction.id) void loadProvenance(transaction);
+    setInsightsRefresh((value) => value + 1);
     reloadViews(loadedViews(), false, true);
   }
 
@@ -3777,6 +3782,42 @@ export function TransactionsSection({
       className="finance-transactions"
       aria-labelledby={`finance-transactions-${household.id}`}
     >
+      <nav
+        className="insights-navigation"
+        aria-label={`Views for ${household.name}`}
+      >
+        <button
+          type="button"
+          className="household-button household-button--secondary"
+          aria-current={!showInsights ? 'page' : undefined}
+          onClick={() => setShowInsights(false)}
+        >
+          Home · transactions
+        </button>
+        <button
+          type="button"
+          className="household-button household-button--secondary"
+          aria-current={showInsights ? 'page' : undefined}
+          onClick={() => setShowInsights(true)}
+        >
+          Insights
+        </button>
+      </nav>
+      {showInsights && (
+        <InsightsSection
+          household={household}
+          reportingZone={reportingZone}
+          refreshSignal={
+            reportingRefresh + ledgerRefreshSignal + insightsRefresh
+          }
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdAccessChanged}
+          onOpenTransaction={(id) => {
+            void openDetail(id);
+          }}
+          nowProvider={nowProvider}
+        />
+      )}
       <div className="finance-accounts-heading">
         <div>
           <p className="eyebrow">Manual entry</p>

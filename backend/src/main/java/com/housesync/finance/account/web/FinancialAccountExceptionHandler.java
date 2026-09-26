@@ -29,6 +29,7 @@ import com.housesync.finance.connection.webhook.PlaidWebhookVerifier.WebhookVeri
 import com.housesync.finance.repayment.RepaymentPolicy;
 import com.housesync.finance.repayment.RepaymentService;
 import com.housesync.finance.report.application.ContributionSummaryService.ContributionSnapshotStaleException;
+import com.housesync.finance.report.application.SpendingInsightsService.InsightSnapshotStaleException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsForbiddenException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionConflictException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionExhaustedException;
@@ -81,6 +82,16 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 public class FinancialAccountExceptionHandler {
 
   private static final Logger log = LoggerFactory.getLogger(FinancialAccountExceptionHandler.class);
+
+  @ExceptionHandler(InsightSnapshotStaleException.class)
+  public ResponseEntity<ApiError> insightSnapshotStale(InsightSnapshotStaleException failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.INSIGHT_SNAPSHOT_STALE,
+        "Insights changed. Start again from the first page.",
+        null,
+        failure);
+  }
 
   @ExceptionHandler(ContributionSnapshotStaleException.class)
   public ResponseEntity<ApiError> contributionSnapshotStale(

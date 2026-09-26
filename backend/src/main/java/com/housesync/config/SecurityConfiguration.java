@@ -124,7 +124,10 @@ public class SecurityConfiguration {
                         "/api/households/*/transaction-categories",
                         "/api/households/*/finance-settings",
                         "/api/households/*/spending-summary",
-                        "/api/households/*/contribution-summary")
+                        "/api/households/*/contribution-summary",
+                        "/api/households/*/insights/spending-series",
+                        "/api/households/*/insights/spending-comparison",
+                        "/api/households/*/insights/spending-evidence")
                     .authenticated()
                     .requestMatchers(
                         HttpMethod.PATCH,

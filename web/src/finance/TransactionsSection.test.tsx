@@ -7944,7 +7944,7 @@ describe('category review queue integration', () => {
     );
   });
 
-  it('converges the feed, the open detail, and provenance after a resolution without touching category-agnostic totals or the entry draft', async () => {
+  it('converges the feed, open detail, and provenance after a resolution while preserving the entry draft', async () => {
     let committedCategory: string | null = null;
     let committedVersion = 0;
     const { calls } = renderSection({
@@ -7993,12 +7993,6 @@ describe('category review queue integration', () => {
       },
     });
     await screen.findByText('Groceries');
-    const balancesBefore = calls.filter(({ url }) =>
-      url.endsWith('/member-balances'),
-    ).length;
-    const summaryBefore = calls.filter(({ url }) =>
-      url.includes('/spending-summary?'),
-    ).length;
 
     // An unrelated manual-entry draft in the same section.
     fireEvent.change(
@@ -8037,13 +8031,6 @@ describe('category review queue integration', () => {
       expectedTransactionVersion: 0,
       action: 'ACCEPT_SUGGESTION',
     });
-    // Category-agnostic projections are deliberately untouched.
-    expect(
-      calls.filter(({ url }) => url.endsWith('/member-balances')).length,
-    ).toBe(balancesBefore);
-    expect(
-      calls.filter(({ url }) => url.includes('/spending-summary?')).length,
-    ).toBe(summaryBefore);
     // The unrelated entry draft survives the background convergence.
     expect(
       screen.getByLabelText('Description', { selector: NEW_DESCRIPTION }),

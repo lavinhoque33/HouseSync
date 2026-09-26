@@ -36,6 +36,15 @@ import {
   type ReplaceBody,
   type ResolveBody,
 } from '../finance/bank-activity';
+import {
+  parseInsightSeries,
+  parseInsightComparison,
+  parseInsightEvidence,
+  type InsightSeries,
+  type InsightComparison,
+  type InsightEvidence,
+  type InsightDimension,
+} from '../finance/insights';
 import { isRegionShapedZone } from '../finance/reporting';
 import {
   parseRepayment,
@@ -107,6 +116,7 @@ export type ApiErrorCode =
   | 'REPAYMENT_NOT_FOUND'
   | 'REPAYMENT_CONFLICT'
   | 'SETTLEMENT_SNAPSHOT_STALE'
+  | 'INSIGHT_SNAPSHOT_STALE'
   | 'CONTRIBUTION_SNAPSHOT_STALE'
   | 'BANK_ACTIVITY_NOT_FOUND'
   | 'OBSERVATION_NOT_POSTED'
@@ -190,6 +200,7 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'REPAYMENT_NOT_FOUND',
     'REPAYMENT_CONFLICT',
     'SETTLEMENT_SNAPSHOT_STALE',
+    'INSIGHT_SNAPSHOT_STALE',
     'CONTRIBUTION_SNAPSHOT_STALE',
     'FINANCE_BUSY',
     'BANK_ACTIVITY_NOT_FOUND',
@@ -5137,6 +5148,135 @@ export async function fetchSettlementSuggestions(
   return repaymentRequest(
     `/api/households/${encodeURIComponent(householdId)}/settlement-suggestions?${params}`,
     (value) => parseSettlementSuggestions(value, currency),
+    signal,
+  );
+}
+
+async function insightRequest<T>(
+  householdId: string,
+  route: string,
+  params: URLSearchParams,
+  parse: (value: unknown) => T | undefined,
+  signal?: AbortSignal,
+): Promise<T> {
+  const response = await apiFetch(
+    `/api/households/${encodeURIComponent(householdId)}/insights/${route}?${params}`,
+    {
+      method: 'GET',
+      credentials: 'include',
+      headers: { ...JSON_HEADERS },
+      cache: 'no-store',
+    },
+    signal,
+    AUTH_TIMEOUT_MS,
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'Could not load household insights.',
+    );
+  }
+  const parsed = parse(await readJson<unknown>(response));
+  if (!parsed)
+    throw new ApiError({
+      status: response.status,
+      code: 'UNKNOWN_ERROR',
+      message: 'The server returned an unexpected insights response.',
+    });
+  return parsed;
+}
+
+export function fetchInsightSeries(
+  householdId: string,
+  fromMonth: string,
+  toMonth: string,
+  currency: FinancialAccountCurrency,
+  signal?: AbortSignal,
+  dimension: InsightDimension | null = null,
+  groupKey: string | null = null,
+): Promise<InsightSeries> {
+  const params = new URLSearchParams({ fromMonth, toMonth, currency });
+  if (dimension !== null && groupKey !== null) {
+    params.set('dimension', dimension);
+    params.set('groupKey', groupKey);
+  }
+  return insightRequest(
+    householdId,
+    'spending-series',
+    params,
+    (body) =>
+      parseInsightSeries(
+        body,
+        fromMonth,
+        toMonth,
+        currency,
+        dimension,
+        groupKey,
+      ),
+    signal,
+  );
+}
+
+export function fetchInsightComparison(
+  householdId: string,
+  month: string,
+  baselineMonth: string,
+  currency: FinancialAccountCurrency,
+  dimension: InsightDimension,
+  limit = 100,
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<InsightComparison> {
+  const params = new URLSearchParams({
+    month,
+    baselineMonth,
+    currency,
+    dimension,
+    limit: String(limit),
+  });
+  if (cursor) params.set('cursor', cursor);
+  return insightRequest(
+    householdId,
+    'spending-comparison',
+    params,
+    (body) =>
+      parseInsightComparison(
+        body,
+        month,
+        baselineMonth,
+        currency,
+        dimension,
+        limit,
+      ),
+    signal,
+  );
+}
+
+export function fetchInsightEvidence(
+  householdId: string,
+  month: string,
+  currency: FinancialAccountCurrency,
+  dimension: InsightDimension,
+  groupKey: string,
+  limit = 100,
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<InsightEvidence> {
+  const params = new URLSearchParams({
+    month,
+    currency,
+    dimension,
+    groupKey,
+    limit: String(limit),
+  });
+  if (cursor) params.set('cursor', cursor);
+  return insightRequest(
+    householdId,
+    'spending-evidence',
+    params,
+    (body) =>
+      parseInsightEvidence(body, month, currency, dimension, groupKey, limit),
     signal,
   );
 }

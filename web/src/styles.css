@@ -1860,9 +1860,6 @@ code {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.15rem;
   }
-}
-
-@media (max-width: 420px) {
   .finance-filter-form {
     padding: 8px;
     gap: 12px;
@@ -2011,6 +2008,9 @@ code {
   .auth {
     padding: var(--space-4);
     max-width: 640px;
+  }
+  .auth:has(.insights-section) {
+    max-width: none;
   }
 }
 
@@ -2467,4 +2467,206 @@ code {
 .bank-activity-more {
   display: flex;
   justify-content: flex-start;
+}
+
+.insights-navigation,
+.insights-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.insights-navigation {
+  margin-bottom: 1rem;
+}
+
+.insights-section {
+  min-width: 0;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.insights-section h4,
+.insights-section h5,
+.insights-section h6 {
+  margin-block: 1rem 0.5rem;
+}
+
+.insights-controls label {
+  display: grid;
+  gap: 0.3rem;
+  min-width: min(100%, 10rem);
+}
+
+.insights-controls input,
+.insights-controls select {
+  max-width: 100%;
+  min-height: 44px;
+}
+
+.insights-section button,
+.insights-navigation button {
+  min-height: 44px;
+}
+
+.insights-section button:focus-visible,
+.insights-navigation button:focus-visible,
+.insights-section input:focus-visible,
+.insights-section select:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.insights-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  margin-block: 0.75rem 1rem;
+}
+
+.insights-scroll table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 48rem;
+}
+
+.insights-scroll caption {
+  text-align: left;
+  font-weight: 650;
+  padding: 0.5rem 0;
+}
+
+.insights-scroll th,
+.insights-scroll td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.6rem;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.insights-scroll tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--color-line) 22%, white);
+}
+
+.insights-chart {
+  margin: 1rem 0;
+  padding: 0.75rem;
+  border: 1px solid var(--color-line);
+  border-radius: 0.5rem;
+}
+
+.insights-chart figcaption {
+  font-weight: 700;
+}
+
+.insights-chart-legend {
+  margin: 0.4rem 0 0.75rem;
+  font-size: 0.85rem;
+}
+
+.insights-chart ol {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.insights-chart li {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr) minmax(8rem, max-content);
+  gap: 0.6rem;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.insights-chart-axis {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  min-height: 1.5rem;
+}
+
+.insights-chart-axis::before {
+  position: absolute;
+  inset-block: 0;
+  left: 50%;
+  border-left: 2px solid var(--color-ink);
+  content: '';
+}
+
+.insights-chart-bar {
+  display: block;
+  height: 1rem;
+  min-width: 1px;
+}
+
+.insights-chart-bar--refund {
+  grid-column: 1;
+  justify-self: end;
+  background: #ae5c29;
+}
+
+.insights-chart-bar--positive {
+  grid-column: 2;
+  justify-self: start;
+  background: #276e65;
+}
+
+.insights-chart-zero {
+  position: absolute;
+  left: 50%;
+  padding: 0.15rem 0.4rem;
+  transform: translateX(-50%);
+  border: 1px solid var(--color-ink);
+  border-radius: 0.35rem;
+  background: #fff;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.insights-chart-amount {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 620px) {
+  .insights-chart li {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.2rem;
+  }
+
+  .insights-chart-zero {
+    padding: 0.1rem 0.2rem;
+    font-size: 0.6rem;
+  }
+
+  .insights-chart-amount {
+    justify-self: end;
+  }
+}
+
+.insights-detail {
+  border-top: 2px solid var(--color-line);
+  margin-top: 1.5rem;
+}
+
+@media (max-width: 600px) {
+  .insights-navigation button,
+  .insights-controls label,
+  .insights-controls button {
+    flex: 1 1 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .insights-section *,
+  .insights-navigation * {
+    scroll-behavior: auto;
+    animation-duration: 0.01ms;
+    transition-duration: 0.01ms;
+  }
 }
