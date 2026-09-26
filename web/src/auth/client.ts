@@ -45,6 +45,23 @@ import {
   type InsightEvidence,
   type InsightDimension,
 } from '../finance/insights';
+import {
+  parseCandidatePage,
+  parseCandidateEvidence,
+  parseReview,
+  parseRecurringPlan,
+  parsePlanPage,
+  parsePlanProjectionPage,
+  parsePlanObservations,
+  type CandidatePage,
+  type CandidateEvidence,
+  type RecurringPlan,
+  type PlanPage,
+  type PlanProjectionPage,
+  type PlanObservations,
+  type CreatePlan,
+  type PlanContent,
+} from '../finance/recurring';
 import { isRegionShapedZone } from '../finance/reporting';
 import {
   parseRepayment,
@@ -117,6 +134,8 @@ export type ApiErrorCode =
   | 'REPAYMENT_CONFLICT'
   | 'SETTLEMENT_SNAPSHOT_STALE'
   | 'INSIGHT_SNAPSHOT_STALE'
+  | 'RECURRING_PLAN_NOT_FOUND'
+  | 'RECURRING_PLAN_CONFLICT'
   | 'CONTRIBUTION_SNAPSHOT_STALE'
   | 'BANK_ACTIVITY_NOT_FOUND'
   | 'OBSERVATION_NOT_POSTED'
@@ -5277,6 +5296,213 @@ export function fetchInsightEvidence(
     params,
     (body) =>
       parseInsightEvidence(body, month, currency, dimension, groupKey, limit),
+    signal,
+  );
+}
+
+const recurringPath = (householdId: string) =>
+  `/api/households/${encodeURIComponent(householdId)}`;
+async function recurringRequest<T>(
+  path: string,
+  parse: (value: unknown) => T | undefined,
+  signal?: AbortSignal,
+  operation?: {
+    method: 'PUT' | 'POST' | 'PATCH';
+    body: unknown;
+    csrf: CsrfToken;
+    key?: string;
+  },
+): Promise<T> {
+  const response = await apiFetch(
+    path,
+    {
+      method: operation?.method ?? 'GET',
+      credentials: 'include',
+      headers: operation
+        ? {
+            ...unsafeHeaders(operation.csrf),
+            ...(operation.key ? { 'Idempotency-Key': operation.key } : {}),
+          }
+        : { ...JSON_HEADERS },
+      cache: 'no-store',
+      ...(operation ? { body: JSON.stringify(operation.body) } : {}),
+    },
+    signal,
+    AUTH_TIMEOUT_MS,
+  );
+  if (!response.ok)
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'The recurring request could not be completed.',
+    );
+  const result = parse(await readJson<unknown>(response));
+  if (!result)
+    throw new ApiError({
+      status: response.status,
+      code: 'UNKNOWN_ERROR',
+      message: 'The server returned an unexpected recurring response.',
+    });
+  return result;
+}
+export function fetchRecurringCandidates(
+  householdId: string,
+  currency: FinancialAccountCurrency,
+  review: 'OPEN' | 'DISMISSED' | 'ALL' = 'OPEN',
+  limit = 100,
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<CandidatePage> {
+  const params = new URLSearchParams({
+    currency,
+    review,
+    limit: String(limit),
+  });
+  if (cursor) params.set('cursor', cursor);
+  return recurringRequest(
+    `${recurringPath(householdId)}/insights/recurring-candidates?${params}`,
+    (value) => parseCandidatePage(value, currency, review, limit),
+    signal,
+  );
+}
+export function fetchRecurringEvidence(
+  householdId: string,
+  currency: FinancialAccountCurrency,
+  merchantKey: string,
+  limit = 100,
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<CandidateEvidence> {
+  const params = new URLSearchParams({
+    currency,
+    merchantKey,
+    limit: String(limit),
+  });
+  if (cursor) params.set('cursor', cursor);
+  return recurringRequest(
+    `${recurringPath(householdId)}/insights/recurring-evidence?${params}`,
+    (value) => parseCandidateEvidence(value, currency, merchantKey, limit),
+    signal,
+  );
+}
+export function putRecurringReview(
+  householdId: string,
+  currency: FinancialAccountCurrency,
+  merchantKey: string,
+  candidateFingerprint: string,
+  expectedVersion: number,
+  status: 'OPEN' | 'DISMISSED',
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+) {
+  return recurringRequest(
+    `${recurringPath(householdId)}/insights/recurring-review`,
+    (value) => parseReview(value, merchantKey, currency),
+    signal,
+    {
+      method: 'PUT',
+      csrf,
+      body: {
+        currency,
+        merchantKey,
+        candidateFingerprint,
+        expectedVersion,
+        status,
+      },
+    },
+  );
+}
+export function fetchRecurringPlans(
+  householdId: string,
+  currency: FinancialAccountCurrency,
+  status: 'ACTIVE' | 'ARCHIVED' | 'ALL' = 'ACTIVE',
+  limit = 100,
+  offset = 0,
+  signal?: AbortSignal,
+): Promise<PlanPage> {
+  const params = new URLSearchParams({
+    currency,
+    status,
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return recurringRequest(
+    `${recurringPath(householdId)}/recurring-plans?${params}`,
+    (value) => parsePlanPage(value, householdId, currency, limit, offset),
+    signal,
+  );
+}
+export function fetchRecurringPlan(
+  householdId: string,
+  id: string,
+  signal?: AbortSignal,
+): Promise<RecurringPlan> {
+  return recurringRequest(
+    `${recurringPath(householdId)}/recurring-plans/${encodeURIComponent(id)}`,
+    (value) => parseRecurringPlan(value, householdId),
+    signal,
+  );
+}
+export function createRecurringPlan(
+  householdId: string,
+  input: CreatePlan,
+  key: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<RecurringPlan> {
+  return recurringRequest(
+    `${recurringPath(householdId)}/recurring-plans`,
+    (value) => parseRecurringPlan(value, householdId, input.currency),
+    signal,
+    { method: 'POST', body: input, key, csrf },
+  );
+}
+export function patchRecurringPlan(
+  householdId: string,
+  id: string,
+  input:
+    | { expectedVersion: number; status: 'ARCHIVED' }
+    | ({
+        expectedVersion: number;
+        acknowledgeHouseholdDisclosure: true;
+      } & Partial<Omit<PlanContent, 'currency'>>),
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<RecurringPlan> {
+  return recurringRequest(
+    `${recurringPath(householdId)}/recurring-plans/${encodeURIComponent(id)}`,
+    (value) => parseRecurringPlan(value, householdId),
+    signal,
+    { method: 'PATCH', body: input, csrf },
+  );
+}
+export function fetchRecurringPlanProjections(
+  householdId: string,
+  currency: FinancialAccountCurrency,
+  limit = 100,
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<PlanProjectionPage> {
+  const params = new URLSearchParams({ currency, limit: String(limit) });
+  if (cursor) params.set('cursor', cursor);
+  return recurringRequest(
+    `${recurringPath(householdId)}/insights/recurring-plans?${params}`,
+    (value) => parsePlanProjectionPage(value, householdId, currency, limit),
+    signal,
+  );
+}
+export function fetchRecurringPlanObservations(
+  householdId: string,
+  id: string,
+  limit = 100,
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<PlanObservations> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (cursor) params.set('cursor', cursor);
+  return recurringRequest(
+    `${recurringPath(householdId)}/recurring-plans/${encodeURIComponent(id)}/observations?${params}`,
+    (value) => parsePlanObservations(value, householdId, id, limit),
     signal,
   );
 }

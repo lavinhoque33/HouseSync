@@ -29,6 +29,7 @@ import com.housesync.finance.connection.webhook.PlaidWebhookVerifier.WebhookVeri
 import com.housesync.finance.repayment.RepaymentPolicy;
 import com.housesync.finance.repayment.RepaymentService;
 import com.housesync.finance.report.application.ContributionSummaryService.ContributionSnapshotStaleException;
+import com.housesync.finance.report.application.RecurringExceptions;
 import com.housesync.finance.report.application.SpendingInsightsService.InsightSnapshotStaleException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsForbiddenException;
 import com.housesync.finance.report.web.FinanceSettingsExceptions.FinanceSettingsVersionConflictException;
@@ -82,6 +83,68 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 public class FinancialAccountExceptionHandler {
 
   private static final Logger log = LoggerFactory.getLogger(FinancialAccountExceptionHandler.class);
+
+  @ExceptionHandler(RecurringExceptions.NotFound.class)
+  public ResponseEntity<ApiError> recurringNotFound(RecurringExceptions.NotFound failure) {
+    return error(
+        HttpStatus.NOT_FOUND,
+        ErrorCodes.RECURRING_PLAN_NOT_FOUND,
+        "Recurring plan was not found.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RecurringExceptions.Forbidden.class)
+  public ResponseEntity<ApiError> recurringForbidden(RecurringExceptions.Forbidden failure) {
+    return error(
+        HttpStatus.FORBIDDEN,
+        ErrorCodes.FORBIDDEN,
+        "Only a household owner can manage recurring plans.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RecurringExceptions.Conflict.class)
+  public ResponseEntity<ApiError> recurringConflict(RecurringExceptions.Conflict failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RECURRING_PLAN_CONFLICT,
+        "Recurring plan conflicts with current household intent.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RecurringExceptions.VersionConflict.class)
+  public ResponseEntity<ApiError> recurringVersion(RecurringExceptions.VersionConflict failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RESOURCE_VERSION_CONFLICT,
+        "The recurring record changed. Refresh before editing.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RecurringExceptions.VersionExhausted.class)
+  public ResponseEntity<ApiError> recurringVersionExhausted(
+      RecurringExceptions.VersionExhausted failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RESOURCE_VERSION_EXHAUSTED,
+        "The recurring record cannot be changed further.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(RecurringExceptions.IdempotencyConflict.class)
+  public ResponseEntity<ApiError> recurringIdempotency(
+      RecurringExceptions.IdempotencyConflict failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.IDEMPOTENCY_CONFLICT,
+        "This request key was already used for different intent.",
+        null,
+        failure);
+  }
 
   @ExceptionHandler(InsightSnapshotStaleException.class)
   public ResponseEntity<ApiError> insightSnapshotStale(InsightSnapshotStaleException failure) {

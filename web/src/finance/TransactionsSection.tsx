@@ -3807,6 +3807,8 @@ export function TransactionsSection({
         <InsightsSection
           household={household}
           reportingZone={reportingZone}
+          csrf={csrf}
+          onCsrfRefreshed={onCsrfRefreshed}
           refreshSignal={
             reportingRefresh + ledgerRefreshSignal + insightsRefresh
           }

@@ -46,6 +46,8 @@ public final class ErrorCodes {
   public static final String SETTLEMENT_SNAPSHOT_STALE = "SETTLEMENT_SNAPSHOT_STALE";
   public static final String CONTRIBUTION_SNAPSHOT_STALE = "CONTRIBUTION_SNAPSHOT_STALE";
   public static final String INSIGHT_SNAPSHOT_STALE = "INSIGHT_SNAPSHOT_STALE";
+  public static final String RECURRING_PLAN_NOT_FOUND = "RECURRING_PLAN_NOT_FOUND";
+  public static final String RECURRING_PLAN_CONFLICT = "RECURRING_PLAN_CONFLICT";
   public static final String INTERNAL_ERROR = "INTERNAL_ERROR";
 
   private ErrorCodes() {}

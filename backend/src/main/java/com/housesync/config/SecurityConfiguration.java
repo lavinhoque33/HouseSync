@@ -127,12 +127,24 @@ public class SecurityConfiguration {
                         "/api/households/*/contribution-summary",
                         "/api/households/*/insights/spending-series",
                         "/api/households/*/insights/spending-comparison",
-                        "/api/households/*/insights/spending-evidence")
+                        "/api/households/*/insights/spending-evidence",
+                        "/api/households/*/insights/recurring-candidates",
+                        "/api/households/*/insights/recurring-evidence",
+                        "/api/households/*/insights/recurring-plans",
+                        "/api/households/*/recurring-plans",
+                        "/api/households/*/recurring-plans/*",
+                        "/api/households/*/recurring-plans/*/observations")
                     .authenticated()
                     .requestMatchers(
                         HttpMethod.PATCH,
                         "/api/households/*/transactions/*",
                         "/api/households/*/finance-settings")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.PUT, "/api/households/*/insights/recurring-review")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.POST, "/api/households/*/recurring-plans")
+                    .authenticated()
+                    .requestMatchers(HttpMethod.PATCH, "/api/households/*/recurring-plans/*")
                     .authenticated()
                     // Owner-private exact rules — the learn action on one owned
                     // transaction, the private management list, and the category/deactivation

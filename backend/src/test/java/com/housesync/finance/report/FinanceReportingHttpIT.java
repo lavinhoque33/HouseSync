@@ -6,7 +6,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -16,10 +20,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -45,6 +53,43 @@ class FinanceReportingHttpIT {
 
   private static final String PASSWORD = "correct horse battery staple 123!";
 
+  /** A method-local reporting date for B examples; all existing A tests retain the system clock. */
+  @TestConfiguration(proxyBeanMethods = false)
+  static class RecurrenceClockConfiguration {
+    @Bean
+    @Primary
+    SwitchableClock recurrenceTestClock() {
+      return new SwitchableClock();
+    }
+  }
+
+  static final class SwitchableClock extends Clock {
+    private volatile Clock delegate = Clock.systemUTC();
+
+    void freeze() {
+      delegate = Clock.fixed(Instant.parse("2026-09-25T12:00:00Z"), ZoneOffset.UTC);
+    }
+
+    void resume() {
+      delegate = Clock.systemUTC();
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return delegate.getZone();
+    }
+
+    @Override
+    public Clock withZone(ZoneId zone) {
+      return delegate.withZone(zone);
+    }
+
+    @Override
+    public Instant instant() {
+      return delegate.instant();
+    }
+  }
+
   @Container
   static final PostgreSQLContainer POSTGRES =
       new PostgreSQLContainer("postgres:17-alpine")
@@ -62,6 +107,13 @@ class FinanceReportingHttpIT {
   }
 
   @Autowired private JdbcTemplate jdbc;
+  @Autowired private SwitchableClock recurrenceClock;
+
+  @AfterEach
+  void restoreSystemClock() {
+    recurrenceClock.resume();
+  }
+
   @LocalServerPort private int port;
 
   private final HttpClient client =
@@ -1140,6 +1192,428 @@ class FinanceReportingHttpIT {
       if (userId.equals(item.path("userId").asText())) return item;
     }
     throw new AssertionError("No contribution row for user " + userId);
+  }
+
+  @Test
+  void recurringReviewAndPlansRespectCurrentDisclosureAndDurableReplay() throws Exception {
+    recurrenceClock.freeze();
+    Agent owner = signedInAgent("recurring-owner");
+    String home = createHousehold(owner, "Recurring home");
+    Agent member = signedInAgent("recurring-member");
+    addMember(home, member.userId());
+    Agent outsider = signedInAgent("recurring-outsider");
+    String account = createAccount(owner, home, "Card", "CASH", "USD");
+    String base = "/api/households/" + home;
+    String candidates = base + "/insights/recurring-candidates?currency=USD";
+    assertThat(member.get(candidates).json().path("items").size()).isZero();
+    for (int month = 5; month <= 7; month++)
+      created(
+          owner.createTransaction(
+              home,
+              UUID.randomUUID(),
+              datedEntry(
+                  account, "EXPENSE", "-15.99", "USD", "Monthly Music", "2026-0" + month + "-15")));
+    created(
+        owner.createTransaction(
+            home,
+            UUID.randomUUID(),
+            privateEntry(account, "EXPENSE", "-900.00", "USD", "Monthly Music", "2026-08-15")));
+    Resp first = member.get(candidates);
+    assertThat(first.status()).as(first.body()).isEqualTo(200);
+    JsonNode candidate = first.json().path("items").get(0);
+    assertThat(candidate.path("occurrenceCount").asText()).isEqualTo("3");
+    assertThat(candidate.path("amountPattern").asText()).isEqualTo("STABLE");
+    assertThat(candidate.path("minAmount").asText()).isEqualTo("15.99");
+    assertThat(first.json().path("asOfDate").asText()).isEqualTo("2026-09-25");
+    assertThat(first.json().path("evidenceFrom").asText()).isEqualTo("2023-09-25");
+    assertThat(first.json().path("evidenceTo").asText()).isEqualTo("2026-09-26");
+    created(
+        owner.createTransaction(
+            home,
+            UUID.randomUUID(),
+            datedEntry(account, "EXPENSE", "-15.99", "USD", "Monthly Music", "2026-10-15")));
+    assertThat(member.get(candidates).json().path("snapshot").asText())
+        .isEqualTo(first.json().path("snapshot").asText());
+    String merchant = candidate.path("merchantKey").asText();
+    String fingerprint = candidate.path("candidateFingerprint").asText();
+    assertThat(outsider.get(candidates).json().path("code").asText())
+        .isEqualTo("HOUSEHOLD_NOT_FOUND");
+    java.sql.Timestamp old =
+        java.sql.Timestamp.from(java.time.Instant.parse("2020-01-01T00:00:00Z"));
+    String memberId = member.userId();
+    jdbc.batchUpdate(
+        "INSERT INTO recurring_review_preferences(household_id,actor_user_id,currency,merchant_key,"
+            + "status,version,updated_at) VALUES (?::uuid,?::uuid,'USD',?,'DISMISSED',1,?)",
+        new org.springframework.jdbc.core.BatchPreparedStatementSetter() {
+          @Override
+          public void setValues(java.sql.PreparedStatement ps, int index)
+              throws java.sql.SQLException {
+            ps.setString(1, home);
+            ps.setString(2, memberId);
+            ps.setString(3, String.format("%064x", index));
+            ps.setTimestamp(4, old);
+          }
+
+          @Override
+          public int getBatchSize() {
+            return 1000;
+          }
+        });
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT count(*) FROM recurring_review_preferences WHERE household_id=?::uuid AND actor_user_id=?::uuid",
+                Integer.class,
+                home,
+                member.userId()))
+        .isEqualTo(1000);
+    String reviewBody =
+        "{\"currency\":\"USD\",\"merchantKey\":\""
+            + merchant
+            + "\",\"candidateFingerprint\":\""
+            + fingerprint
+            + "\",\"expectedVersion\":0,\"status\":\"DISMISSED\"}";
+    assertThat(
+            member
+                .request(
+                    "PUT", base + "/insights/recurring-review", reviewBody, member.csrfToken, null)
+                .json()
+                .path("reviewVersion")
+                .asInt())
+        .isEqualTo(1);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT count(*) FROM recurring_review_preferences WHERE household_id=?::uuid AND actor_user_id=?::uuid",
+                Integer.class,
+                home,
+                member.userId()))
+        .isEqualTo(1000);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT count(*) FROM recurring_review_preferences WHERE household_id=?::uuid "
+                    + "AND actor_user_id=?::uuid AND merchant_key=?",
+                Integer.class,
+                home,
+                member.userId(),
+                String.format("%064x", 0)))
+        .isZero();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT count(*) FROM recurring_review_preferences WHERE household_id=?::uuid "
+                    + "AND actor_user_id=?::uuid AND merchant_key=?",
+                Integer.class,
+                home,
+                member.userId(),
+                String.format("%064x", 1)))
+        .isEqualTo(1);
+    assertThat(member.get(candidates).json().path("items").size()).isZero();
+    assertThat(owner.get(candidates).json().path("items").size()).isEqualTo(1);
+    assertThat(
+            member
+                .get(candidates + "&review=DISMISSED")
+                .json()
+                .path("items")
+                .get(0)
+                .path("reviewStatus")
+                .asText())
+        .isEqualTo("DISMISSED");
+    String planBody =
+        "{\"label\":\"Music\",\"kind\":\"SUBSCRIPTION\",\"currency\":\"USD\","
+            + "\"matchDescription\":\"Monthly Music\",\"cadence\":\"MONTHLY\","
+            + "\"anchorOn\":\"2026-05-15\",\"calendarAnchor\":\"DAY_OF_MONTH\","
+            + "\"expectedAmount\":\"15.99\",\"acknowledgeHouseholdDisclosure\":true,"
+            + "\"candidate\":{\"merchantKey\":\""
+            + merchant
+            + "\",\"candidateFingerprint\":\""
+            + fingerprint
+            + "\"}}";
+    String plans = base + "/recurring-plans";
+    assertThat(
+            member
+                .request("POST", plans, planBody, member.csrfToken, UUID.randomUUID())
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("FORBIDDEN");
+    UUID key = UUID.randomUUID();
+    Resp created = owner.request("POST", plans, planBody, owner.csrfToken, key);
+    assertThat(created.status()).as(created.body()).isEqualTo(201);
+    String id = created.json().path("id").asText();
+    assertThat(owner.request("POST", plans, planBody, owner.csrfToken, key).status())
+        .isEqualTo(200);
+    assertThat(
+            owner
+                .request(
+                    "POST",
+                    plans,
+                    planBody.replace("\"label\":\"Music\"", "\"label\":\"Changed\""),
+                    owner.csrfToken,
+                    key)
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("IDEMPOTENCY_CONFLICT");
+    assertThat(
+            owner
+                .request("POST", plans, planBody, owner.csrfToken, UUID.randomUUID())
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("RECURRING_PLAN_CONFLICT");
+    assertThat(
+            member.get(base + "/insights/recurring-plans?currency=USD").json().path("items").size())
+        .isEqualTo(1);
+    String ownerSnapshot = owner.get(candidates).json().path("snapshot").asText();
+    created(
+        owner.createTransaction(
+            home,
+            UUID.randomUUID(),
+            privateEntry(account, "EXPENSE", "-200.00", "USD", "Monthly Music", "2026-08-16")));
+    assertThat(owner.get(candidates).json().path("snapshot").asText()).isEqualTo(ownerSnapshot);
+    String evidencePath =
+        base + "/insights/recurring-evidence?currency=USD&merchantKey=" + merchant;
+    String continuation = owner.get(evidencePath + "&limit=1").json().path("nextCursor").asText();
+    assertThat(continuation).isNotBlank();
+    String expense =
+        owner
+            .get(base + "/insights/recurring-evidence?currency=USD&merchantKey=" + merchant)
+            .json()
+            .path("items")
+            .get(0)
+            .path("id")
+            .asText();
+    Resp removed =
+        owner.patchTransaction(home, expense, "{\"expectedVersion\":0,\"visibility\":\"PRIVATE\"}");
+    assertThat(removed.status()).as(removed.body()).isEqualTo(200);
+    assertThat(
+            owner
+                .get(evidencePath + "&limit=1&cursor=" + continuation)
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("INSIGHT_SNAPSHOT_STALE");
+    String staleReview =
+        "{\"currency\":\"USD\",\"merchantKey\":\""
+            + merchant
+            + "\",\"candidateFingerprint\":\""
+            + fingerprint
+            + "\",\"expectedVersion\":1,\"status\":\"OPEN\"}";
+    assertThat(
+            member
+                .request(
+                    "PUT", base + "/insights/recurring-review", staleReview, member.csrfToken, null)
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("INSIGHT_SNAPSHOT_STALE");
+    assertThat(member.get(candidates + "&review=DISMISSED").json().path("items").size()).isZero();
+    assertThat(
+            member
+                .get(base + "/insights/recurring-evidence?currency=USD&merchantKey=" + merchant)
+                .json()
+                .path("items")
+                .size())
+        .isEqualTo(2);
+    assertThat(member.get(plans + "/" + id).json().path("matchDescription").asText())
+        .isEqualTo("Monthly Music");
+    Resp archived =
+        owner.request(
+            "PATCH",
+            plans + "/" + id,
+            "{\"expectedVersion\":0,\"status\":\"ARCHIVED\"}",
+            owner.csrfToken,
+            null);
+    assertThat(archived.status()).as(archived.body()).isEqualTo(200);
+    assertThat(archived.json().path("version").asInt()).isEqualTo(1);
+    assertThat(
+            member.get(base + "/insights/recurring-plans?currency=USD").json().path("items").size())
+        .isZero();
+    assertThat(
+            owner
+                .request("POST", plans, planBody, owner.csrfToken, key)
+                .json()
+                .path("status")
+                .asText())
+        .isEqualTo("ARCHIVED");
+    assertThat(
+            member
+                .get(base + "/insights/recurring-evidence?currency=USD&merchantKey=" + merchant)
+                .cacheControl())
+        .contains("no-store");
+    assertThat(owner.removeMember(home, member.userId()).status()).isEqualTo(204);
+    assertThat(member.get(candidates).json().path("code").asText())
+        .isEqualTo("HOUSEHOLD_NOT_FOUND");
+    assertThat(
+            owner
+                .patchTransaction(
+                    home, expense, "{\"expectedVersion\":1,\"visibility\":\"HOUSEHOLD\"}")
+                .status())
+        .isEqualTo(200);
+    addMember(home, member.userId());
+    JsonNode rejoined = member.get(candidates + "&review=DISMISSED").json().path("items").get(0);
+    assertThat(rejoined.path("reviewVersion").asInt()).isEqualTo(1);
+    assertThat(rejoined.path("merchantKey").asText()).isEqualTo(merchant);
+    String restore =
+        "{\"currency\":\"USD\",\"merchantKey\":\""
+            + merchant
+            + "\",\"candidateFingerprint\":\""
+            + rejoined.path("candidateFingerprint").asText()
+            + "\",\"expectedVersion\":1,\"status\":\"OPEN\"}";
+    CountDownLatch go = new CountDownLatch(1);
+    try (ExecutorService pool = Executors.newFixedThreadPool(2)) {
+      Future<Resp> firstRestore =
+          pool.submit(
+              () -> {
+                go.await();
+                return member.request(
+                    "PUT", base + "/insights/recurring-review", restore, member.csrfToken, null);
+              });
+      Future<Resp> secondRestore =
+          pool.submit(
+              () -> {
+                go.await();
+                return member.request(
+                    "PUT", base + "/insights/recurring-review", restore, member.csrfToken, null);
+              });
+      go.countDown();
+      List<Integer> outcomes =
+          new ArrayList<>(
+              List.of(
+                  firstRestore.get(30, TimeUnit.SECONDS).status(),
+                  secondRestore.get(30, TimeUnit.SECONDS).status()));
+      Collections.sort(outcomes);
+      assertThat(outcomes).containsExactly(200, 409);
+    }
+    assertThat(member.get(candidates).json().path("items").get(0).path("reviewVersion").asInt())
+        .isEqualTo(2);
+  }
+
+  @Test
+  void manualPlanObservationsAreLiveAndAmbiguityNeverCountsAsPaid() throws Exception {
+    recurrenceClock.freeze();
+    Agent owner = signedInAgent("recurring-manual");
+    String home = createHousehold(owner, "Manual schedule home");
+    Agent member = signedInAgent("recurring-manual-member");
+    addMember(home, member.userId());
+    String account = createAccount(owner, home, "Card", "CASH", "KWD");
+    String base = "/api/households/" + home;
+    String day = "2026-09-23";
+    String body =
+        "{\"label\":\"Water service\",\"kind\":\"BILL\",\"currency\":\"KWD\","
+            + "\"matchDescription\":\"Water service\",\"cadence\":\"MONTHLY\",\"anchorOn\":\""
+            + day
+            + "\",\"calendarAnchor\":\"DAY_OF_MONTH\",\"expectedAmount\":null,"
+            + "\"acknowledgeHouseholdDisclosure\":true}";
+    Resp manual =
+        owner.request("POST", base + "/recurring-plans", body, owner.csrfToken, UUID.randomUUID());
+    assertThat(manual.status()).as(manual.body()).isEqualTo(201);
+    String id = manual.json().path("id").asText();
+    String observations = base + "/recurring-plans/" + id + "/observations";
+    JsonNode empty = member.get(observations).json();
+    assertThat(empty.path("expectation").path("latestState").asText()).isEqualTo("AWAITING");
+    assertThat(empty.path("items").size()).isZero();
+    String first =
+        created(
+            owner.createTransaction(
+                home,
+                UUID.randomUUID(),
+                datedEntry(account, "EXPENSE", "-80.120", "KWD", "Water service", day)));
+    JsonNode single = member.get(observations).json();
+    assertThat(single.path("expectation").path("latestState").asText()).isEqualTo("OBSERVED");
+    assertThat(single.path("expectation").path("observedAmount").asText()).isEqualTo("80.120");
+    created(
+        owner.createTransaction(
+            home,
+            UUID.randomUUID(),
+            datedEntry(account, "EXPENSE", "-95.400", "KWD", "Water service", day)));
+    JsonNode ambiguous = member.get(observations).json();
+    assertThat(ambiguous.path("expectation").path("latestState").asText()).isEqualTo("AMBIGUOUS");
+    assertThat(ambiguous.path("expectation").path("matchedCount").asText()).isEqualTo("2");
+    assertThat(ambiguous.path("expectation").path("observedAmount").isNull()).isTrue();
+    assertThat(
+            owner
+                .patchTransaction(home, first, "{\"expectedVersion\":0,\"visibility\":\"PRIVATE\"}")
+                .status())
+        .isEqualTo(200);
+    assertThat(member.get(observations).json().path("expectation").path("matchedCount").asText())
+        .isEqualTo("1");
+    assertThat(
+            member
+                .request(
+                    "PATCH",
+                    base + "/recurring-plans/" + id,
+                    "{\"expectedVersion\":0,\"status\":\"ARCHIVED\"}",
+                    member.csrfToken,
+                    null)
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("FORBIDDEN");
+  }
+
+  @Test
+  void recurrenceDetectorRequiresEveryAnchoredOccurrenceAndUsesLowerMedian() throws Exception {
+    recurrenceClock.freeze();
+    Agent owner = signedInAgent("recurrence-policy");
+    String home = createHousehold(owner, "Detector examples");
+    String account = createAccount(owner, home, "Card", "CASH", "USD");
+    String base = "/api/households/" + home;
+    String[][] rows = {
+      {"Month end", "2026-01-31", "-15.99"},
+      {"Month end", "2026-02-28", "-15.99"},
+      {"Month end", "2026-03-31", "-15.99"},
+      {"Annual leap", "2024-02-29", "-15.99"},
+      {"Annual leap", "2025-02-28", "-15.99"},
+      {"Annual leap", "2026-02-28", "-15.99"},
+      {"Variable utility", "2026-04-12", "-80.12"},
+      {"Variable utility", "2026-05-12", "-95.40"},
+      {"Variable utility", "2026-06-12", "-210.00"},
+      {"Exact ten percent", "2026-04-10", "-95.00"},
+      {"Exact ten percent", "2026-05-10", "-100.00"},
+      {"Exact ten percent", "2026-06-10", "-105.00"},
+      {"Exact ten percent", "2026-07-10", "-105.00"},
+      {"Drifting", "2026-01-01", "-10.00"},
+      {"Drifting", "2026-02-04", "-10.00"},
+      {"Drifting", "2026-03-08", "-10.00"},
+      {"Duplicate", "2026-05-15", "-10.00"},
+      {"Duplicate", "2026-05-15", "-10.00"},
+      {"Duplicate", "2026-06-15", "-10.00"},
+      {"Skipped", "2026-01-01", "-10.00"},
+      {"Skipped", "2026-03-01", "-10.00"},
+      {"Skipped", "2026-04-01", "-10.00"}
+    };
+    for (String[] row : rows) {
+      String entry = datedEntry(account, "EXPENSE", row[2], "USD", row[0], row[1]);
+      if (row[0].equals("Variable utility"))
+        entry = entry.replace("\"visibility\"", "\"category\":\"UTILITIES\",\"visibility\"");
+      created(owner.createTransaction(home, UUID.randomUUID(), entry));
+    }
+    Resp response = owner.get(base + "/insights/recurring-candidates?currency=USD");
+    assertThat(response.status()).as(response.body()).isEqualTo(200);
+    JsonNode items = response.json().path("items");
+    assertThat(items.size()).isEqualTo(4);
+    java.util.Map<String, JsonNode> byLabel = new java.util.HashMap<>();
+    for (JsonNode item : items) byLabel.put(item.path("label").asText(), item);
+    assertThat(byLabel.get("month end").path("cadence").asText()).isEqualTo("MONTHLY");
+    assertThat(byLabel.get("month end").path("calendarAnchor").asText()).isEqualTo("END_OF_MONTH");
+    assertThat(byLabel.get("annual leap").path("cadence").asText()).isEqualTo("ANNUAL");
+    assertThat(byLabel.get("annual leap").path("nextExpectedOn").asText()).isEqualTo("2027-02-28");
+    assertThat(byLabel.get("variable utility").path("amountPattern").asText())
+        .isEqualTo("VARIABLE");
+    assertThat(byLabel.get("variable utility").path("medianAmount").asText()).isEqualTo("95.40");
+    assertThat(byLabel.get("variable utility").path("suggestedKind").asText()).isEqualTo("BILL");
+    assertThat(byLabel.get("exact ten percent").path("medianAmount").asText()).isEqualTo("100.00");
+    assertThat(byLabel.get("exact ten percent").path("amountPattern").asText()).isEqualTo("STABLE");
+    String driftKey =
+        com.housesync.finance.report.application.RecurrencePolicy.key(
+            UUID.fromString(home),
+            com.housesync.finance.account.domain.SupportedCurrency.USD,
+            "Drifting");
+    JsonNode evidence =
+        owner
+            .get(base + "/insights/recurring-evidence?currency=USD&merchantKey=" + driftKey)
+            .json();
+    assertThat(evidence.path("items").size()).isEqualTo(3);
+    assertThat(evidence.path("candidate").isNull()).isTrue();
   }
 
   private void addMember(String householdId, String userId) {

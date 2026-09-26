@@ -33,6 +33,7 @@ import com.housesync.finance.repayment.RepaymentRepository;
 import com.housesync.finance.repayment.RepaymentService;
 import com.housesync.finance.report.application.ContributionSummaryService;
 import com.housesync.finance.report.application.FinanceReportService;
+import com.housesync.finance.report.application.RecurringInsightsService;
 import com.housesync.finance.report.application.SpendingInsightsService;
 import com.housesync.finance.settlement.SettlementService;
 import com.housesync.finance.transaction.application.FinancialAllocationService;
@@ -100,6 +101,7 @@ class SecurityConfigurationTest {
   @MockitoBean private FinanceReportService reporting;
   @MockitoBean private ContributionSummaryService contributions;
   @MockitoBean private SpendingInsightsService spendingInsights;
+  @MockitoBean private RecurringInsightsService recurringInsights;
   @MockitoBean private ConnectionLinkService connectionLinks;
   @MockitoBean private ConnectionQueryService connectionQueries;
   @MockitoBean private ConnectionSelectionService connectionSelection;

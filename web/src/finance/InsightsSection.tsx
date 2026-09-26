@@ -5,7 +5,9 @@ import {
   fetchInsightEvidence,
   fetchInsightSeries,
   type Household,
+  type CsrfToken,
 } from '../auth/client';
+import { RecurringSection } from './RecurringSection';
 import { formatMoney, type FinancialAccountCurrency } from './money';
 import {
   insightMonthRange,
@@ -174,12 +176,16 @@ export function InsightsSection({
   reportingZone,
   refreshSignal,
   onSessionExpired,
+  csrf,
+  onCsrfRefreshed,
   onHouseholdAccessChanged,
   onOpenTransaction,
   nowProvider,
 }: {
   household: Household;
   reportingZone: string;
+  csrf: CsrfToken | null;
+  onCsrfRefreshed: (token: CsrfToken) => void;
   refreshSignal: number;
   onSessionExpired: () => void;
   onHouseholdAccessChanged: () => void;
@@ -1096,6 +1102,18 @@ export function InsightsSection({
           </button>
         </div>
       )}
+      <RecurringSection
+        key={`${household.id}:${household.role}:${applied.currency}:${reportingZone}`}
+        household={household}
+        currency={applied.currency}
+        reportingZone={reportingZone}
+        refreshSignal={refreshSignal}
+        csrf={csrf}
+        onCsrfRefreshed={onCsrfRefreshed}
+        onSessionExpired={onSessionExpired}
+        onHouseholdAccessChanged={onHouseholdAccessChanged}
+        onOpenTransaction={onOpenTransaction}
+      />
     </section>
   );
 }

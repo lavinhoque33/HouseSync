@@ -9,6 +9,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type Household } from '../auth/client';
 import { nextInsightMonth } from './insights';
 import { InsightsSection } from './InsightsSection';
+vi.mock('./RecurringSection', () => ({
+  RecurringSection: () => null,
+}));
 
 const household: Household = {
   id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
@@ -90,6 +93,8 @@ function mount(
     <InsightsSection
       household={household}
       reportingZone="Etc/UTC"
+      csrf={null}
+      onCsrfRefreshed={vi.fn()}
       refreshSignal={refreshSignal}
       onSessionExpired={onSessionExpired}
       onHouseholdAccessChanged={onHouseholdAccessChanged}
@@ -115,6 +120,8 @@ describe('household insights interactions', () => {
       <InsightsSection
         household={household}
         reportingZone="Etc/UTC"
+        csrf={null}
+        onCsrfRefreshed={vi.fn()}
         refreshSignal={1}
         onSessionExpired={vi.fn()}
         onHouseholdAccessChanged={vi.fn()}
