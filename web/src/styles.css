@@ -2654,6 +2654,83 @@ code {
   margin-top: 1.5rem;
 }
 
+.budget-section {
+  min-width: 0;
+  border-top: 2px solid var(--color-line);
+  margin-top: 2rem;
+  overflow-wrap: anywhere;
+}
+
+.budget-section form label {
+  display: grid;
+  gap: 0.35rem;
+  margin-block: 0.8rem;
+}
+
+.budget-section label:has(input[type='checkbox']) {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.budget-section input:not([type='checkbox']),
+.budget-section select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 44px;
+}
+
+.budget-section input[type='checkbox'] {
+  min-width: 24px;
+  min-height: 24px;
+}
+
+.budget-section button {
+  margin: 0.2rem;
+  white-space: normal;
+}
+
+.budget-review {
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  margin-block: 1rem;
+}
+
+.budget-actions {
+  padding-inline-start: 1.5rem;
+}
+
+.budget-actions li {
+  min-width: 0;
+  margin-block: 0.5rem;
+  overflow-wrap: anywhere;
+}
+
+.budget-section .insights-scroll {
+  overscroll-behavior-x: contain;
+}
+.budget-section .insights-scroll table {
+  min-width: 72rem;
+}
+
+.budget-section .insights-scroll th,
+.budget-section .insights-scroll td {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.budget-section .insights-scroll th:first-child,
+.budget-section .insights-scroll th:last-child {
+  min-width: 8rem;
+  white-space: nowrap;
+}
+
+.budget-section .insights-scroll:focus-visible {
+  outline: 3px solid var(--color-accent);
+}
+
 .recurring-section {
   min-width: 0;
   border-top: 2px solid var(--color-line);

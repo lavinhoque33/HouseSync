@@ -23,6 +23,7 @@ import java.time.YearMonth;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HexFormat;
@@ -311,6 +312,42 @@ public class SpendingInsightsService {
     }
   }
 
+  /** Shared scoped monthly spending with an immutable category map in bucket-key order. */
+  public record MonthlySpending(
+      String reportingTimeZone,
+      LocalDate asOfDate,
+      Period period,
+      Spend totals,
+      Map<String, Spend> categories) {}
+
+  @Transactional
+  public MonthlySpending monthlySpending(
+      UUID household, UUID actor, YearMonth month, SupportedCurrency currency) {
+    Context ctx = context(household, actor, currency);
+    Amounts total = new Amounts();
+    Map<String, Amounts> groups = new TreeMap<>();
+    read(
+        ctx,
+        month.atDay(1),
+        month.plusMonths(1).atDay(1),
+        row -> {
+          if ("INCOME".equals(row.kind)) return;
+          total.add(row);
+          groups
+              .computeIfAbsent(
+                  row.category == null ? "UNCATEGORIZED" : row.category, ignored -> new Amounts())
+              .add(row);
+        });
+    Map<String, Spend> categories = new TreeMap<>();
+    groups.forEach((key, amounts) -> categories.put(key, amounts.spend(currency)));
+    return new MonthlySpending(
+        ctx.zone,
+        ctx.today,
+        period(month, ctx.today),
+        total.spend(currency),
+        Collections.unmodifiableMap(categories));
+  }
+
   private static String group(Context ctx, String dimension, Row row) {
     if (dimension == null || "INCOME".equals(row.kind)) return null;
     if ("CATEGORY".equals(dimension)) return row.category == null ? "UNCATEGORIZED" : row.category;
@@ -545,7 +582,7 @@ public class SpendingInsightsService {
     }
   }
 
-  private static final class Fingerprint implements AutoCloseable {
+  static final class Fingerprint implements AutoCloseable {
     final MessageDigest digest;
     final DataOutputStream out;
 

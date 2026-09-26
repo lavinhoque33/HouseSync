@@ -28,6 +28,7 @@ import com.housesync.finance.connection.webhook.PlaidWebhookVerifier.WebhookUnav
 import com.housesync.finance.connection.webhook.PlaidWebhookVerifier.WebhookVerificationException;
 import com.housesync.finance.repayment.RepaymentPolicy;
 import com.housesync.finance.repayment.RepaymentService;
+import com.housesync.finance.report.application.BudgetTargetService;
 import com.housesync.finance.report.application.ContributionSummaryService.ContributionSnapshotStaleException;
 import com.housesync.finance.report.application.RecurringExceptions;
 import com.housesync.finance.report.application.SpendingInsightsService.InsightSnapshotStaleException;
@@ -83,6 +84,67 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 public class FinancialAccountExceptionHandler {
 
   private static final Logger log = LoggerFactory.getLogger(FinancialAccountExceptionHandler.class);
+
+  @ExceptionHandler(BudgetTargetService.NotFound.class)
+  public ResponseEntity<ApiError> budgetNotFound(BudgetTargetService.NotFound failure) {
+    return error(
+        HttpStatus.NOT_FOUND,
+        ErrorCodes.BUDGET_TARGET_NOT_FOUND,
+        "Budget target was not found.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(BudgetTargetService.Forbidden.class)
+  public ResponseEntity<ApiError> budgetForbidden(BudgetTargetService.Forbidden failure) {
+    return error(
+        HttpStatus.FORBIDDEN,
+        ErrorCodes.FORBIDDEN,
+        "Only a household owner can manage budget targets.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(BudgetTargetService.Conflict.class)
+  public ResponseEntity<ApiError> budgetConflict(BudgetTargetService.Conflict failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.BUDGET_TARGET_CONFLICT,
+        "Budget target conflicts with current household intent.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(BudgetTargetService.VersionConflict.class)
+  public ResponseEntity<ApiError> budgetVersion(BudgetTargetService.VersionConflict failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RESOURCE_VERSION_CONFLICT,
+        "The budget target changed. Refresh before editing.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(BudgetTargetService.VersionExhausted.class)
+  public ResponseEntity<ApiError> budgetExhausted(BudgetTargetService.VersionExhausted failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.RESOURCE_VERSION_EXHAUSTED,
+        "The budget target cannot be changed further.",
+        null,
+        failure);
+  }
+
+  @ExceptionHandler(BudgetTargetService.IdempotencyConflict.class)
+  public ResponseEntity<ApiError> budgetIdempotency(
+      BudgetTargetService.IdempotencyConflict failure) {
+    return error(
+        HttpStatus.CONFLICT,
+        ErrorCodes.IDEMPOTENCY_CONFLICT,
+        "This request key was already used for different intent.",
+        null,
+        failure);
+  }
 
   @ExceptionHandler(RecurringExceptions.NotFound.class)
   public ResponseEntity<ApiError> recurringNotFound(RecurringExceptions.NotFound failure) {

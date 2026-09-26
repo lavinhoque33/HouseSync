@@ -62,6 +62,16 @@ import {
   type CreatePlan,
   type PlanContent,
 } from '../finance/recurring';
+import {
+  parseBudgetTarget,
+  parseBudgetPage,
+  parseBudgetProgress,
+  type BudgetTarget,
+  type BudgetPage,
+  type BudgetProgress,
+  type CreateBudgetTarget,
+  type BudgetPatch,
+} from '../finance/budgets';
 import { isRegionShapedZone } from '../finance/reporting';
 import {
   parseRepayment,
@@ -137,6 +147,8 @@ export type ApiErrorCode =
   | 'RECURRING_PLAN_NOT_FOUND'
   | 'RECURRING_PLAN_CONFLICT'
   | 'CONTRIBUTION_SNAPSHOT_STALE'
+  | 'BUDGET_TARGET_NOT_FOUND'
+  | 'BUDGET_TARGET_CONFLICT'
   | 'BANK_ACTIVITY_NOT_FOUND'
   | 'OBSERVATION_NOT_POSTED'
   | 'OBSERVATION_ALREADY_CONFIRMED'
@@ -221,6 +233,8 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'SETTLEMENT_SNAPSHOT_STALE',
     'INSIGHT_SNAPSHOT_STALE',
     'CONTRIBUTION_SNAPSHOT_STALE',
+    'BUDGET_TARGET_NOT_FOUND',
+    'BUDGET_TARGET_CONFLICT',
     'FINANCE_BUSY',
     'BANK_ACTIVITY_NOT_FOUND',
     'OBSERVATION_NOT_POSTED',
@@ -5503,6 +5517,145 @@ export function fetchRecurringPlanObservations(
   return recurringRequest(
     `${recurringPath(householdId)}/recurring-plans/${encodeURIComponent(id)}/observations?${params}`,
     (value) => parsePlanObservations(value, householdId, id, limit),
+    signal,
+  );
+}
+
+const budgetBase = (householdId: string) =>
+  `/api/households/${encodeURIComponent(householdId)}`;
+async function budgetRequest<T>(
+  url: string,
+  parse: (value: unknown) => T | undefined,
+  signal?: AbortSignal,
+  operation?: {
+    method: 'POST' | 'PATCH';
+    body: unknown;
+    csrf: CsrfToken;
+    key?: string;
+  },
+): Promise<T> {
+  const response = await apiFetch(
+    url,
+    {
+      method: operation?.method ?? 'GET',
+      credentials: 'include',
+      cache: 'no-store',
+      headers: operation
+        ? {
+            ...unsafeHeaders(operation.csrf),
+            ...(operation.key ? { 'Idempotency-Key': operation.key } : {}),
+          }
+        : { ...JSON_HEADERS },
+      ...(operation ? { body: JSON.stringify(operation.body) } : {}),
+    },
+    signal,
+  );
+  if (!response.ok)
+    throw await parseErrorResponse(
+      response,
+      response.status === 401 ? 'UNAUTHENTICATED' : 'UNKNOWN_ERROR',
+      'The budget request could not be completed.',
+    );
+  const result = parse(await readJson<unknown>(response));
+  if (!result)
+    throw new ApiError({
+      status: response.status,
+      code: 'UNKNOWN_ERROR',
+      message: 'The server returned an unexpected budget response.',
+    });
+  return result;
+}
+export function fetchBudgetTargets(
+  householdId: string,
+  month: string,
+  currency: FinancialAccountCurrency,
+  status: 'ACTIVE' | 'ARCHIVED' | 'ALL' = 'ACTIVE',
+  limit = 100,
+  offset = 0,
+  signal?: AbortSignal,
+): Promise<BudgetPage> {
+  const query = new URLSearchParams({
+    month,
+    currency,
+    status,
+    limit: String(limit),
+    offset: String(offset),
+  });
+  return budgetRequest(
+    `${budgetBase(householdId)}/budget-targets?${query}`,
+    (value) =>
+      parseBudgetPage(
+        value,
+        householdId,
+        month,
+        currency,
+        status,
+        limit,
+        offset,
+      ),
+    signal,
+  );
+}
+export function fetchBudgetTarget(
+  householdId: string,
+  id: string,
+  signal?: AbortSignal,
+): Promise<BudgetTarget> {
+  return budgetRequest(
+    `${budgetBase(householdId)}/budget-targets/${encodeURIComponent(id)}`,
+    (value) => {
+      const item = parseBudgetTarget(value, householdId);
+      return item?.id === id ? item : undefined;
+    },
+    signal,
+  );
+}
+export function createBudgetTarget(
+  householdId: string,
+  input: CreateBudgetTarget,
+  key: string,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<BudgetTarget> {
+  return budgetRequest(
+    `${budgetBase(householdId)}/budget-targets`,
+    (value) => {
+      const item = parseBudgetTarget(value, householdId, input.money.currency);
+      return item?.month === input.month && item.bucket === input.bucket
+        ? item
+        : undefined;
+    },
+    signal,
+    { method: 'POST', body: input, key, csrf },
+  );
+}
+export function patchBudgetTarget(
+  householdId: string,
+  id: string,
+  patch: BudgetPatch,
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<BudgetTarget> {
+  return budgetRequest(
+    `${budgetBase(householdId)}/budget-targets/${encodeURIComponent(id)}`,
+    (value) => {
+      const item = parseBudgetTarget(value, householdId);
+      return item?.id === id ? item : undefined;
+    },
+    signal,
+    { method: 'PATCH', body: patch, csrf },
+  );
+}
+export function fetchBudgetProgress(
+  householdId: string,
+  month: string,
+  currency: FinancialAccountCurrency,
+  signal?: AbortSignal,
+): Promise<BudgetProgress> {
+  const query = new URLSearchParams({ month, currency });
+  return budgetRequest(
+    `${budgetBase(householdId)}/insights/budget-progress?${query}`,
+    (value) => parseBudgetProgress(value, householdId, month, currency),
     signal,
   );
 }

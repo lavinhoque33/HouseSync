@@ -2058,6 +2058,424 @@ class FinanceReportingHttpIT {
         .isEqualTo("\uFB03".repeat(70));
   }
 
+  private static String budgetBody(String month, String bucket, String amount, String currency) {
+    return "{\"month\":\""
+        + month
+        + "\",\"bucket\":\""
+        + bucket
+        + "\",\"money\":{\"amount\":\""
+        + amount
+        + "\",\"currency\":\""
+        + currency
+        + "\"}}";
+  }
+
+  @Test
+  void budgetZeroRefundProgressAndArchiveReplayRespectMembership() throws Exception {
+    recurrenceClock.freeze();
+    Agent owner = signedInAgent("budget-owner");
+    String home = createHousehold(owner, "Budget home");
+    Agent member = signedInAgent("budget-member");
+    addMember(home, member.userId());
+    Agent outsider = signedInAgent("budget-outsider");
+    String base = "/api/households/" + home + "/budget-targets";
+    String progress =
+        "/api/households/" + home + "/insights/budget-progress?month=2026-10&currency=USD";
+    String account = createAccount(owner, home, "Card", "CASH", "USD");
+    String source =
+        created(
+            owner.createTransaction(
+                home,
+                UUID.randomUUID(),
+                datedEntry(account, "EXPENSE", "-20.00", "USD", "Source", "2026-09-10")));
+    String refund =
+        created(
+            owner.createTransaction(
+                home,
+                UUID.randomUUID(),
+                refundEntry(account, source, "20.00", "USD", "Refund", "2026-10-02")));
+    UUID key = UUID.randomUUID();
+    String request = budgetBody("2026-10", "OVERALL", "0", "USD");
+    Resp created = owner.request("POST", base, request, owner.csrfToken, key);
+    assertThat(created.status()).as(created.body()).isEqualTo(201);
+    String id = created.json().path("id").asText();
+    assertThat(created.json().path("money").path("amount").asText()).isEqualTo("0.00");
+    assertThat(owner.request("POST", base, request, owner.csrfToken, key).status()).isEqualTo(200);
+    assertThat(member.request("POST", base, request, member.csrfToken, UUID.randomUUID()).status())
+        .isEqualTo(403);
+    assertThat(outsider.get(progress).json().path("code").asText())
+        .isEqualTo("HOUSEHOLD_NOT_FOUND");
+    JsonNode projection = member.get(progress).json();
+    assertThat(projection.path("policyVersion").asText()).isEqualTo("BUDGETS_V1");
+    Resp categoryTarget =
+        owner.request(
+            "POST",
+            base,
+            budgetBody("2026-10", "GROCERIES", "10.00", "USD"),
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(categoryTarget.status()).as(categoryTarget.body()).isEqualTo(201);
+    assertThat(
+            owner
+                .patchTransaction(
+                    home, source, "{\"expectedVersion\":1,\"category\":\"GROCERIES\"}")
+                .status())
+        .isEqualTo(200);
+    JsonNode grouped = member.get(progress).json();
+    assertThat(grouped.path("categories").get(0).path("actual").path("netSpending").asText())
+        .isEqualTo("-20.00");
+    assertThat(grouped.path("untargeted").path("netSpending").asText()).isEqualTo("0.00");
+    assertThat(
+            owner
+                .patchTransaction(home, source, "{\"expectedVersion\":2,\"category\":\"DINING\"}")
+                .status())
+        .isEqualTo(200);
+    assertThat(
+            member
+                .get(progress)
+                .json()
+                .path("categories")
+                .get(0)
+                .path("actual")
+                .path("netSpending")
+                .asText())
+        .isEqualTo("0.00");
+    assertThat(projection.path("period").path("state").asText()).isEqualTo("FUTURE");
+    assertThat(projection.path("totals").path("netSpending").asText()).isEqualTo("-20.00");
+    assertThat(projection.path("totals").has("incomeTotal")).isFalse();
+    assertThat(projection.path("overall").path("remaining").asText()).isEqualTo("20.00");
+    assertThat(projection.path("overall").path("percentUsed").isNull()).isTrue();
+    assertThat(projection.path("overall").path("status").asText()).isEqualTo("UNDER");
+    assertThat(projection.path("untargeted").path("refundCount").asText()).isEqualTo("1");
+    assertThat(projection.path("categories").size()).isZero();
+    Resp duplicate = owner.request("POST", base, request, owner.csrfToken, UUID.randomUUID());
+    assertThat(duplicate.json().path("code").asText()).isEqualTo("BUDGET_TARGET_CONFLICT");
+    assertThat(
+            owner
+                .request(
+                    "POST",
+                    base,
+                    budgetBody("2026-10", "OVERALL", "1", "USD"),
+                    owner.csrfToken,
+                    key)
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("IDEMPOTENCY_CONFLICT");
+    Resp updated =
+        owner.request(
+            "PATCH",
+            base + "/" + id,
+            "{\"expectedVersion\":0,\"amount\":\"10.00\"}",
+            owner.csrfToken,
+            null);
+    assertThat(updated.status()).as(updated.body()).isEqualTo(200);
+    assertThat(updated.json().path("version").asInt()).isEqualTo(1);
+    assertThat(member.get(progress).json().path("overall").path("percentUsed").asText())
+        .isEqualTo("-200.00");
+    assertThat(
+            owner
+                .request(
+                    "PATCH",
+                    base + "/" + id,
+                    "{\"expectedVersion\":0,\"amount\":\"10\"}",
+                    owner.csrfToken,
+                    null)
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("RESOURCE_VERSION_CONFLICT");
+    assertThat(
+            owner
+                .patchTransaction(
+                    home, source, "{\"expectedVersion\":3,\"visibility\":\"PRIVATE\"}")
+                .status())
+        .isEqualTo(200);
+    assertThat(member.get(progress).json().path("totals").path("netSpending").asText())
+        .isEqualTo("0.00");
+    assertThat(
+            owner
+                .patchTransaction(
+                    home, source, "{\"expectedVersion\":4,\"visibility\":\"HOUSEHOLD\"}")
+                .status())
+        .isEqualTo(200);
+    assertThat(member.get(progress).json().path("totals").path("netSpending").asText())
+        .isEqualTo("-20.00");
+    assertThat(
+            owner
+                .request(
+                    "PATCH",
+                    base + "/" + id,
+                    "{\"expectedVersion\":1,\"status\":\"ARCHIVED\"}",
+                    owner.csrfToken,
+                    null)
+                .status())
+        .isEqualTo(200);
+    assertThat(member.get(progress).json().path("overall").isNull()).isTrue();
+    assertThat(
+            owner
+                .request(
+                    "PATCH",
+                    base + "/" + id,
+                    "{\"expectedVersion\":2,\"amount\":\"10.00\"}",
+                    owner.csrfToken,
+                    null)
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("BUDGET_TARGET_CONFLICT");
+    assertThat(
+            owner
+                .request("POST", base, request, owner.csrfToken, key)
+                .json()
+                .path("status")
+                .asText())
+        .isEqualTo("ARCHIVED");
+    assertThat(
+            owner
+                .get(base + "?month=2026-10&currency=USD&status=ARCHIVED")
+                .json()
+                .path("items")
+                .get(0)
+                .path("id")
+                .asText())
+        .isEqualTo(id);
+    assertThat(owner.request("POST", base, request, owner.csrfToken, UUID.randomUUID()).status())
+        .isEqualTo(201);
+    assertThat(refund).isNotBlank();
+  }
+
+  @Test
+  void budgetStrictMoneyCurrencyScalesAndUntargetedConservation() throws Exception {
+    recurrenceClock.freeze();
+    Agent owner = signedInAgent("budget-scale");
+    String home = createHousehold(owner, "Budget scales");
+    String base = "/api/households/" + home + "/budget-targets";
+    String account = createAccount(owner, home, "Card", "CASH", "USD");
+    created(
+        owner.createTransaction(
+            home,
+            UUID.randomUUID(),
+            datedEntry(account, "EXPENSE", "-5.00", "USD", "Unclassified example", "2026-11-05")));
+    JsonNode noTarget =
+        owner
+            .get("/api/households/" + home + "/insights/budget-progress?month=2026-11&currency=USD")
+            .json();
+    assertThat(noTarget.path("overall").isNull()).isTrue();
+    assertThat(noTarget.path("untargeted").path("netSpending").asText()).isEqualTo("5.00");
+    Resp groceries =
+        owner.request(
+            "POST",
+            base,
+            budgetBody("2026-11", "GROCERIES", "3.00", "USD"),
+            owner.csrfToken,
+            UUID.randomUUID());
+    assertThat(groceries.status()).as(groceries.body()).isEqualTo(201);
+    JsonNode state =
+        owner
+            .get("/api/households/" + home + "/insights/budget-progress?month=2026-11&currency=USD")
+            .json();
+    assertThat(state.path("categories").get(0).path("actual").path("netSpending").asText())
+        .isEqualTo("0.00");
+    assertThat(state.path("categories").get(0).path("remaining").asText()).isEqualTo("3.00");
+    assertThat(state.path("untargeted").path("netSpending").asText()).isEqualTo("5.00");
+    for (String[] pair :
+        new String[][] {
+          {"BRL", "1.01"},
+          {"USD", "1.01"},
+          {"EUR", "1.01"},
+          {"GBP", "1.01"},
+          {"CAD", "1.01"},
+          {"JPY", "1"},
+          {"KWD", "0.001"}
+        }) {
+      Resp accepted =
+          owner.request(
+              "POST",
+              base,
+              budgetBody("2026-12", "OVERALL", pair[1], pair[0]),
+              owner.csrfToken,
+              UUID.randomUUID());
+      assertThat(accepted.status()).as(accepted.body()).isEqualTo(201);
+      assertThat(accepted.json().path("money").path("amount").asText()).isEqualTo(pair[1]);
+    }
+    for (String invalid : List.of("-0", "-0.00", "-1", "1000000000000", "1.001")) {
+      assertThat(
+              owner
+                  .request(
+                      "POST",
+                      base,
+                      budgetBody("2026-11", "OVERALL", invalid, "USD"),
+                      owner.csrfToken,
+                      UUID.randomUUID())
+                  .json()
+                  .path("code")
+                  .asText())
+          .isEqualTo("VALIDATION_FAILED");
+    }
+    assertThat(
+            owner
+                .request(
+                    "POST",
+                    base,
+                    "{\"month\":\"2026-11\",\"bucket\":\"OVERALL\",\"money\":{\"amount\":\"1.00\","
+                        + "\"currency\":\"USD\",\"extra\":1}}",
+                    owner.csrfToken,
+                    UUID.randomUUID())
+                .status())
+        .isEqualTo(400);
+    assertThat(owner.get(base + "?month=2026-11&month=2026-12&currency=USD").status())
+        .isEqualTo(400);
+    assertThat(
+            owner
+                .request(
+                    "POST",
+                    base,
+                    "{\"month\":\"2026-11\",\"bucket\":\"OVERALL\",\"bucket\":\"GROCERIES\","
+                        + "\"money\":{\"amount\":\"1.00\",\"currency\":\"USD\"}}",
+                    owner.csrfToken,
+                    UUID.randomUUID())
+                .status())
+        .isEqualTo(400);
+  }
+
+  @Test
+  void budgetConcurrentDistinctKeysCannotOccupySameActiveBucket() throws Exception {
+    Agent owner = signedInAgent("budget-race");
+    String home = createHousehold(owner, "Budget race");
+    String base = "/api/households/" + home + "/budget-targets";
+    String body = budgetBody("2026-08", "UNCATEGORIZED", "2.00", "USD");
+    CountDownLatch start = new CountDownLatch(1);
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      Future<Resp> first =
+          pool.submit(
+              () -> {
+                start.await(10, TimeUnit.SECONDS);
+                return owner.request("POST", base, body, owner.csrfToken, UUID.randomUUID());
+              });
+      Future<Resp> second =
+          pool.submit(
+              () -> {
+                start.await(10, TimeUnit.SECONDS);
+                return owner.request("POST", base, body, owner.csrfToken, UUID.randomUUID());
+              });
+      start.countDown();
+      Resp one = first.get(30, TimeUnit.SECONDS), two = second.get(30, TimeUnit.SECONDS);
+      List<Integer> statuses = new ArrayList<>(List.of(one.status(), two.status()));
+      Collections.sort(statuses);
+      assertThat(statuses).containsExactly(201, 409);
+      assertThat((one.status() == 409 ? one : two).json().path("code").asText())
+          .isEqualTo("BUDGET_TARGET_CONFLICT");
+      assertThat(owner.get(base + "?month=2026-08&currency=USD").json().path("items").size())
+          .isEqualTo(1);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
+  void budgetReplayReauthorizesFormerOwnerAndRetainsHouseholdIntent() throws Exception {
+    Agent founder = signedInAgent("budget-founder");
+    String home = createHousehold(founder, "Role budget");
+    Agent successor = signedInAgent("budget-successor");
+    addMember(home, successor.userId());
+    String path = "/api/households/" + home + "/budget-targets";
+    String request = budgetBody("2026-07", "OVERALL", "50", "USD");
+    UUID key = UUID.randomUUID();
+    String id = created(founder.request("POST", path, request, founder.csrfToken, key));
+    String membership = "/api/households/" + home + "/members/" + successor.userId();
+    assertThat(
+            founder
+                .request("PATCH", membership, "{\"role\":\"OWNER\"}", founder.csrfToken, null)
+                .status())
+        .isEqualTo(200);
+    assertThat(
+            successor
+                .request(
+                    "PATCH",
+                    "/api/households/" + home + "/members/" + founder.userId(),
+                    "{\"role\":\"MEMBER\"}",
+                    successor.csrfToken,
+                    null)
+                .status())
+        .isEqualTo(200);
+    assertThat(
+            founder
+                .request("POST", path, request, founder.csrfToken, key)
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("FORBIDDEN");
+    assertThat(founder.get(path + "/" + id).status()).isEqualTo(200);
+    assertThat(
+            successor
+                .request(
+                    "PATCH",
+                    path + "/" + id,
+                    "{\"expectedVersion\":0,\"amount\":\"40.00\"}",
+                    successor.csrfToken,
+                    null)
+                .status())
+        .isEqualTo(200);
+    assertThat(successor.get(path + "/" + id).json().path("money").path("amount").asText())
+        .isEqualTo("40.00");
+    assertThat(successor.removeMember(home, founder.userId()).status()).isEqualTo(204);
+    assertThat(founder.get(path + "/" + id).json().path("code").asText())
+        .isEqualTo("HOUSEHOLD_NOT_FOUND");
+  }
+
+  @Test
+  void budgetVersionExhaustionAndDatabaseScaleConstraint() throws Exception {
+    Agent owner = signedInAgent("budget-exhaustion");
+    String home = createHousehold(owner, "Exhaustion budget");
+    String path = "/api/households/" + home + "/budget-targets";
+    String id =
+        created(
+            owner.request(
+                "POST",
+                path,
+                budgetBody("2026-06", "OVERALL", "0", "USD"),
+                owner.csrfToken,
+                UUID.randomUUID()));
+    assertThatThrownByBudgetInvalidSql(home, id);
+    jdbc.update("UPDATE budget_targets SET version=2147483647 WHERE id=?::uuid", id);
+    assertThat(
+            owner
+                .request(
+                    "PATCH",
+                    path + "/" + id,
+                    "{\"expectedVersion\":2147483647,\"amount\":\"0\"}",
+                    owner.csrfToken,
+                    null)
+                .json()
+                .path("version")
+                .asInt())
+        .isEqualTo(Integer.MAX_VALUE);
+    assertThat(
+            owner
+                .request(
+                    "PATCH",
+                    path + "/" + id,
+                    "{\"expectedVersion\":2147483647,\"status\":\"ARCHIVED\"}",
+                    owner.csrfToken,
+                    null)
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("RESOURCE_VERSION_EXHAUSTED");
+  }
+
+  private void assertThatThrownByBudgetInvalidSql(String home, String id) {
+    org.assertj.core.api.Assertions.assertThatThrownBy(
+            () ->
+                jdbc.update(
+                    "UPDATE budget_targets SET amount=0.001 WHERE household_id=?::uuid AND id=?::uuid",
+                    home,
+                    id))
+        .isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+  }
+
   private static String settingsPath(String householdId) {
     return "/api/households/" + householdId + "/finance-settings";
   }

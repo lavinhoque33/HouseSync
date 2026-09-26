@@ -31,6 +31,7 @@ import com.housesync.finance.connection.application.ConnectionSyncService;
 import com.housesync.finance.connection.webhook.WebhookIngressService;
 import com.housesync.finance.repayment.RepaymentRepository;
 import com.housesync.finance.repayment.RepaymentService;
+import com.housesync.finance.report.application.BudgetTargetService;
 import com.housesync.finance.report.application.ContributionSummaryService;
 import com.housesync.finance.report.application.FinanceReportService;
 import com.housesync.finance.report.application.RecurringInsightsService;
@@ -102,6 +103,7 @@ class SecurityConfigurationTest {
   @MockitoBean private ContributionSummaryService contributions;
   @MockitoBean private SpendingInsightsService spendingInsights;
   @MockitoBean private RecurringInsightsService recurringInsights;
+  @MockitoBean private BudgetTargetService budgetTargets;
   @MockitoBean private ConnectionLinkService connectionLinks;
   @MockitoBean private ConnectionQueryService connectionQueries;
   @MockitoBean private ConnectionSelectionService connectionSelection;
@@ -168,6 +170,11 @@ class SecurityConfigurationTest {
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/insights/spending-series",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/insights/spending-comparison",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/insights/spending-evidence",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/budget-targets",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/budget-targets/123e4567-e89b-12d3-a456-426614174001",
+    "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/budget-targets",
+    "PATCH, /api/households/123e4567-e89b-12d3-a456-426614174000/budget-targets/123e4567-e89b-12d3-a456-426614174001",
+    "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/insights/budget-progress",
     "GET, /api/households/123e4567-e89b-12d3-a456-426614174000/categorization-ai-work/status",
     "POST, /api/households/123e4567-e89b-12d3-a456-426614174000/connection-link-attempts",
     "POST,"

@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type FormEvent,
+  type SetStateAction,
+} from 'react';
 import {
   ApiError,
   fetchInsightComparison,
@@ -8,6 +15,7 @@ import {
   type CsrfToken,
 } from '../auth/client';
 import { RecurringSection } from './RecurringSection';
+import { BudgetSection, type PendingBudgetCreate } from './BudgetSection';
 import { formatMoney, type FinancialAccountCurrency } from './money';
 import {
   insightMonthRange,
@@ -181,6 +189,8 @@ export function InsightsSection({
   onHouseholdAccessChanged,
   onOpenTransaction,
   nowProvider,
+  budgetPending,
+  setBudgetPending,
 }: {
   household: Household;
   reportingZone: string;
@@ -191,6 +201,8 @@ export function InsightsSection({
   onHouseholdAccessChanged: () => void;
   onOpenTransaction: (id: string) => void;
   nowProvider?: (() => Date) | undefined;
+  budgetPending: PendingBudgetCreate | null;
+  setBudgetPending: Dispatch<SetStateAction<PendingBudgetCreate | null>>;
 }) {
   const [draft, setDraft] = useState<Choice>(() =>
     defaultChoice(reportingZone, nowProvider?.() ?? new Date()),
@@ -1102,6 +1114,20 @@ export function InsightsSection({
           </button>
         </div>
       )}
+      <BudgetSection
+        key={`${household.id}:${household.role}:${applied.month}:${applied.currency}`}
+        household={household}
+        month={applied.month}
+        currency={applied.currency}
+        reportingZone={reportingZone}
+        refreshSignal={refreshSignal + revision}
+        csrf={csrf}
+        onCsrfRefreshed={onCsrfRefreshed}
+        onSessionExpired={onSessionExpired}
+        onHouseholdAccessChanged={onHouseholdAccessChanged}
+        pending={budgetPending}
+        setPending={setBudgetPending}
+      />
       <RecurringSection
         key={`${household.id}:${household.role}:${applied.currency}:${reportingZone}`}
         household={household}

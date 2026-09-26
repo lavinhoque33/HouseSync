@@ -12,6 +12,9 @@ import { InsightsSection } from './InsightsSection';
 vi.mock('./RecurringSection', () => ({
   RecurringSection: () => null,
 }));
+vi.mock('./BudgetSection', () => ({
+  BudgetSection: () => null,
+}));
 
 const household: Household = {
   id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
@@ -99,6 +102,8 @@ function mount(
       onSessionExpired={onSessionExpired}
       onHouseholdAccessChanged={onHouseholdAccessChanged}
       onOpenTransaction={vi.fn()}
+      budgetPending={null}
+      setBudgetPending={vi.fn()}
       nowProvider={() => new Date('2026-09-25T12:00:00Z')}
     />,
   );
@@ -126,6 +131,8 @@ describe('household insights interactions', () => {
         onSessionExpired={vi.fn()}
         onHouseholdAccessChanged={vi.fn()}
         onOpenTransaction={vi.fn()}
+        budgetPending={null}
+        setBudgetPending={vi.fn()}
         nowProvider={() => new Date('2026-09-25T12:00:00Z')}
       />,
     );

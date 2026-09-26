@@ -5,6 +5,7 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent,
+  type SetStateAction,
 } from 'react';
 import {
   ApiError,
@@ -60,6 +61,7 @@ import { SettlementSuggestionsSection } from './SettlementSuggestionsSection';
 import { ReportingSettingsSection } from './ReportingSettingsSection';
 import { SpendingDashboardSection } from './SpendingDashboardSection';
 import { InsightsSection } from './InsightsSection';
+import type { PendingBudgetCreate } from './BudgetSection';
 import { ContributionSummarySection } from './ContributionSummarySection';
 import {
   isFutureDateInZone,
@@ -375,6 +377,26 @@ export function TransactionsSection({
   const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(
     null,
   );
+  // Budget create replay must survive Insights month/currency changes and
+  // switching back to transactions; authorization and household scope do not.
+  const budgetScope = `${household.id}:${currentUserId}:${household.role}`;
+  const [budgetIntent, setBudgetIntent] = useState<{
+    scope: string;
+    pending: PendingBudgetCreate | null;
+  }>({ scope: budgetScope, pending: null });
+  const budgetPending =
+    budgetIntent.scope === budgetScope ? budgetIntent.pending : null;
+  function setBudgetPending(
+    update: SetStateAction<PendingBudgetCreate | null>,
+  ) {
+    setBudgetIntent((current) => ({
+      scope: budgetScope,
+      pending:
+        typeof update === 'function'
+          ? update(current.scope === budgetScope ? current.pending : null)
+          : update,
+    }));
+  }
 
   const [detail, setDetail] = useState<Transaction | null>(null);
   const [detailLoadingId, setDetailLoadingId] = useState<string | null>(null);
@@ -1021,6 +1043,7 @@ export function TransactionsSection({
     reportingRefreshedGenerationRef.current = -1;
     setHouseholdHasMore(false);
     setPendingCreate(null);
+    setBudgetPending(null);
     setRefundSource(null);
     setDetail(null);
     setEditingId(null);
@@ -3806,6 +3829,8 @@ export function TransactionsSection({
       {showInsights && (
         <InsightsSection
           household={household}
+          budgetPending={budgetPending}
+          setBudgetPending={setBudgetPending}
           reportingZone={reportingZone}
           csrf={csrf}
           onCsrfRefreshed={onCsrfRefreshed}
