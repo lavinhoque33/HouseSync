@@ -26,7 +26,7 @@ interface Notice {
   showRefresh?: boolean | undefined;
 }
 
-interface PendingCreate {
+export interface PendingCreate {
   key: string;
   input: CreateFinancialAccountInput;
 }
@@ -58,6 +58,8 @@ interface FinancialAccountsSectionProps {
    * interaction.
    */
   accountsRefreshSignal?: number | undefined;
+  retainedCreate?: PendingCreate | null;
+  onRetainedCreateChange?: (intent: PendingCreate | null) => void;
 }
 
 const KIND_OPTIONS: Array<{ value: FinancialAccountKind; label: string }> = [
@@ -130,6 +132,8 @@ export function FinancialAccountsSection({
   authorityConfirmed,
   onAccountListCommitted,
   accountsRefreshSignal = 0,
+  retainedCreate,
+  onRetainedCreateChange,
 }: FinancialAccountsSectionProps) {
   const [accounts, setAccounts] = useState<FinancialAccount[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -140,9 +144,11 @@ export function FinancialAccountsSection({
   const [currency, setCurrency] = useState<FinancialAccountCurrency>('BRL');
   const [fieldError, setFieldError] = useState<string | undefined>();
   const [creating, setCreating] = useState(false);
-  const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(
-    null,
-  );
+  const [localPendingCreate, setLocalPendingCreate] =
+    useState<PendingCreate | null>(null);
+  const pendingCreate =
+    retainedCreate === undefined ? localPendingCreate : retainedCreate;
+  const setPendingCreate = onRetainedCreateChange ?? setLocalPendingCreate;
   const [pendingStatus, setPendingStatus] = useState<PendingStatus | null>(
     null,
   );

@@ -1,6 +1,10 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+
+beforeEach(() => {
+  vi.stubGlobal('scrollTo', vi.fn());
+});
 
 const CSRF = { token: 'csrf-token-1', headerName: 'X-CSRF-TOKEN' };
 const USER = {
@@ -192,5 +196,80 @@ describe('join route lifetime', () => {
     await waitFor(() => expect(window.location.pathname).toBe('/'));
     expect(screen.queryByText('Household invitation')).not.toBeInTheDocument();
     expect(window.location.href).not.toContain(SECRET);
+  });
+});
+
+describe('page navigation', () => {
+  it('restores a requested security page after sign-in and clears the draft when leaving', async () => {
+    stubApp({ current: false });
+    go('/account/security');
+    render(<App />);
+    await screen.findByRole('heading', { name: 'Sign in' });
+    fireEvent.change(screen.getByLabelText('Email'), {
+      target: { value: USER.email },
+    });
+    fireEvent.change(screen.getByLabelText('Password'), {
+      target: { value: LONG_PASSWORD },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    const password = await screen.findByLabelText('New password');
+    password.focus();
+    fireEvent.change(password, { target: { value: 'first' } });
+    fireEvent.change(password, { target: { value: 'first second' } });
+    expect(document.activeElement).toBe(password);
+    expect(window.scrollTo).not.toHaveBeenCalled();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Open navigation menu' }),
+    );
+    const directory = screen.getByRole('link', { name: 'Households' });
+    expect(directory).toHaveAttribute('href', '/households');
+    fireEvent.click(directory);
+    expect(window.location.pathname).toBe('/households');
+    expect(window.scrollTo).toHaveBeenCalledWith({
+      top: 0,
+      left: 0,
+      behavior: 'instant',
+    });
+    expect(
+      await screen.findByText(/You do not belong to a household yet/),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('New password')).not.toBeInTheDocument();
+    window.history.replaceState(null, '', '/account/security');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(await screen.findByLabelText('New password')).toHaveValue('');
+  });
+
+  it('closes the three-dot menu with Escape, restoring trigger focus', async () => {
+    stubApp({ current: false });
+    go('/');
+    render(<App />);
+    const trigger = screen.getByRole('button', {
+      name: 'Open navigation menu',
+    });
+    fireEvent.click(trigger);
+    const menu = screen.getByRole('navigation', { name: 'Main navigation' });
+    expect(screen.getByRole('link', { name: 'Home' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    fireEvent.keyDown(menu, { key: 'Escape' });
+    expect(
+      screen.queryByRole('navigation', { name: 'Main navigation' }),
+    ).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it('offers recovery from an unknown route without exposing household data', async () => {
+    stubApp({ current: true });
+    go('/missing');
+    render(<App />);
+    expect(
+      await screen.findByRole('heading', { name: 'Page not found' }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Return home' })).toHaveAttribute(
+      'href',
+      '/',
+    );
+    expect(screen.queryByLabelText('New password')).not.toBeInTheDocument();
   });
 });

@@ -47,6 +47,8 @@ interface Notice {
 
 interface FinancialConnectionsSectionProps {
   household: Household;
+  /** Visited but inactive destinations retain memory-only intents without DOM or requests. */
+  active?: boolean;
   csrf: CsrfToken | null;
   onCsrfRefreshed: (token: CsrfToken) => void;
   onSessionExpired: () => void;
@@ -142,6 +144,7 @@ function operationErrorText(
 
 export function FinancialConnectionsSection({
   household,
+  active = true,
   csrf,
   onCsrfRefreshed,
   onSessionExpired,
@@ -241,6 +244,8 @@ export function FinancialConnectionsSection({
    * completions never store anything here.
    */
   const publicTokenRef = useRef<string | null>(null);
+  /** Exact memory-only completion body; provider callbacks cannot overwrite it. */
+  const completionBodyRef = useRef<CompleteLinkBody | null>(null);
   const [completionRetryable, setCompletionRetryable] = useState(false);
   const plaidHandlerRef = useRef<PlaidLinkHandler | null>(null);
   const noticeRef = useRef<HTMLDivElement>(null);
@@ -248,6 +253,23 @@ export function FinancialConnectionsSection({
   const disconnectConfirmRef = useRef<HTMLDivElement>(null);
   const disconnectTriggerRef = useRef<HTMLButtonElement | null>(null);
   const resumeTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [previousActive, setPreviousActive] = useState(active);
+  if (previousActive !== active) {
+    setPreviousActive(active);
+    if (!active) {
+      // Exact retry requests and drafts survive; only interrupted request
+      // locks are released before this destination can become active again.
+      setLinkBusy(false);
+      setDisconnectBusy(false);
+      setSelectionBusy({});
+      setMappingsBusy({});
+    }
+  }
+  const pendingWrite =
+    pendingSelection !== null ||
+    pendingReconnect !== null ||
+    pendingDisconnectRequest !== null ||
+    completionRetryable;
 
   useEffect(() => {
     csrfRef.current = csrf;
@@ -291,6 +313,7 @@ export function FinancialConnectionsSection({
     setCompletionRetryable(false);
     startKeyRef.current = null;
     publicTokenRef.current = null;
+    completionBodyRef.current = null;
     destroyPlaidHandler();
   }
 
@@ -404,6 +427,18 @@ export function FinancialConnectionsSection({
   }
 
   useEffect(() => {
+    if (!active) {
+      unmountedRef.current = true;
+      generationRef.current += 1;
+      stopPolling();
+      destroyPlaidHandler();
+      for (const owned of controllersRef.current) owned.abort();
+      linkBusyRef.current = false;
+      completeBusyRef.current = false;
+      disconnectBusyRef.current = false;
+      selectionBusyRef.current.clear();
+      return;
+    }
     unmountedRef.current = false;
     const generation = ++generationRef.current;
     const controller = new AbortController();
@@ -419,7 +454,7 @@ export function FinancialConnectionsSection({
     };
     // Household identity is fixed for this keyed component instance.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [active]);
 
   useEffect(() => {
     // Focus moves only for notices the viewer triggered. Background poll
@@ -551,7 +586,7 @@ export function FinancialConnectionsSection({
 
   /** Start a NEW link attempt, then open the bank step for it. */
   async function startLink() {
-    if (linkBusyRef.current || !authorityConfirmed) return;
+    if (linkBusyRef.current || !authorityConfirmed || pendingWrite) return;
     const generation = generationRef.current;
     const controller = new AbortController();
     track(controller);
@@ -656,6 +691,7 @@ export function FinancialConnectionsSection({
           // Retain the public token in memory only until its completion
           // reaches a known outcome; it is erased in handleLinkSuccess and
           // never stored, logged, or placed in a URL.
+          if (completionBodyRef.current !== null) return;
           if (flow === 'NEW') publicTokenRef.current = publicToken;
           void handleLinkSuccess(pending, flow);
         },
@@ -687,7 +723,7 @@ export function FinancialConnectionsSection({
   }
 
   function resumeBankStep() {
-    if (!pendingAttempt || linkBusyRef.current) return;
+    if (!pendingAttempt || linkBusyRef.current || pendingWrite) return;
     const generation = generationRef.current;
     const controller = new AbortController();
     track(controller);
@@ -700,8 +736,13 @@ export function FinancialConnectionsSection({
   async function handleLinkSuccess(
     pending: PendingAttempt,
     flow: LinkAttempt['flow'],
+    replay = false,
   ) {
-    if (completeBusyRef.current) return;
+    if (
+      completeBusyRef.current ||
+      (completionBodyRef.current !== null && !replay)
+    )
+      return;
     const generation = generationRef.current;
     const controller = new AbortController();
     track(controller);
@@ -726,7 +767,12 @@ export function FinancialConnectionsSection({
         return;
       }
       const body: CompleteLinkBody =
-        flow === 'NEW' ? { publicToken: retained ?? '' } : {};
+        completionBodyRef.current ??
+        (flow === 'NEW' ? { publicToken: retained ?? '' } : {});
+      completionBodyRef.current = body;
+      // Mark this exact attempt replayable before any bytes can reach the
+      // server. Route deactivation aborts the response, not the capability.
+      setCompletionRetryable(true);
       const outcome = await withCsrfRetry(generation, controller, (token) =>
         completeConnectionLink(
           household.id,
@@ -737,11 +783,18 @@ export function FinancialConnectionsSection({
           controller.signal,
         ),
       );
-      if (outcome === null) return;
+      if (outcome === null) {
+        if (current(generation) && !controller.signal.aborted) {
+          setCompletionRetryable(false);
+          completionBodyRef.current = null;
+        }
+        return;
+      }
       if (!current(generation) || controller.signal.aborted) return;
       // The completion reached a known outcome: erase the in-memory public
       // token and the attempt now that the durable operation carries it.
       publicTokenRef.current = null;
+      completionBodyRef.current = null;
       setCompletionRetryable(false);
       setPendingAttempt(null);
       destroyPlaidHandler();
@@ -789,6 +842,7 @@ export function FinancialConnectionsSection({
       }
       if (apiError.code === 'LINK_ATTEMPT_EXPIRED') {
         publicTokenRef.current = null;
+        completionBodyRef.current = null;
         setCompletionRetryable(false);
         setPendingAttempt(null);
         destroyPlaidHandler();
@@ -805,6 +859,7 @@ export function FinancialConnectionsSection({
         apiError.code === 'CONNECTION_DISCONNECTED'
       ) {
         publicTokenRef.current = null;
+        completionBodyRef.current = null;
         setCompletionRetryable(false);
         setPendingAttempt(null);
         destroyPlaidHandler();
@@ -820,6 +875,10 @@ export function FinancialConnectionsSection({
         });
         return;
       }
+      // A definitive rejection did not commit this completion. The viewer
+      // may resume the bank step instead of replaying a rejected body.
+      completionBodyRef.current = null;
+      setCompletionRetryable(false);
       setNotice({
         kind: 'error',
         text: apiError.message || 'Bank linking could not be completed.',
@@ -859,7 +918,7 @@ export function FinancialConnectionsSection({
     if (!pendingAttempt || !completionRetryable || completeBusyRef.current) {
       return;
     }
-    void handleLinkSuccess(pendingAttempt, pendingAttempt.attempt.flow);
+    void handleLinkSuccess(pendingAttempt, pendingAttempt.attempt.flow, true);
   }
 
   async function pollOperation(
@@ -1088,6 +1147,7 @@ export function FinancialConnectionsSection({
   }
 
   function toggleDraft(connectionId: string, mappingId: string) {
+    if (pendingWrite) return;
     setDrafts((current) => {
       const existing = current[connectionId] ?? { ids: [], dirty: false };
       const selected = existing.ids.includes(mappingId);
@@ -1112,7 +1172,16 @@ export function FinancialConnectionsSection({
     },
   ) {
     const id = connection.id;
-    if (selectionBusyRef.current.has(id) || !authorityConfirmed) return;
+    if (
+      selectionBusyRef.current.has(id) ||
+      !authorityConfirmed ||
+      (pendingWrite &&
+        (replay !== pendingSelection ||
+          pendingReconnect !== null ||
+          pendingDisconnectRequest !== null ||
+          completionRetryable))
+    )
+      return;
     const draft = drafts[id] ?? { ids: [], dirty: false };
     const generation = generationRef.current;
     const controller = new AbortController();
@@ -1126,11 +1195,13 @@ export function FinancialConnectionsSection({
     const accountMappingIds =
       replay?.accountMappingIds ?? [...new Set(draft.ids)].sort();
     const expectedVersion = replay?.expectedVersion ?? connection.version;
-    const key =
-      replay?.key ??
-      (pendingSelection?.connectionId === id
-        ? pendingSelection.key
-        : crypto.randomUUID());
+    const key = replay?.key ?? crypto.randomUUID();
+    setPendingSelection({
+      connectionId: id,
+      expectedVersion,
+      accountMappingIds,
+      key,
+    });
     try {
       const outcome = await withCsrfRetry(generation, controller, (token) =>
         postAccountSelection(
@@ -1143,7 +1214,11 @@ export function FinancialConnectionsSection({
           controller.signal,
         ),
       );
-      if (outcome === null) return;
+      if (outcome === null) {
+        if (current(generation) && !controller.signal.aborted)
+          setPendingSelection(null);
+        return;
+      }
       if (!current(generation) || controller.signal.aborted) return;
       setPendingSelection(null);
       const result = outcome.value;
@@ -1208,6 +1283,7 @@ export function FinancialConnectionsSection({
         });
         return;
       }
+      setPendingSelection(null);
       if (apiError.code === 'RESOURCE_VERSION_CONFLICT') {
         // The connection changed elsewhere: refetch rows and version but
         // keep the dirty draft so the viewer reviews, not loses, their
@@ -1260,11 +1336,7 @@ export function FinancialConnectionsSection({
     );
     if (!connection) return;
     // Exact replay of the retained request: IDs, version, and key.
-    void saveSelection(connection, {
-      accountMappingIds: pendingSelection.accountMappingIds,
-      expectedVersion: pendingSelection.expectedVersion,
-      key: pendingSelection.key,
-    });
+    void saveSelection(connection, pendingSelection);
   }
 
   async function refetchConnectionAndMappings(
@@ -1299,7 +1371,7 @@ export function FinancialConnectionsSection({
 
   /** Start an UPDATE (reconnect) attempt for an eligible connection. */
   function startReconnect(connection: FinancialConnection) {
-    if (linkBusyRef.current || !authorityConfirmed) return;
+    if (linkBusyRef.current || !authorityConfirmed || pendingWrite) return;
     if (!canReconnect(connection.state)) return;
     void submitReconnect(connection.id, connection.version);
   }
@@ -1316,18 +1388,27 @@ export function FinancialConnectionsSection({
     expectedVersion: number,
     explicitKey?: string,
   ) {
-    if (linkBusyRef.current || !authorityConfirmed) return;
+    if (
+      linkBusyRef.current ||
+      !authorityConfirmed ||
+      (pendingWrite &&
+        (!pendingReconnect ||
+          explicitKey !== pendingReconnect.key ||
+          connectionId !== pendingReconnect.connectionId ||
+          expectedVersion !== pendingReconnect.expectedVersion ||
+          pendingSelection !== null ||
+          pendingDisconnectRequest !== null ||
+          completionRetryable))
+    )
+      return;
     const generation = generationRef.current;
     const controller = new AbortController();
     track(controller);
     linkBusyRef.current = true;
     setLinkBusy(true);
     setNotice(null);
-    const key =
-      explicitKey ??
-      (pendingReconnect?.connectionId === connectionId
-        ? pendingReconnect.key
-        : crypto.randomUUID());
+    const key = explicitKey ?? crypto.randomUUID();
+    setPendingReconnect({ connectionId, expectedVersion, key });
     try {
       const outcome = await withCsrfRetry(generation, controller, (token) =>
         postConnectionReconnect(
@@ -1339,7 +1420,11 @@ export function FinancialConnectionsSection({
           controller.signal,
         ),
       );
-      if (outcome === null) return;
+      if (outcome === null) {
+        if (current(generation) && !controller.signal.aborted)
+          setPendingReconnect(null);
+        return;
+      }
       if (!current(generation) || controller.signal.aborted) return;
       setPendingReconnect(null);
       const pending: PendingAttempt = {
@@ -1373,6 +1458,7 @@ export function FinancialConnectionsSection({
         });
         return;
       }
+      setPendingReconnect(null);
       if (apiError.code === 'RESOURCE_VERSION_CONFLICT') {
         setNotice({
           kind: 'warning',
@@ -1414,6 +1500,7 @@ export function FinancialConnectionsSection({
       pendingDisconnect !== null ||
       disconnectBusyRef.current ||
       linkBusyRef.current ||
+      pendingWrite ||
       loading ||
       !authorityConfirmed
     ) {
@@ -1444,7 +1531,7 @@ export function FinancialConnectionsSection({
 
   function confirmDisconnect() {
     const pending = pendingDisconnect;
-    if (!pending || disconnectBusyRef.current) return;
+    if (!pending || disconnectBusyRef.current || pendingWrite) return;
     setPendingDisconnect(null);
     disconnectTriggerRef.current = null;
     void submitDisconnect(pending.connectionId, pending.version);
@@ -1461,18 +1548,31 @@ export function FinancialConnectionsSection({
     version: number,
     explicitKey?: string,
   ) {
-    if (disconnectBusyRef.current || !authorityConfirmed) return;
+    if (
+      disconnectBusyRef.current ||
+      !authorityConfirmed ||
+      (pendingWrite &&
+        (!pendingDisconnectRequest ||
+          explicitKey !== pendingDisconnectRequest.key ||
+          connectionId !== pendingDisconnectRequest.connectionId ||
+          version !== pendingDisconnectRequest.expectedVersion ||
+          pendingSelection !== null ||
+          pendingReconnect !== null ||
+          completionRetryable))
+    )
+      return;
     const generation = generationRef.current;
     const controller = new AbortController();
     track(controller);
     disconnectBusyRef.current = true;
     setDisconnectBusy(true);
     setNotice(null);
-    const key =
-      explicitKey ??
-      (pendingDisconnectRequest?.connectionId === connectionId
-        ? pendingDisconnectRequest.key
-        : crypto.randomUUID());
+    const key = explicitKey ?? crypto.randomUUID();
+    setPendingDisconnectRequest({
+      connectionId,
+      expectedVersion: version,
+      key,
+    });
     try {
       const outcome = await withCsrfRetry(generation, controller, (token) =>
         postConnectionDisconnect(
@@ -1484,7 +1584,11 @@ export function FinancialConnectionsSection({
           controller.signal,
         ),
       );
-      if (outcome === null) return;
+      if (outcome === null) {
+        if (current(generation) && !controller.signal.aborted)
+          setPendingDisconnectRequest(null);
+        return;
+      }
       if (!current(generation) || controller.signal.aborted) return;
       setPendingDisconnectRequest(null);
       // Capture the pre-optimistic state so a later failed confirmation can
@@ -1545,6 +1649,7 @@ export function FinancialConnectionsSection({
         });
         return;
       }
+      setPendingDisconnectRequest(null);
       if (apiError.code === 'CONNECTION_DISCONNECTED') {
         setNotice({
           kind: 'info',
@@ -1580,6 +1685,7 @@ export function FinancialConnectionsSection({
   }
 
   function retryDisconnect() {
+    if (pendingWrite) return;
     const operation = tracked?.operation;
     if (tracked?.kind !== 'disconnect' || !operation?.connectionId) return;
     const connection = connections?.find(
@@ -1597,6 +1703,7 @@ export function FinancialConnectionsSection({
   const trackedActive =
     tracked !== null && !isTerminalOperationState(tracked.operation.state);
 
+  if (!active) return null;
   return (
     <section
       className="finance-accounts"
@@ -1693,7 +1800,7 @@ export function FinancialConnectionsSection({
                 <button
                   type="button"
                   className="household-button"
-                  disabled={busy || !authorityConfirmed}
+                  disabled={busy || pendingWrite || !authorityConfirmed}
                   onClick={retryDisconnect}
                 >
                   Retry disconnect
@@ -1715,7 +1822,7 @@ export function FinancialConnectionsSection({
               ref={resumeTriggerRef}
               type="button"
               className="household-button"
-              disabled={!resumable || !authorityConfirmed}
+              disabled={!resumable || pendingWrite || !authorityConfirmed}
               onClick={resumeBankStep}
             >
               {pendingAttempt.attempt.flow === 'NEW'
@@ -1795,7 +1902,7 @@ export function FinancialConnectionsSection({
                     <button
                       type="button"
                       className="household-button household-button--secondary"
-                      disabled={busy || !authorityConfirmed}
+                      disabled={busy || pendingWrite || !authorityConfirmed}
                       onClick={() => void startReconnect(connection)}
                     >
                       Reconnect
@@ -1806,7 +1913,7 @@ export function FinancialConnectionsSection({
                       <button
                         type="button"
                         className="household-button household-button--secondary"
-                        disabled={busy || !authorityConfirmed}
+                        disabled={busy || pendingWrite || !authorityConfirmed}
                         onClick={(event) =>
                           openDisconnectConfirm(connection, event.currentTarget)
                         }
@@ -1857,6 +1964,7 @@ export function FinancialConnectionsSection({
                               saving ||
                               linkBusy ||
                               disconnectBusy ||
+                              pendingWrite ||
                               !authorityConfirmed ||
                               !row.eligible;
                             return (
@@ -1903,6 +2011,7 @@ export function FinancialConnectionsSection({
                               saving ||
                               linkBusy ||
                               disconnectBusy ||
+                              pendingWrite ||
                               !authorityConfirmed
                             }
                             onClick={() => void saveSelection(connection)}
@@ -2031,7 +2140,7 @@ export function FinancialConnectionsSection({
             <button
               type="button"
               className="household-button"
-              disabled={busy}
+              disabled={busy || pendingWrite}
               onClick={confirmDisconnect}
             >
               Disconnect bank
@@ -2059,7 +2168,12 @@ export function FinancialConnectionsSection({
           <button
             type="button"
             className="household-button"
-            disabled={busy || pendingAttempt !== null || !authorityConfirmed}
+            disabled={
+              busy ||
+              pendingWrite ||
+              pendingAttempt !== null ||
+              !authorityConfirmed
+            }
             onClick={() => void startLink()}
           >
             {linkBusy ? 'Starting bank link…' : 'Link a bank'}

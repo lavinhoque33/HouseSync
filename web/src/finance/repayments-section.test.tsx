@@ -7,7 +7,8 @@ import {
 } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Household } from '../auth/client';
-import { RepaymentsSection } from './RepaymentsSection';
+import { useState } from 'react';
+import { RepaymentsSection, type PendingCreate } from './RepaymentsSection';
 import { SettlementSuggestionsSection } from './SettlementSuggestionsSection';
 const H: Household = {
   id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
@@ -120,7 +121,25 @@ describe('external repayment activity', () => {
         throw new Error(`unexpected ${input}`);
       }),
     );
-    render(<RepaymentsSection {...props} />);
+    function RoutedRepayments() {
+      const [visible, setVisible] = useState(true);
+      const [intent, setIntent] = useState<PendingCreate | null>(null);
+      return (
+        <>
+          <button onClick={() => setVisible((current) => !current)}>
+            Switch page
+          </button>
+          {visible && (
+            <RepaymentsSection
+              {...props}
+              retainedCreate={intent}
+              onRetainedCreateChange={setIntent}
+            />
+          )}
+        </>
+      );
+    }
+    render(<RoutedRepayments />);
     fireEvent.change(
       await screen.findByLabelText('Recipient (current household member)'),
       { target: { value: S } },
@@ -136,12 +155,122 @@ describe('external repayment activity', () => {
       await screen.findByText(/creation outcome may be unknown/i),
     ).toBeInTheDocument();
     expect(screen.getByLabelText('Positive exact amount')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Switch page' }));
+    expect(
+      screen.queryByLabelText('Positive exact amount'),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Switch page' }));
+    expect(
+      await screen.findByRole('button', { name: /Retry same assertion key/ }),
+    ).toBeEnabled();
     fireEvent.click(
       screen.getByRole('button', { name: /Retry same assertion key/ }),
     );
     await waitFor(() => expect(sent).toHaveLength(2));
     expect(sent[0]).toEqual(sent[1]);
     expect(props.onBalancesChanged).toHaveBeenCalledTimes(1);
+  });
+  it('preserves the exact assertion while an in-flight write finishes off-route', async () => {
+    let settle: ((response: Response) => void) | undefined;
+    const sent: { key: string | null; body: string }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string, init: RequestInit) => {
+        if (input.endsWith('/members'))
+          return json({
+            members: [
+              {
+                userId: S,
+                email: 'sender@example.com',
+                role: 'MEMBER',
+                joinedAt: base.createdAt,
+              },
+              {
+                userId: R,
+                email: 'recipient@example.com',
+                role: 'MEMBER',
+                joinedAt: base.createdAt,
+              },
+            ],
+          });
+        if (input.includes('/repayments?')) return json(page([]));
+        if (input.endsWith('/repayments') && init.method === 'POST') {
+          sent.push({
+            key: new Headers(init.headers).get('Idempotency-Key'),
+            body: String(init.body),
+          });
+          return sent.length === 1
+            ? new Promise<Response>((resolve) => {
+                settle = resolve;
+              })
+            : json({
+                ...base,
+                senderUserId: R,
+                recipientUserId: S,
+                allowedActions: ['CANCEL'],
+              });
+        }
+        if (input.endsWith(`/${ID}`))
+          return json({
+            ...base,
+            senderUserId: R,
+            recipientUserId: S,
+            allowedActions: ['CANCEL'],
+          });
+        if (input.includes('/events')) return json(page([event]));
+        throw new Error(`unexpected ${input}`);
+      }),
+    );
+    function RoutedRepayments() {
+      const [visible, setVisible] = useState(true);
+      const [intent, setIntent] = useState<PendingCreate | null>(null);
+      return (
+        <>
+          <button onClick={() => setVisible((current) => !current)}>
+            Switch page
+          </button>
+          {visible && (
+            <RepaymentsSection
+              {...props}
+              retainedCreate={intent}
+              onRetainedCreateChange={setIntent}
+            />
+          )}
+        </>
+      );
+    }
+    render(<RoutedRepayments />);
+    fireEvent.change(
+      await screen.findByLabelText('Recipient (current household member)'),
+      {
+        target: { value: S },
+      },
+    );
+    fireEvent.change(screen.getByLabelText('Positive exact amount'), {
+      target: { value: '3' },
+    });
+    fireEvent.change(screen.getByLabelText('Date payment was completed'), {
+      target: { value: '2026-09-25' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Record assertion/ }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Switch page' }));
+    await act(async () => {
+      settle?.(
+        json(
+          { code: 'REPAYMENT_CONFLICT', message: 'Recipient changed.' },
+          409,
+        ),
+      );
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Switch page' }));
+    const retry = await screen.findByRole('button', {
+      name: /Retry same assertion key/,
+    });
+    await waitFor(() => expect(retry).not.toBeDisabled());
+    fireEvent.click(retry);
+    await waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1]).toEqual(sent[0]);
   });
   it('refetches a versioned decision after a conflict and requires explicit review before any new choice', async () => {
     let reads = 0;

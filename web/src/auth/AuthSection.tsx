@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react';
 import {
   ApiError,
   fetchCsrf,
@@ -24,6 +30,8 @@ import { HouseholdSection } from '../household/HouseholdSection';
 import { JoinSection } from '../invitation/JoinSection';
 import type { PendingInvite } from '../invitation/route';
 import type { AccountLinkRoute } from './route';
+import { AppLink } from '../NavigationMenu';
+import type { AppRoute } from '../navigation';
 
 type Phase = 'booting' | 'ready' | 'failed';
 type ForegroundKind =
@@ -108,6 +116,7 @@ export interface AuthSectionProps {
   onLeaveJoin?: (() => void) | undefined;
   accountLink?: AccountLinkRoute | null | undefined;
   onLeaveAccountLink?: (() => void) | undefined;
+  route?: AppRoute | undefined;
 }
 
 export function AuthSection({
@@ -118,6 +127,7 @@ export function AuthSection({
   onLeaveJoin = () => {},
   accountLink = null,
   onLeaveAccountLink = () => {},
+  route = { kind: 'security' },
 }: AuthSectionProps = {}) {
   const [phase, setPhase] = useState<Phase>('booting');
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
@@ -209,19 +219,49 @@ export function AuthSection({
     activeOpRef.current = null;
     active.controller.abort();
   }, [linkKind, linkCode, linkInvalid]);
+  // Clear secrets in the same render that removes the security form, before
+  // another route (or a subsequent account) can expose the old draft.
+  const [previousRouteKind, setPreviousRouteKind] = useState(route.kind);
+  if (previousRouteKind !== route.kind) {
+    setPreviousRouteKind(route.kind);
+    if (previousRouteKind === 'security') {
+      setCurrentPassword('');
+      setNewPassword('');
+      setNewConfirm('');
+      if (
+        fieldErrors.currentPassword ||
+        fieldErrors.newPassword ||
+        fieldErrors.newConfirm
+      ) {
+        const remainingErrors = { ...fieldErrors };
+        delete remainingErrors.currentPassword;
+        delete remainingErrors.newPassword;
+        delete remainingErrors.newConfirm;
+        setFieldErrors(remainingErrors);
+      }
+    }
+  }
 
-  function applyUser(next: SafeUser | null) {
+  const applyUser = useCallback((next: SafeUser | null) => {
+    const previousId = userRef.current?.id;
     userRef.current = next;
     setUser(next);
-  }
+    if (next === null || (previousId !== undefined && previousId !== next.id)) {
+      setCurrentPassword('');
+      setNewPassword('');
+      setNewConfirm('');
+      setRecoverPassword('');
+      setRecoverConfirm('');
+    }
+  }, []);
 
-  function trackController(controller: AbortController) {
+  const trackController = useCallback((controller: AbortController) => {
     ownedControllersRef.current.add(controller);
-  }
+  }, []);
 
-  function untrackController(controller: AbortController) {
+  const untrackController = useCallback((controller: AbortController) => {
     ownedControllersRef.current.delete(controller);
-  }
+  }, []);
 
   function isActiveOp(token: number): boolean {
     return activeOpRef.current?.token === token;
@@ -453,7 +493,7 @@ export function AuthSection({
       window.removeEventListener('focus', onFocus);
       focusControllerRef.current?.abort();
     };
-  }, []);
+  }, [applyUser, trackController, untrackController]);
 
   useEffect(() => {
     if (notice && noticeRef.current) {
@@ -967,8 +1007,8 @@ export function AuthSection({
   // prepare a fresh anonymous token. The household section unmounts with the
   // cleared user, discarding its response state. A refresh failure leaves
   // the token empty and the next sign-in recovers it on demand.
-  function handleHouseholdSessionExpired() {
-    if (unmountedRef.current) return;
+  const handleHouseholdSessionExpired = useCallback(() => {
+    if (unmountedRef.current || userRef.current === null) return;
     backgroundGenRef.current += 1;
     applyUser(null);
     setLoginPassword('');
@@ -992,7 +1032,11 @@ export function AuthSection({
         untrackController(refreshController);
       }
     })();
-  }
+  }, [applyUser, trackController, untrackController]);
+
+  const requestHouseholdReconcile = useCallback(() => {
+    setHouseholdsVersion((version) => version + 1);
+  }, []);
 
   if (phase === 'booting') {
     return (
@@ -1059,15 +1103,11 @@ export function AuthSection({
         onSessionExpired={handleHouseholdSessionExpired}
         onInviteCleared={onInviteCleared}
         onLeaveJoin={onLeaveJoin}
-        onHouseholdsChanged={() =>
-          setHouseholdsVersion((version) => version + 1)
-        }
+        onHouseholdsChanged={requestHouseholdReconcile}
         reconcileVersion={householdsVersion}
         reconcileSettled={householdsSettled}
         authenticatedRequestsReady={invitationRequestsReady}
-        onRequestReconcile={() =>
-          setHouseholdsVersion((version) => version + 1)
-        }
+        onRequestReconcile={requestHouseholdReconcile}
       />
     );
   }
@@ -1075,7 +1115,9 @@ export function AuthSection({
   if (user !== null) {
     return (
       <section className="auth" aria-labelledby="auth-title">
-        <h2 id="auth-title">Account</h2>
+        <h2 id="auth-title" className="visually-hidden">
+          Account
+        </h2>
         {joinFlow()}
         {accountLink && (
           <div className="auth-card">
@@ -1109,119 +1151,139 @@ export function AuthSection({
             )}
           </div>
         )}
-        <div className="auth-card">
-          <p className="eyebrow">Signed in</p>
-          <p className="auth-email">{user.email}</p>
-          <p className="auth-meta">Account ID: {user.id}</p>
-          <button
-            type="button"
-            className="auth-button"
-            onClick={() => void handleLogout()}
-            disabled={loggingOut || submitting !== null}
-          >
-            {loggingOut ? 'Signing out…' : 'Sign out'}
-          </button>
-        </div>
-        <div className="auth-card">
-          <form
-            className="auth-form"
-            onSubmit={(event) => void handleAccountAction('password', event)}
-            noValidate
-          >
-            <h3>Change password</h3>
-            <div className="auth-field">
-              <label htmlFor="current-password">Current password</label>
-              <input
-                id="current-password"
-                type="password"
-                autoComplete="current-password"
-                required
-                value={currentPassword}
-                onChange={(event) => setCurrentPassword(event.target.value)}
-                aria-invalid={Boolean(fieldErrors.currentPassword)}
-                aria-describedby={
-                  fieldErrors.currentPassword
-                    ? 'current-password-error'
-                    : undefined
-                }
-              />
-              {fieldErrors.currentPassword && (
-                <p
-                  id="current-password-error"
-                  role="alert"
-                  className="auth-error"
-                >
-                  {fieldErrors.currentPassword}
-                </p>
-              )}
-            </div>
-            <div className="auth-field">
-              <label htmlFor="new-password">New password</label>
-              <input
-                id="new-password"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={newPassword}
-                onChange={(event) => setNewPassword(event.target.value)}
-                aria-invalid={Boolean(fieldErrors.newPassword)}
-                aria-describedby="new-password-hint new-password-error"
-              />
-              <p id="new-password-hint" className="auth-hint">
-                {PASSWORD_HINT}
-              </p>
-              {fieldErrors.newPassword && (
-                <p id="new-password-error" role="alert" className="auth-error">
-                  {fieldErrors.newPassword}
-                </p>
-              )}
-            </div>
-            <div className="auth-field">
-              <label htmlFor="new-confirm">Confirm new password</label>
-              <input
-                id="new-confirm"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={newConfirm}
-                onChange={(event) => setNewConfirm(event.target.value)}
-                aria-invalid={Boolean(fieldErrors.newConfirm)}
-                aria-describedby={
-                  fieldErrors.newConfirm ? 'new-confirm-error' : undefined
-                }
-              />
-              {fieldErrors.newConfirm && (
-                <p id="new-confirm-error" role="alert" className="auth-error">
-                  {fieldErrors.newConfirm}
-                </p>
-              )}
-            </div>
+        {route.kind === 'home' && (
+          <div className="home-actions">
+            <AppLink to="/households">Browse households</AppLink>
+            <AppLink to="/account/security">Account security</AppLink>
+          </div>
+        )}
+        {(route.kind === 'security' || route.kind === 'link') && (
+          <div className="auth-card">
+            <p className="eyebrow">Signed in</p>
+            <p className="auth-email">{user.email}</p>
+            <p className="auth-meta">Account ID: {user.id}</p>
             <button
-              type="submit"
+              type="button"
+              className="auth-button"
+              onClick={() => void handleLogout()}
+              disabled={loggingOut || submitting !== null}
+            >
+              {loggingOut ? 'Signing out…' : 'Sign out'}
+            </button>
+          </div>
+        )}
+        {route.kind === 'security' && (
+          <div className="auth-card">
+            <form
+              className="auth-form"
+              onSubmit={(event) => void handleAccountAction('password', event)}
+              noValidate
+            >
+              <h3>Change password</h3>
+              <div className="auth-field">
+                <label htmlFor="current-password">Current password</label>
+                <input
+                  id="current-password"
+                  type="password"
+                  autoComplete="current-password"
+                  required
+                  value={currentPassword}
+                  onChange={(event) => setCurrentPassword(event.target.value)}
+                  aria-invalid={Boolean(fieldErrors.currentPassword)}
+                  aria-describedby={
+                    fieldErrors.currentPassword
+                      ? 'current-password-error'
+                      : undefined
+                  }
+                />
+                {fieldErrors.currentPassword && (
+                  <p
+                    id="current-password-error"
+                    role="alert"
+                    className="auth-error"
+                  >
+                    {fieldErrors.currentPassword}
+                  </p>
+                )}
+              </div>
+              <div className="auth-field">
+                <label htmlFor="new-password">New password</label>
+                <input
+                  id="new-password"
+                  type="password"
+                  autoComplete="new-password"
+                  required
+                  value={newPassword}
+                  onChange={(event) => setNewPassword(event.target.value)}
+                  aria-invalid={Boolean(fieldErrors.newPassword)}
+                  aria-describedby="new-password-hint new-password-error"
+                />
+                <p id="new-password-hint" className="auth-hint">
+                  {PASSWORD_HINT}
+                </p>
+                {fieldErrors.newPassword && (
+                  <p
+                    id="new-password-error"
+                    role="alert"
+                    className="auth-error"
+                  >
+                    {fieldErrors.newPassword}
+                  </p>
+                )}
+              </div>
+              <div className="auth-field">
+                <label htmlFor="new-confirm">Confirm new password</label>
+                <input
+                  id="new-confirm"
+                  type="password"
+                  autoComplete="new-password"
+                  required
+                  value={newConfirm}
+                  onChange={(event) => setNewConfirm(event.target.value)}
+                  aria-invalid={Boolean(fieldErrors.newConfirm)}
+                  aria-describedby={
+                    fieldErrors.newConfirm ? 'new-confirm-error' : undefined
+                  }
+                />
+                {fieldErrors.newConfirm && (
+                  <p id="new-confirm-error" role="alert" className="auth-error">
+                    {fieldErrors.newConfirm}
+                  </p>
+                )}
+              </div>
+              <button
+                type="submit"
+                className="auth-button"
+                disabled={submitting !== null || loggingOut}
+              >
+                {submitting === 'password'
+                  ? 'Changing…'
+                  : 'Change password and sign out everywhere'}
+              </button>
+            </form>
+            <p className="auth-hint">
+              Lost access to your password? Contact the operator for an assisted
+              recovery link; your email alone cannot authorize recovery.
+            </p>
+            <button
+              type="button"
               className="auth-button"
               disabled={submitting !== null || loggingOut}
+              onClick={() => void handleAccountAction('revoke')}
             >
-              {submitting === 'password'
-                ? 'Changing…'
-                : 'Change password and sign out everywhere'}
+              {submitting === 'revoke'
+                ? 'Ending sessions…'
+                : 'Sign out everywhere'}
             </button>
-          </form>
-          <p className="auth-hint">
-            Lost access to your password? Contact the operator for an assisted
-            recovery link; your email alone cannot authorize recovery.
-          </p>
-          <button
-            type="button"
-            className="auth-button"
-            disabled={submitting !== null || loggingOut}
-            onClick={() => void handleAccountAction('revoke')}
-          >
-            {submitting === 'revoke'
-              ? 'Ending sessions…'
-              : 'Sign out everywhere'}
-          </button>
-        </div>
-        <div className="auth-card">
+          </div>
+        )}
+        <div
+          className={
+            route.kind === 'directory' || route.kind === 'household'
+              ? 'auth-card'
+              : undefined
+          }
+        >
           <HouseholdSection
             key={user.id}
             csrf={csrf}
@@ -1230,9 +1292,13 @@ export function AuthSection({
             refreshSignal={householdsVersion}
             onRefreshSettled={setHouseholdsSettled}
             currentUserId={user.id}
-            onHouseholdReconcile={() =>
-              setHouseholdsVersion((version) => version + 1)
+            onHouseholdReconcile={requestHouseholdReconcile}
+            route={
+              route.kind === 'household'
+                ? { householdId: route.householdId, page: route.page }
+                : null
             }
+            active={route.kind === 'directory' || route.kind === 'household'}
           />
         </div>
       </section>

@@ -9,11 +9,16 @@ import {
 } from '../auth/client';
 import { validateHouseholdName } from '../auth/validation';
 import { InvitationSection } from '../invitation/InvitationSection';
-import { FinancialAccountsSection } from '../finance/FinancialAccountsSection';
+import {
+  FinancialAccountsSection,
+  type PendingCreate as PendingAccountCreate,
+} from '../finance/FinancialAccountsSection';
 import { BankActivitySection } from '../finance/BankActivitySection';
 import { FinancialConnectionsSection } from '../finance/FinancialConnectionsSection';
 import { TransactionsSection } from '../finance/TransactionsSection';
 import { MembersSection } from './MembersSection';
+import { householdPath, type HouseholdPage } from '../navigation';
+import { AppLink } from '../NavigationMenu';
 
 interface HouseholdNotice {
   kind: 'info' | 'error' | 'warning';
@@ -45,6 +50,8 @@ interface HouseholdSectionProps {
    * a queued refresh-signal bump; it falls back to a direct refresh.
    */
   onHouseholdReconcile?: (() => void) | undefined;
+  route?: { householdId: string; page: HouseholdPage } | null;
+  active?: boolean;
 }
 
 function formatCreatedAt(value: string): string {
@@ -85,6 +92,8 @@ export function HouseholdSection({
   onRefreshSettled,
   currentUserId,
   onHouseholdReconcile,
+  route = null,
+  active = true,
 }: HouseholdSectionProps) {
   const [households, setHouseholds] = useState<Household[] | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -119,6 +128,19 @@ export function HouseholdSection({
   const [membershipSignals, setMembershipSignals] = useState<
     Record<string, number>
   >({});
+  const [navigationState, setNavigationState] = useState<{
+    requestedId: string | null;
+    householdId: string | null;
+    scope: string;
+    visited: HouseholdPage[];
+    accountIntent: PendingAccountCreate | null;
+  }>({
+    requestedId: null,
+    householdId: null,
+    scope: '',
+    visited: [],
+    accountIntent: null,
+  });
 
   const csrfRef = useRef<CsrfToken | null>(csrf);
   const genRef = useRef(0);
@@ -477,230 +499,404 @@ export function HouseholdSection({
     households !== null &&
     households.length > 0;
 
+  const selectedHousehold =
+    route &&
+    households?.find((household) => household.id === route.householdId);
+  const requestedId = route?.householdId ?? navigationState.requestedId;
+  const retainedId =
+    route &&
+    (route.householdId !== navigationState.requestedId ||
+      navigationState.householdId === null)
+      ? (selectedHousehold?.id ?? null)
+      : navigationState.householdId;
+  const controllerHousehold =
+    households?.find((household) => household.id === retainedId) ?? null;
+  const scope = controllerHousehold
+    ? `${controllerHousehold.id}:${controllerHousehold.role}`
+    : '';
+  const currentPage =
+    active && route && controllerHousehold?.id === route.householdId
+      ? route.page
+      : null;
+  const visited =
+    navigationState.scope === scope ? navigationState.visited : [];
+  const nextVisited =
+    currentPage && !visited.includes(currentPage)
+      ? [...visited, currentPage]
+      : visited;
+  // React retries this render before committing any child. Revoked access
+  // therefore removes private controllers in the same transition, and a
+  // changed role discards all retained drafts and page visits.
+  if (
+    navigationState.requestedId !== requestedId ||
+    navigationState.householdId !== (controllerHousehold?.id ?? null) ||
+    navigationState.scope !== scope ||
+    navigationState.visited !== nextVisited
+  ) {
+    setNavigationState({
+      requestedId,
+      householdId: controllerHousehold?.id ?? null,
+      scope,
+      visited: nextVisited,
+      accountIntent:
+        navigationState.scope === scope ? navigationState.accountIntent : null,
+    });
+  }
+
   return (
-    <div className="household">
-      <h3 id="household-title" className="household-title">
-        Households
-      </h3>
+    <>
+      {active && (
+        <div className="household">
+          <h3 id="household-title" className="household-title">
+            Households
+          </h3>
 
-      {loading && households === null && !listError && (
-        <div role="status" aria-live="polite" aria-atomic="true">
-          <p>Loading your households…</p>
-        </div>
-      )}
-
-      {listError && (
-        <div
-          ref={listNoticeRef}
-          tabIndex={-1}
-          role="alert"
-          className="household-notice household-notice--error"
-        >
-          <p>{listError.text}</p>
-          {listError.correlationId && (
-            <p className="household-notice-detail">
-              Reference: {listError.correlationId}
-            </p>
+          {loading && households === null && !listError && (
+            <div role="status" aria-live="polite" aria-atomic="true">
+              <p>Loading your households…</p>
+            </div>
           )}
-          <button
-            type="button"
-            className="household-button household-button--secondary"
-            onClick={handleRefresh}
-            disabled={loading || creating}
-          >
-            Refresh list
-          </button>
-        </div>
-      )}
 
-      {households !== null &&
-        !loading &&
-        !listError &&
-        households.length === 0 && (
-          <div role="status" aria-live="polite" aria-atomic="true">
-            <p className="household-empty">
-              You do not belong to a household yet. Create your first household
-              below.
-            </p>
-          </div>
-        )}
-
-      {stale && (
-        <p role="status" className="household-stale">
-          Showing previously loaded households, which may be out of date.
-          Refresh the list to continue.
-        </p>
-      )}
-
-      {households !== null && households.length > 0 && (
-        <ul className="household-list" aria-label="Your households">
-          {households.map((household) => (
-            <li key={household.id} className="household-card">
-              <p className="household-name">{household.name}</p>
-              <p className="household-meta">Role: {household.role}</p>
-              <p className="household-meta">
-                Created:{' '}
-                <time dateTime={household.createdAt}>
-                  {formatCreatedAt(household.createdAt)}
-                </time>
-              </p>
-              <FinancialAccountsSection
-                key={`${household.id}-finance`}
-                household={household}
-                csrf={csrf}
-                onCsrfRefreshed={onCsrfRefreshed}
-                onSessionExpired={onSessionExpired}
-                onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
-                authorityConfirmed={!stale && !loading && listError === null}
-                onAccountListCommitted={() =>
-                  handleAccountListCommitted(household.id)
-                }
-                accountsRefreshSignal={accountSignals[household.id] ?? 0}
-              />
-              <TransactionsSection
-                key={`${household.id}-transactions`}
-                household={household}
-                currentUserId={currentUserId}
-                csrf={csrf}
-                onCsrfRefreshed={onCsrfRefreshed}
-                onSessionExpired={onSessionExpired}
-                onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
-                authorityConfirmed={!stale && !loading && listError === null}
-                accountsRefreshSignal={accountSignals[household.id] ?? 0}
-                ledgerRefreshSignal={ledgerSignals[household.id] ?? 0}
-                membershipRefreshSignal={membershipSignals[household.id] ?? 0}
-              />
-              <FinancialConnectionsSection
-                key={`${household.id}-connections`}
-                household={household}
-                csrf={csrf}
-                onCsrfRefreshed={onCsrfRefreshed}
-                onSessionExpired={onSessionExpired}
-                onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
-                authorityConfirmed={!stale && !loading && listError === null}
-                onAccountListCommitted={() =>
-                  handleAccountListCommitted(household.id)
-                }
-                onBankActivityChanged={() =>
-                  handleBankActivityChanged(household.id)
-                }
-              />
-              <BankActivitySection
-                key={`${household.id}-bank-activity`}
-                household={household}
-                csrf={csrf}
-                onCsrfRefreshed={onCsrfRefreshed}
-                onSessionExpired={onSessionExpired}
-                onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
-                authorityConfirmed={!stale && !loading && listError === null}
-                refreshSignal={bankActivitySignals[household.id] ?? 0}
-                onLedgerChanged={() => handleLedgerChanged(household.id)}
-              />
-              <MembersSection
-                household={household}
-                currentUserId={currentUserId}
-                csrf={csrf}
-                onCsrfRefreshed={onCsrfRefreshed}
-                onSessionExpired={onSessionExpired}
-                onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
-                onRosterCommitted={() =>
-                  setMembershipSignals((current) => ({
-                    ...current,
-                    [household.id]: (current[household.id] ?? 0) + 1,
-                  }))
-                }
-                onSelfLeft={() => revokeLeftHousehold(household.id)}
-              />
-              {household.role === 'OWNER' && (
-                <InvitationSection
-                  household={household}
-                  csrf={csrf}
-                  onCsrfRefreshed={onCsrfRefreshed}
-                  onSessionExpired={onSessionExpired}
-                  onHouseholdAccessChanged={
-                    onHouseholdReconcile ?? handleRefresh
-                  }
-                />
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {showForm && (
-        <form
-          className="household-form"
-          onSubmit={(event) => void handleCreate(event)}
-          noValidate
-        >
-          <h4 className="household-form-title">Create a household</h4>
-          <div className="household-field">
-            <label htmlFor="household-name">Household name</label>
-            <input
-              id="household-name"
-              ref={nameInputRef}
-              name="household-name"
-              type="text"
-              autoComplete="off"
-              required
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              aria-invalid={Boolean(fieldError)}
-              aria-describedby={
-                fieldError ? 'household-name-error' : 'household-name-hint'
-              }
-              disabled={creating || loading}
-            />
-            <p id="household-name-hint" className="household-hint">
-              Between 1 and 100 characters. Leading and trailing spaces are
-              removed.
-            </p>
-            {fieldError && (
-              <p
-                id="household-name-error"
-                role="alert"
-                className="household-error"
-              >
-                {fieldError}
-              </p>
-            )}
-          </div>
-          <button
-            type="submit"
-            className="household-button"
-            disabled={creating || loading}
-          >
-            {creating ? 'Creating…' : 'Create household'}
-          </button>
-        </form>
-      )}
-
-      {createNotice && (
-        <div
-          ref={createNoticeRef}
-          tabIndex={-1}
-          role={createNotice.kind === 'error' ? 'alert' : 'status'}
-          aria-live="polite"
-          className={`household-notice household-notice--${createNotice.kind}`}
-        >
-          <p>{createNotice.text}</p>
-          {createNotice.correlationId && (
-            <p className="household-notice-detail">
-              Reference: {createNotice.correlationId}
-            </p>
-          )}
-          {createNotice.showRefresh && (
-            <button
-              type="button"
-              className="household-button household-button--secondary"
-              onClick={handleRefresh}
-              disabled={loading || creating}
+          {listError && (
+            <div
+              ref={listNoticeRef}
+              tabIndex={-1}
+              role="alert"
+              className="household-notice household-notice--error"
             >
-              Refresh list
-            </button>
+              <p>{listError.text}</p>
+              {listError.correlationId && (
+                <p className="household-notice-detail">
+                  Reference: {listError.correlationId}
+                </p>
+              )}
+              <button
+                type="button"
+                className="household-button household-button--secondary"
+                onClick={handleRefresh}
+                disabled={loading || creating}
+              >
+                Refresh list
+              </button>
+            </div>
+          )}
+
+          {households !== null &&
+            route === null &&
+            !loading &&
+            !listError &&
+            households.length === 0 && (
+              <div role="status" aria-live="polite" aria-atomic="true">
+                <p className="household-empty">
+                  You do not belong to a household yet. Create your first
+                  household below.
+                </p>
+              </div>
+            )}
+
+          {stale && (
+            <p role="status" className="household-stale">
+              Showing previously loaded households, which may be out of date.
+              Refresh the list to continue.
+            </p>
+          )}
+
+          {route === null && households !== null && households.length > 0 && (
+            <ul className="household-list" aria-label="Your households">
+              {households.map((household) => (
+                <li key={household.id} className="household-card">
+                  <p className="household-name">{household.name}</p>
+                  <p className="household-meta">Role: {household.role}</p>
+                  <p className="household-meta">
+                    Created:{' '}
+                    <time dateTime={household.createdAt}>
+                      {formatCreatedAt(household.createdAt)}
+                    </time>
+                  </p>
+                  <AppLink
+                    to={householdPath(household.id, 'overview')}
+                    className="household-page-link"
+                  >
+                    Open {household.name}
+                  </AppLink>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {route !== null &&
+            households !== null &&
+            !loading &&
+            !listError &&
+            !households.some(
+              (household) => household.id === route.householdId,
+            ) && (
+              <div
+                role="status"
+                className="household-notice household-notice--warning"
+              >
+                <p>This household is not available to your account.</p>
+                <AppLink to="/households" className="household-page-link">
+                  Return to your households
+                </AppLink>
+              </div>
+            )}
+
+          {route !== null &&
+            households
+              ?.filter((household) => household.id === route.householdId)
+              .map((household) => (
+                <section key={household.id} aria-label={household.name}>
+                  <h4>{household.name}</h4>
+                  <p className="household-meta">Role: {household.role}</p>
+                  <details
+                    key={route.page}
+                    className="household-page-navigation"
+                  >
+                    <summary>Household pages</summary>
+                    <nav aria-label={`${household.name} pages`}>
+                      {(
+                        [
+                          ['overview', 'Overview'],
+                          ['transactions', 'Transactions'],
+                          ['accounts', 'Financial accounts'],
+                          ['connections', 'Bank connections'],
+                          ['bank-activity', 'Bank activity'],
+                          ['members', 'Members'],
+                          ...(household.role === 'OWNER'
+                            ? [['invitations', 'Invitations']]
+                            : []),
+                          ['reviews', 'Reviews'],
+                          ['rules', 'Rules'],
+                          ['balances', 'Balances'],
+                          ['repayments', 'Repayments'],
+                          ['contributions', 'Contributions'],
+                          ['insights', 'Insights'],
+                        ] as Array<[HouseholdPage, string]>
+                      ).map(([page, label]) => (
+                        <AppLink
+                          key={page}
+                          to={householdPath(household.id, page)}
+                          current={route.page === page}
+                          className="household-page-link"
+                        >
+                          {label}
+                        </AppLink>
+                      ))}
+                    </nav>
+                  </details>
+                </section>
+              ))}
+
+          {route === null && showForm && (
+            <form
+              className="household-form"
+              onSubmit={(event) => void handleCreate(event)}
+              noValidate
+            >
+              <h4 className="household-form-title">Create a household</h4>
+              <div className="household-field">
+                <label htmlFor="household-name">Household name</label>
+                <input
+                  id="household-name"
+                  ref={nameInputRef}
+                  name="household-name"
+                  type="text"
+                  autoComplete="off"
+                  required
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  aria-invalid={Boolean(fieldError)}
+                  aria-describedby={
+                    fieldError ? 'household-name-error' : 'household-name-hint'
+                  }
+                  disabled={creating || loading}
+                />
+                <p id="household-name-hint" className="household-hint">
+                  Between 1 and 100 characters. Leading and trailing spaces are
+                  removed.
+                </p>
+                {fieldError && (
+                  <p
+                    id="household-name-error"
+                    role="alert"
+                    className="household-error"
+                  >
+                    {fieldError}
+                  </p>
+                )}
+              </div>
+              <button
+                type="submit"
+                className="household-button"
+                disabled={creating || loading}
+              >
+                {creating ? 'Creating…' : 'Create household'}
+              </button>
+            </form>
+          )}
+
+          {route === null && createNotice && (
+            <div
+              ref={createNoticeRef}
+              tabIndex={-1}
+              role={createNotice.kind === 'error' ? 'alert' : 'status'}
+              aria-live="polite"
+              className={`household-notice household-notice--${createNotice.kind}`}
+            >
+              <p>{createNotice.text}</p>
+              {createNotice.correlationId && (
+                <p className="household-notice-detail">
+                  Reference: {createNotice.correlationId}
+                </p>
+              )}
+              {createNotice.showRefresh && (
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  onClick={handleRefresh}
+                  disabled={loading || creating}
+                >
+                  Refresh list
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
-    </div>
+      {controllerHousehold &&
+        active &&
+        route?.page === 'accounts' &&
+        route.householdId === controllerHousehold.id && (
+          <FinancialAccountsSection
+            retainedCreate={
+              navigationState.scope === scope
+                ? navigationState.accountIntent
+                : null
+            }
+            onRetainedCreateChange={(pending) =>
+              setNavigationState((current) =>
+                current.scope === scope
+                  ? { ...current, accountIntent: pending }
+                  : current,
+              )
+            }
+            key={`${scope}:accounts`}
+            household={controllerHousehold}
+            csrf={csrf}
+            onCsrfRefreshed={onCsrfRefreshed}
+            onSessionExpired={onSessionExpired}
+            onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+            authorityConfirmed={!stale && !loading && listError === null}
+            onAccountListCommitted={() =>
+              handleAccountListCommitted(controllerHousehold.id)
+            }
+            accountsRefreshSignal={accountSignals[controllerHousehold.id] ?? 0}
+          />
+        )}
+      {controllerHousehold && visited.includes('connections') && (
+        <FinancialConnectionsSection
+          key={`${scope}:connections`}
+          active={
+            active &&
+            route?.page === 'connections' &&
+            route.householdId === controllerHousehold.id
+          }
+          household={controllerHousehold}
+          csrf={csrf}
+          onCsrfRefreshed={onCsrfRefreshed}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+          authorityConfirmed={!stale && !loading && listError === null}
+          onAccountListCommitted={() =>
+            handleAccountListCommitted(controllerHousehold.id)
+          }
+          onBankActivityChanged={() =>
+            handleBankActivityChanged(controllerHousehold.id)
+          }
+        />
+      )}
+      {controllerHousehold && visited.includes('bank-activity') && (
+        <BankActivitySection
+          key={`${scope}:bank-activity`}
+          active={
+            active &&
+            route?.page === 'bank-activity' &&
+            route.householdId === controllerHousehold.id
+          }
+          household={controllerHousehold}
+          csrf={csrf}
+          onCsrfRefreshed={onCsrfRefreshed}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+          authorityConfirmed={!stale && !loading && listError === null}
+          refreshSignal={bankActivitySignals[controllerHousehold.id] ?? 0}
+          onLedgerChanged={() => handleLedgerChanged(controllerHousehold.id)}
+        />
+      )}
+      {controllerHousehold &&
+        active &&
+        route?.page === 'members' &&
+        route.householdId === controllerHousehold.id && (
+          <MembersSection
+            household={controllerHousehold}
+            currentUserId={currentUserId}
+            csrf={csrf}
+            onCsrfRefreshed={onCsrfRefreshed}
+            onSessionExpired={onSessionExpired}
+            onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+            onRosterCommitted={() =>
+              setMembershipSignals((current) => ({
+                ...current,
+                [controllerHousehold.id]:
+                  (current[controllerHousehold.id] ?? 0) + 1,
+              }))
+            }
+            onSelfLeft={() => revokeLeftHousehold(controllerHousehold.id)}
+          />
+        )}
+      {controllerHousehold &&
+        active &&
+        route?.page === 'invitations' &&
+        route.householdId === controllerHousehold.id &&
+        controllerHousehold.role === 'OWNER' && (
+          <InvitationSection
+            household={controllerHousehold}
+            csrf={csrf}
+            onCsrfRefreshed={onCsrfRefreshed}
+            onSessionExpired={onSessionExpired}
+            onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+          />
+        )}
+      {active &&
+        controllerHousehold &&
+        route?.householdId === controllerHousehold.id &&
+        route?.page === 'invitations' &&
+        controllerHousehold.role !== 'OWNER' && (
+          <p role="status">Invitations are available to household owners.</p>
+        )}
+      {controllerHousehold && (
+        <TransactionsSection
+          key={`${scope}:finance`}
+          household={controllerHousehold}
+          page={
+            active && route?.householdId === controllerHousehold.id
+              ? route.page
+              : 'inactive'
+          }
+          currentUserId={currentUserId}
+          csrf={csrf}
+          onCsrfRefreshed={onCsrfRefreshed}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdReconcile ?? handleRefresh}
+          authorityConfirmed={!stale && !loading && listError === null}
+          accountsRefreshSignal={accountSignals[controllerHousehold.id] ?? 0}
+          ledgerRefreshSignal={ledgerSignals[controllerHousehold.id] ?? 0}
+          membershipRefreshSignal={
+            membershipSignals[controllerHousehold.id] ?? 0
+          }
+        />
+      )}
+    </>
   );
 }

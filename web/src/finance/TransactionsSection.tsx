@@ -11,6 +11,7 @@ import {
   ApiError,
   fetchCsrf,
   fetchFinancialAccounts,
+  fetchFinanceSettings,
   fetchHouseholdMembers,
   fetchTransaction,
   fetchTransactionAllocation,
@@ -56,7 +57,10 @@ import { categoryLabel } from './categories';
 import { CategorizationReviewsSection } from './CategorizationReviewsSection';
 import { CategorizationRulesSection } from './CategorizationRulesSection';
 import { MemberBalancesSection } from './MemberBalancesSection';
-import { RepaymentsSection } from './RepaymentsSection';
+import {
+  RepaymentsSection,
+  type PendingCreate as PendingRepaymentCreate,
+} from './RepaymentsSection';
 import { SettlementSuggestionsSection } from './SettlementSuggestionsSection';
 import { ReportingSettingsSection } from './ReportingSettingsSection';
 import { SpendingDashboardSection } from './SpendingDashboardSection';
@@ -68,6 +72,7 @@ import {
   resolveCalculationZone,
   todayInZone,
 } from './reporting';
+import { householdPath, navigate, type HouseholdPage } from '../navigation';
 
 interface Notice {
   kind: 'info' | 'error' | 'warning';
@@ -162,6 +167,7 @@ const SOURCE_LABELS: Record<Transaction['source'], string> = {
 
 interface TransactionsSectionProps {
   household: Household;
+  page?: HouseholdPage | 'inactive';
   csrf: CsrfToken | null;
   onCsrfRefreshed: (token: CsrfToken) => void;
   onSessionExpired: () => void;
@@ -309,6 +315,7 @@ function isAllocationFetchable(transaction: Transaction): boolean {
 
 export function TransactionsSection({
   household,
+  page = 'transactions',
   csrf,
   onCsrfRefreshed,
   onSessionExpired,
@@ -384,6 +391,8 @@ export function TransactionsSection({
     scope: string;
     pending: PendingBudgetCreate | null;
   }>({ scope: budgetScope, pending: null });
+  const [repaymentIntent, setRepaymentIntent] =
+    useState<PendingRepaymentCreate | null>(null);
   const budgetPending =
     budgetIntent.scope === budgetScope ? budgetIntent.pending : null;
   function setBudgetPending(
@@ -488,8 +497,10 @@ export function TransactionsSection({
   const [reportingZone, setReportingZone] = useState('Etc/UTC');
   const [reportingRefresh, setReportingRefresh] = useState(0);
   // Category-only decisions reclassify Insights groups without changing ledger totals.
-  const [insightsRefresh, setInsightsRefresh] = useState(0);
-  const [showInsights, setShowInsights] = useState(false);
+  const transactionPage = page === 'transactions';
+  const pendingEvidenceRef = useRef<string | null>(null);
+  const transactionPageRef = useRef(transactionPage);
+  transactionPageRef.current = transactionPage;
   // A revoked share vanishes from a newly authorized feed rather than
   // returning an incremented version. Retain only the previous first page.
   const householdFirstPageRef = useRef<Map<string, number> | null>(null);
@@ -1044,6 +1055,7 @@ export function TransactionsSection({
     setHouseholdHasMore(false);
     setPendingCreate(null);
     setBudgetPending(null);
+    setRepaymentIntent(null);
     setRefundSource(null);
     setDetail(null);
     setEditingId(null);
@@ -1101,6 +1113,18 @@ export function TransactionsSection({
 
   useEffect(() => {
     unmountedRef.current = false;
+    const controllers = controllersRef.current;
+    return () => {
+      unmountedRef.current = true;
+      generationRef.current += 1;
+      pendingPagerFocusRef.current = null;
+      for (const owned of controllers) owned.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!transactionPage || ownTransactions !== null || pageLoadingRef.current)
+      return;
     const generation = ++generationRef.current;
     const controller = new AbortController();
     track(controller);
@@ -1109,16 +1133,62 @@ export function TransactionsSection({
       includeMeta: true,
       preserveNotice: false,
     }).finally(() => untrack(controller));
-    const controllers = controllersRef.current;
-    return () => {
-      unmountedRef.current = true;
-      generationRef.current += 1;
-      pendingPagerFocusRef.current = null;
-      for (const owned of controllers) owned.abort();
-    };
-    // Household identity is fixed for this keyed component instance.
+    // First activation only; focused routes do not reload on every navigation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [transactionPage]);
+  useEffect(() => {
+    if (!transactionPage || ownTransactions === null) return;
+    const id = pendingEvidenceRef.current;
+    if (!id) return;
+    pendingEvidenceRef.current = null;
+    void openDetail(id);
+    // Evidence is requested only by the Insights click, never by a background refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transactionPage, ownTransactions]);
+  useEffect(() => {
+    if (
+      page !== 'transactions' &&
+      page !== 'insights' &&
+      page !== 'repayments' &&
+      page !== 'contributions'
+    )
+      return;
+    const controller = new AbortController();
+    void fetchFinanceSettings(household.id, controller.signal)
+      .then((settings) => {
+        if (!controller.signal.aborted)
+          handleZoneLoaded(settings.reportingTimeZone);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (error instanceof ApiError && error.status === 401)
+          handleSessionLost();
+        else if (
+          error instanceof ApiError &&
+          error.code === 'HOUSEHOLD_NOT_FOUND'
+        )
+          handleAccessLost();
+      });
+    return () => controller.abort();
+    // A route activation fetches zone; keystroke renders must not refetch it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
+  useEffect(() => {
+    if ((page !== 'rules' && page !== 'reviews') || categories !== null) return;
+    const controller = new AbortController();
+    void fetchTransactionCategories(household.id, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setCategories(result.items);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        if (error instanceof ApiError && error.status === 401)
+          handleSessionLost();
+      });
+    return () => controller.abort();
+    // A focused destination loads its categories once; form edits never reload.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, categories]);
 
   /**
    * Refetches sibling-committed account metadata without touching feeds,
@@ -1171,6 +1241,7 @@ export function TransactionsSection({
   // never marked served — and the accounts effect below serves it with a
   // post-load fetch that guarantees the committed result converges.
   useEffect(() => {
+    if (!transactionPage) return;
     if (servedAccountSignalRef.current === accountsRefreshSignal) return;
     if (accounts === null) {
       pendingAccountSignalRef.current = true;
@@ -1181,12 +1252,13 @@ export function TransactionsSection({
     // The signal alone drives this effect; `accounts` is read only to park
     // the pre-load signal for the accounts effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountsRefreshSignal]);
+  }, [accountsRefreshSignal, transactionPage]);
 
   // Serves a signal parked while metadata was still loading: once the
   // initial load settles, refetch so the committed account converges even
   // when the initial read raced the commit and missed it.
   useEffect(() => {
+    if (!transactionPage) return;
     if (accounts === null || !pendingAccountSignalRef.current) return;
     if (servedAccountSignalRef.current === accountsRefreshSignal) {
       pendingAccountSignalRef.current = false;
@@ -1197,7 +1269,7 @@ export function TransactionsSection({
     // `accounts` becoming non-null is the trigger; the parked flag and the
     // signal decide whether a fetch is owed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accounts]);
+  }, [accounts, transactionPage]);
 
   /**
    * Serves the dedicated ledger signal with a metadata-inclusive reload so a
@@ -1213,6 +1285,10 @@ export function TransactionsSection({
     // before any later signal can be observed.
     void (async () => {
       await Promise.resolve();
+      if (!transactionPageRef.current) {
+        pendingLedgerSignalRef.current = true;
+        return;
+      }
       const views = loadedViews();
       if (views.length === 0) {
         pendingLedgerSignalRef.current = true;
@@ -1236,6 +1312,7 @@ export function TransactionsSection({
   }
 
   useEffect(() => {
+    if (!transactionPage) return;
     if (servedLedgerSignalRef.current === ledgerRefreshSignal) return;
     if (accounts === null || loadedViews().length === 0) {
       pendingLedgerSignalRef.current = true;
@@ -1245,9 +1322,10 @@ export function TransactionsSection({
     // The signal alone drives this effect; other state is read only to park a
     // pre-load signal for the settling effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ledgerRefreshSignal]);
+  }, [ledgerRefreshSignal, transactionPage]);
 
   useEffect(() => {
+    if (!transactionPage) return;
     if (!pendingLedgerSignalRef.current) return;
     if (accounts === null || loadedViews().length === 0) return;
     if (servedLedgerSignalRef.current === ledgerRefreshSignal) {
@@ -1258,7 +1336,7 @@ export function TransactionsSection({
     // Initial-load settling is the trigger; the parked flag decides whether a
     // fetch is owed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accounts, ownTransactions, householdTransactions]);
+  }, [accounts, ownTransactions, householdTransactions, transactionPage]);
 
   useEffect(() => {
     if (!notice) return;
@@ -1421,7 +1499,6 @@ export function TransactionsSection({
     // Owner-only provenance follows the committed decision, so the panel
     // explains the new origin without being reopened.
     if (detail?.id === transaction.id) void loadProvenance(transaction);
-    setInsightsRefresh((value) => value + 1);
     reloadViews(loadedViews(), false, true);
   }
 
@@ -3800,33 +3877,20 @@ export function TransactionsSection({
     } on this page, including voided ones, change with this entry.`;
   };
 
-  return (
+  return page === 'inactive' ||
+    (page !== 'transactions' &&
+      page !== 'overview' &&
+      page !== 'rules' &&
+      page !== 'reviews' &&
+      page !== 'balances' &&
+      page !== 'repayments' &&
+      page !== 'contributions' &&
+      page !== 'insights') ? null : (
     <section
       className="finance-transactions"
-      aria-labelledby={`finance-transactions-${household.id}`}
+      aria-label={`${household.name} ${page.replaceAll('-', ' ')}`}
     >
-      <nav
-        className="insights-navigation"
-        aria-label={`Views for ${household.name}`}
-      >
-        <button
-          type="button"
-          className="household-button household-button--secondary"
-          aria-current={!showInsights ? 'page' : undefined}
-          onClick={() => setShowInsights(false)}
-        >
-          Home · transactions
-        </button>
-        <button
-          type="button"
-          className="household-button household-button--secondary"
-          aria-current={showInsights ? 'page' : undefined}
-          onClick={() => setShowInsights(true)}
-        >
-          Insights
-        </button>
-      </nav>
-      {showInsights && (
+      {page === 'insights' && (
         <InsightsSection
           household={household}
           budgetPending={budgetPending}
@@ -3834,991 +3898,730 @@ export function TransactionsSection({
           reportingZone={reportingZone}
           csrf={csrf}
           onCsrfRefreshed={onCsrfRefreshed}
-          refreshSignal={
-            reportingRefresh + ledgerRefreshSignal + insightsRefresh
-          }
+          refreshSignal={reportingRefresh + ledgerRefreshSignal}
           onSessionExpired={onSessionExpired}
           onHouseholdAccessChanged={onHouseholdAccessChanged}
           onOpenTransaction={(id) => {
-            void openDetail(id);
+            pendingEvidenceRef.current = id;
+            navigate(householdPath(household.id, 'transactions'));
           }}
           nowProvider={nowProvider}
         />
       )}
-      <div className="finance-accounts-heading">
-        <div>
-          <p className="eyebrow">Manual entry</p>
-          <h4 id={`finance-transactions-${household.id}`}>Transactions</h4>
-        </div>
-        <span className="privacy-chip">Entries private by default</span>
-      </div>
-      <p className="finance-helper">
-        Every entry starts private to you. Sharing is explicit: an entry you
-        mark household-visible appears in the household feed with its exact
-        details, never with your account details. Voided entries stay listed and
-        are never counted.
-      </p>
+      {transactionPage && (
+        <>
+          <div className="finance-accounts-heading">
+            <div>
+              <p className="eyebrow">Manual entry</p>
+              <h4 id={`finance-transactions-${household.id}`}>Transactions</h4>
+            </div>
+            <span className="privacy-chip">Entries private by default</span>
+          </div>
+          <p className="finance-helper">
+            Every entry starts private to you. Sharing is explicit: an entry you
+            mark household-visible appears in the household feed with its exact
+            details, never with your account details. Voided entries stay listed
+            and are never counted.
+          </p>
 
-      <fieldset className="finance-feed-toggle">
-        <legend>Feed</legend>
-        <label className="finance-feed-option">
-          <input
-            type="radio"
-            ref={activeView === 'OWN' ? feedControlRef : undefined}
-            name={`transactions-feed-${household.id}`}
-            value="OWN"
-            checked={activeView === 'OWN'}
-            onChange={() => switchView('OWN')}
-            disabled={feedControlsDisabled}
-          />
-          <span>My transactions</span>
-        </label>
-        <label className="finance-feed-option">
-          <input
-            type="radio"
-            ref={activeView === 'HOUSEHOLD' ? feedControlRef : undefined}
-            name={`transactions-feed-${household.id}`}
-            value="HOUSEHOLD"
-            checked={activeView === 'HOUSEHOLD'}
-            onChange={() => switchView('HOUSEHOLD')}
-            disabled={feedControlsDisabled}
-          />
-          <span>Household feed</span>
-        </label>
-      </fieldset>
-      {activeView === 'OWN' && (
-        <fieldset className="finance-feed-toggle">
-          <legend>My transactions visibility</legend>
-          {(
-            [
-              [null, 'All'],
-              ['PRIVATE', 'Private'],
-              ['HOUSEHOLD', 'Shared by me'],
-            ] as const
-          ).map(([visibility, label]) => (
-            <label className="finance-feed-option" key={label}>
+          <fieldset className="finance-feed-toggle">
+            <legend>Feed</legend>
+            <label className="finance-feed-option">
               <input
                 type="radio"
-                name={`transactions-visibility-${household.id}`}
-                checked={ownVisibility === visibility}
-                onChange={() => switchVisibility(visibility)}
+                ref={activeView === 'OWN' ? feedControlRef : undefined}
+                name={`transactions-feed-${household.id}`}
+                value="OWN"
+                checked={activeView === 'OWN'}
+                onChange={() => switchView('OWN')}
                 disabled={feedControlsDisabled}
               />
-              <span>{label}</span>
+              <span>My transactions</span>
             </label>
-          ))}
-        </fieldset>
-      )}
+            <label className="finance-feed-option">
+              <input
+                type="radio"
+                ref={activeView === 'HOUSEHOLD' ? feedControlRef : undefined}
+                name={`transactions-feed-${household.id}`}
+                value="HOUSEHOLD"
+                checked={activeView === 'HOUSEHOLD'}
+                onChange={() => switchView('HOUSEHOLD')}
+                disabled={feedControlsDisabled}
+              />
+              <span>Household feed</span>
+            </label>
+          </fieldset>
+          {activeView === 'OWN' && (
+            <fieldset className="finance-feed-toggle">
+              <legend>My transactions visibility</legend>
+              {(
+                [
+                  [null, 'All'],
+                  ['PRIVATE', 'Private'],
+                  ['HOUSEHOLD', 'Shared by me'],
+                ] as const
+              ).map(([visibility, label]) => (
+                <label className="finance-feed-option" key={label}>
+                  <input
+                    type="radio"
+                    name={`transactions-visibility-${household.id}`}
+                    checked={ownVisibility === visibility}
+                    onChange={() => switchVisibility(visibility)}
+                    disabled={feedControlsDisabled}
+                  />
+                  <span>{label}</span>
+                </label>
+              ))}
+            </fieldset>
+          )}
 
-      {!authorityConfirmed && (
-        <p role="status" className="household-stale">
-          Refresh the household before changing transactions.
-        </p>
-      )}
-
-      {hasMore && activeNextOffset() <= 10000 && (
-        // A full page of rows contributes hundreds of focusable controls, so
-        // the pager below the list sits far outside a keyboard or screen
-        // reader user's reach. This pager is the short path to the next page
-        // and exists only while another page can actually be loaded, exactly
-        // like the control below the list.
-        <nav
-          className="finance-feed-pager"
-          aria-label={
-            isOwnView
-              ? 'Your transactions paging'
-              : 'Household transactions paging'
-          }
-        >
-          <button
-            ref={topPagerRef}
-            type="button"
-            className="household-button household-button--secondary"
-            aria-disabled={pagerBlocked || undefined}
-            onClick={() => {
-              if (pagerBlocked) return;
-              void loadMore();
-            }}
-          >
-            {loadingMore
-              ? 'Loading more…'
-              : pageError
-                ? 'Retry next page'
-                : 'Load more transactions'}
-            <span className="finance-sr-only"> (top of list)</span>
-          </button>
-        </nav>
-      )}
-
-      {loading && activeTransactions() === null && (
-        <p role="status" aria-live="polite">
-          Loading transactions…
-        </p>
-      )}
-
-      {notice && (
-        <div
-          ref={noticeRef}
-          tabIndex={-1}
-          role={notice.kind === 'error' ? 'alert' : 'status'}
-          className={`household-notice household-notice--${notice.kind}`}
-        >
-          <p>{notice.text}</p>
-          {notice.correlationId && (
-            <p className="household-notice-detail">
-              Reference: {notice.correlationId}
+          {!authorityConfirmed && (
+            <p role="status" className="household-stale">
+              Refresh the household before changing transactions.
             </p>
           )}
-          {notice.showRefresh && (
-            <button
-              type="button"
-              className="household-button household-button--secondary"
-              disabled={busy}
-              onClick={refresh}
-            >
-              Refresh transactions
-            </button>
-          )}
-        </div>
-      )}
 
-      {transactions !== null && pendingCreate !== null && (
-        // Durable same-key retry affordance: it lives outside the transient
-        // notice so a refresh or any later notice can never strand the
-        // retained request. A refresh deliberately does not clear it — the
-        // list cannot prove which unknown request committed, because
-        // duplicate descriptions are valid — so the exact request stays
-        // reconcilable until a same-key retry returns a known outcome.
-        <div className="finance-pending-request">
-          <p>
-            An earlier transaction still has an unknown result. Retry the exact
-            same request with its original key, or refresh the list first.
-            Refreshing keeps this request available; it cannot prove which
-            request was recorded.
-          </p>
-          <div className="finance-account-actions">
-            <button
-              type="button"
-              className="household-button"
-              disabled={busy || !authorityConfirmed}
-              onClick={() => void submitCreate(pendingCreate)}
+          {hasMore && activeNextOffset() <= 10000 && (
+            // A full page of rows contributes hundreds of focusable controls, so
+            // the pager below the list sits far outside a keyboard or screen
+            // reader user's reach. This pager is the short path to the next page
+            // and exists only while another page can actually be loaded, exactly
+            // like the control below the list.
+            <nav
+              className="finance-feed-pager"
+              aria-label={
+                isOwnView
+                  ? 'Your transactions paging'
+                  : 'Household transactions paging'
+              }
             >
-              Retry same request
-            </button>
-            <button
-              type="button"
-              className="household-button household-button--secondary"
-              disabled={busy}
-              onClick={refresh}
-            >
-              Refresh transactions
-            </button>
-          </div>
-        </div>
-      )}
-
-      {transactions !== null && pendingRuleCreate !== null && (
-        // The same durable same-key retry affordance as a transaction create:
-        // it lives outside the transient notice so no later notice or refresh
-        // can strand the retained request. The saved category is already
-        // committed either way; only the additive rule is uncertain.
-        <div className="finance-pending-request">
-          <p>
-            A “Use for future matches” request for “
-            {pendingRuleCreate.description}” still has an unknown result. Retry
-            the exact same request with its original key, or reload your rules
-            first. Reloading keeps this request available; only a same-key retry
-            can prove whether the rule was created.
-          </p>
-          <div className="finance-account-actions">
-            <button
-              type="button"
-              className="household-button"
-              disabled={busy || !authorityConfirmed}
-              onClick={() => void submitRuleCreate(pendingRuleCreate)}
-            >
-              Retry same request
-            </button>
-            <button
-              type="button"
-              className="household-button household-button--secondary"
-              disabled={busy}
-              onClick={() => setRulesRefresh((value) => value + 1)}
-            >
-              Reload rules
-            </button>
-          </div>
-        </div>
-      )}
-
-      {transactions !== null && transactions.length === 0 && !loading && (
-        <p className="finance-empty">
-          {isOwnView ? 'No transactions yet.' : 'No shared transactions yet.'}
-        </p>
-      )}
-
-      {transactions !== null && transactions.length > 0 && (
-        <ul
-          className="finance-transaction-list"
-          aria-label={
-            isOwnView ? 'Your transactions' : 'Household transactions'
-          }
-        >
-          {transactions.map((transaction) => {
-            const isOwn = transaction.ownerUserId === currentUserId;
-            const voided = transaction.status === 'VOIDED';
-            const refundLabel = transaction.refundOfTransactionId
-              ? `Refund of an expense recorded on ${
-                  findTransactionById(transaction.refundOfTransactionId)
-                    ?.occurredOn ?? 'an earlier date'
-                }`
-              : null;
-            return (
-              <li
-                key={transaction.id}
-                className={`finance-transaction-card${
-                  voided ? ' finance-transaction-card--voided' : ''
-                }`}
+              <button
+                ref={topPagerRef}
+                type="button"
+                className="household-button household-button--secondary"
+                aria-disabled={pagerBlocked || undefined}
+                onClick={() => {
+                  if (pagerBlocked) return;
+                  void loadMore();
+                }}
               >
-                <div className="finance-transaction-summary">
-                  <div>
-                    <p className="finance-transaction-name">
-                      {transaction.description}
-                    </p>
-                    <p className="household-meta">
-                      {kindLabel(transaction.kind)} ·{' '}
-                      <time dateTime={transaction.occurredOn}>
-                        {transaction.occurredOn}
-                      </time>{' '}
-                      ·{' '}
-                      {isOwn
-                        ? (accountNameById.get(transaction.accountId ?? '') ??
-                          'Your account')
-                        : 'Shared by another member'}{' '}
-                      · {voided ? 'Voided' : 'Posted'}
-                    </p>
-                    {refundLabel && (
-                      <p className="household-meta">{refundLabel}</p>
-                    )}
-                  </div>
-                  <span className="finance-amount">
-                    {formatMoney(
-                      transaction.money.amount,
-                      transaction.money.currency,
-                    )}
-                  </span>
-                </div>
-                <div className="finance-transaction-meta">
-                  <span className="privacy-chip">
-                    {transaction.visibility === 'HOUSEHOLD'
-                      ? 'Household'
-                      : 'Private'}
-                  </span>
-                  {transaction.kind === 'REFUND' && (
-                    <span className="finance-note-chip">
-                      Follows the source expense
-                    </span>
-                  )}
-                  {isAllocationFetchable(transaction) &&
-                    Boolean(allocationByTransaction[transaction.id]) && (
-                      <span className="finance-note-chip">Allocated</span>
-                    )}
-                  {transaction.category !== null && (
-                    <span className="finance-category-chip">
-                      {categoryLabel(transaction.category, categories)}
-                    </span>
-                  )}
-                  {voided && (
-                    <span className="finance-voided-chip">Voided</span>
-                  )}
-                </div>
+                {loadingMore
+                  ? 'Loading more…'
+                  : pageError
+                    ? 'Retry next page'
+                    : 'Load more transactions'}
+                <span className="finance-sr-only"> (top of list)</span>
+              </button>
+            </nav>
+          )}
 
-                {editingId === transaction.id ? (
-                  <EditForm
-                    transaction={transaction}
-                    currency={transaction.money.currency}
-                    editAmount={editAmount}
-                    editDirection={editDirection}
-                    editDate={editDate}
-                    editDescription={editDescription}
-                    editCategory={editCategory}
-                    editFieldErrors={editFieldErrors}
-                    categories={categories}
-                    busy={busy}
-                    authorityConfirmed={authorityConfirmed}
-                    reportingZone={calculationZone}
-                    minDate={
-                      transaction.kind === 'REFUND'
-                        ? (findTransactionById(
-                            transaction.refundOfTransactionId ?? '',
-                          )?.occurredOn ?? MIN_DATE)
-                        : MIN_DATE
-                    }
-                    linkedRefundCount={
-                      transaction.kind === 'EXPENSE'
-                        ? linkedRefunds(transaction.id).length
-                        : 0
-                    }
-                    onAmountChange={setEditAmount}
-                    onDirectionChange={setEditDirection}
-                    onDateChange={setEditDate}
-                    onDescriptionChange={setEditDescription}
-                    onCategoryChange={setEditCategory}
-                    onSubmit={() => void submitEdit(transaction)}
-                    onCancel={() => cancelEdit(transaction.id)}
-                    editAmountRef={editAmountRef}
-                    editCategoryRef={editCategoryRef}
-                  />
-                ) : (
-                  <div className="finance-account-actions">
-                    <button
-                      type="button"
-                      id={`details-trigger-${transaction.id}`}
-                      className="household-button household-button--secondary"
-                      disabled={busy || !authorityConfirmed}
-                      aria-label={`Details for ${transaction.description}`}
-                      onClick={() => void openDetail(transaction)}
-                    >
-                      Details
-                    </button>
-                    {isOwn && !voided && (
-                      <>
+          {loading && activeTransactions() === null && (
+            <p role="status" aria-live="polite">
+              Loading transactions…
+            </p>
+          )}
+
+          {notice && (
+            <div
+              ref={noticeRef}
+              tabIndex={-1}
+              role={notice.kind === 'error' ? 'alert' : 'status'}
+              className={`household-notice household-notice--${notice.kind}`}
+            >
+              <p>{notice.text}</p>
+              {notice.correlationId && (
+                <p className="household-notice-detail">
+                  Reference: {notice.correlationId}
+                </p>
+              )}
+              {notice.showRefresh && (
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  disabled={busy}
+                  onClick={refresh}
+                >
+                  Refresh transactions
+                </button>
+              )}
+            </div>
+          )}
+
+          {transactions !== null && pendingCreate !== null && (
+            // Durable same-key retry affordance: it lives outside the transient
+            // notice so a refresh or any later notice can never strand the
+            // retained request. A refresh deliberately does not clear it — the
+            // list cannot prove which unknown request committed, because
+            // duplicate descriptions are valid — so the exact request stays
+            // reconcilable until a same-key retry returns a known outcome.
+            <div className="finance-pending-request">
+              <p>
+                An earlier transaction still has an unknown result. Retry the
+                exact same request with its original key, or refresh the list
+                first. Refreshing keeps this request available; it cannot prove
+                which request was recorded.
+              </p>
+              <div className="finance-account-actions">
+                <button
+                  type="button"
+                  className="household-button"
+                  disabled={busy || !authorityConfirmed}
+                  onClick={() => void submitCreate(pendingCreate)}
+                >
+                  Retry same request
+                </button>
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  disabled={busy}
+                  onClick={refresh}
+                >
+                  Refresh transactions
+                </button>
+              </div>
+            </div>
+          )}
+
+          {transactions !== null && pendingRuleCreate !== null && (
+            // The same durable same-key retry affordance as a transaction create:
+            // it lives outside the transient notice so no later notice or refresh
+            // can strand the retained request. The saved category is already
+            // committed either way; only the additive rule is uncertain.
+            <div className="finance-pending-request">
+              <p>
+                A “Use for future matches” request for “
+                {pendingRuleCreate.description}” still has an unknown result.
+                Retry the exact same request with its original key, or reload
+                your rules first. Reloading keeps this request available; only a
+                same-key retry can prove whether the rule was created.
+              </p>
+              <div className="finance-account-actions">
+                <button
+                  type="button"
+                  className="household-button"
+                  disabled={busy || !authorityConfirmed}
+                  onClick={() => void submitRuleCreate(pendingRuleCreate)}
+                >
+                  Retry same request
+                </button>
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  disabled={busy}
+                  onClick={() => setRulesRefresh((value) => value + 1)}
+                >
+                  Reload rules
+                </button>
+              </div>
+            </div>
+          )}
+
+          {transactions !== null && transactions.length === 0 && !loading && (
+            <p className="finance-empty">
+              {isOwnView
+                ? 'No transactions yet.'
+                : 'No shared transactions yet.'}
+            </p>
+          )}
+
+          {transactions !== null && transactions.length > 0 && (
+            <ul
+              className="finance-transaction-list"
+              aria-label={
+                isOwnView ? 'Your transactions' : 'Household transactions'
+              }
+            >
+              {transactions.map((transaction) => {
+                const isOwn = transaction.ownerUserId === currentUserId;
+                const voided = transaction.status === 'VOIDED';
+                const refundLabel = transaction.refundOfTransactionId
+                  ? `Refund of an expense recorded on ${
+                      findTransactionById(transaction.refundOfTransactionId)
+                        ?.occurredOn ?? 'an earlier date'
+                    }`
+                  : null;
+                return (
+                  <li
+                    key={transaction.id}
+                    className={`finance-transaction-card${
+                      voided ? ' finance-transaction-card--voided' : ''
+                    }`}
+                  >
+                    <div className="finance-transaction-summary">
+                      <div>
+                        <p className="finance-transaction-name">
+                          {transaction.description}
+                        </p>
+                        <p className="household-meta">
+                          {kindLabel(transaction.kind)} ·{' '}
+                          <time dateTime={transaction.occurredOn}>
+                            {transaction.occurredOn}
+                          </time>{' '}
+                          ·{' '}
+                          {isOwn
+                            ? (accountNameById.get(
+                                transaction.accountId ?? '',
+                              ) ?? 'Your account')
+                            : 'Shared by another member'}{' '}
+                          · {voided ? 'Voided' : 'Posted'}
+                        </p>
+                        {refundLabel && (
+                          <p className="household-meta">{refundLabel}</p>
+                        )}
+                      </div>
+                      <span className="finance-amount">
+                        {formatMoney(
+                          transaction.money.amount,
+                          transaction.money.currency,
+                        )}
+                      </span>
+                    </div>
+                    <div className="finance-transaction-meta">
+                      <span className="privacy-chip">
+                        {transaction.visibility === 'HOUSEHOLD'
+                          ? 'Household'
+                          : 'Private'}
+                      </span>
+                      {transaction.kind === 'REFUND' && (
+                        <span className="finance-note-chip">
+                          Follows the source expense
+                        </span>
+                      )}
+                      {isAllocationFetchable(transaction) &&
+                        Boolean(allocationByTransaction[transaction.id]) && (
+                          <span className="finance-note-chip">Allocated</span>
+                        )}
+                      {transaction.category !== null && (
+                        <span className="finance-category-chip">
+                          {categoryLabel(transaction.category, categories)}
+                        </span>
+                      )}
+                      {voided && (
+                        <span className="finance-voided-chip">Voided</span>
+                      )}
+                    </div>
+
+                    {editingId === transaction.id ? (
+                      <EditForm
+                        transaction={transaction}
+                        currency={transaction.money.currency}
+                        editAmount={editAmount}
+                        editDirection={editDirection}
+                        editDate={editDate}
+                        editDescription={editDescription}
+                        editCategory={editCategory}
+                        editFieldErrors={editFieldErrors}
+                        categories={categories}
+                        busy={busy}
+                        authorityConfirmed={authorityConfirmed}
+                        reportingZone={calculationZone}
+                        minDate={
+                          transaction.kind === 'REFUND'
+                            ? (findTransactionById(
+                                transaction.refundOfTransactionId ?? '',
+                              )?.occurredOn ?? MIN_DATE)
+                            : MIN_DATE
+                        }
+                        linkedRefundCount={
+                          transaction.kind === 'EXPENSE'
+                            ? linkedRefunds(transaction.id).length
+                            : 0
+                        }
+                        onAmountChange={setEditAmount}
+                        onDirectionChange={setEditDirection}
+                        onDateChange={setEditDate}
+                        onDescriptionChange={setEditDescription}
+                        onCategoryChange={setEditCategory}
+                        onSubmit={() => void submitEdit(transaction)}
+                        onCancel={() => cancelEdit(transaction.id)}
+                        editAmountRef={editAmountRef}
+                        editCategoryRef={editCategoryRef}
+                      />
+                    ) : (
+                      <div className="finance-account-actions">
                         <button
                           type="button"
-                          id={`edit-trigger-${transaction.id}`}
+                          id={`details-trigger-${transaction.id}`}
                           className="household-button household-button--secondary"
                           disabled={busy || !authorityConfirmed}
-                          aria-label={`Edit ${transaction.description}`}
-                          onClick={() => beginEdit(transaction)}
+                          aria-label={`Details for ${transaction.description}`}
+                          onClick={() => void openDetail(transaction)}
                         >
-                          Edit
+                          Details
                         </button>
-                        <button
-                          type="button"
-                          className="household-button household-button--secondary"
-                          disabled={busy || !authorityConfirmed}
-                          aria-label={`Void ${transaction.description}`}
-                          onClick={(event) =>
-                            openVoidConfirm(transaction, event.currentTarget)
-                          }
-                        >
-                          Void
-                        </button>
-                        {transaction.kind === 'EXPENSE' && (
+                        {isOwn && !voided && (
+                          <>
+                            <button
+                              type="button"
+                              id={`edit-trigger-${transaction.id}`}
+                              className="household-button household-button--secondary"
+                              disabled={busy || !authorityConfirmed}
+                              aria-label={`Edit ${transaction.description}`}
+                              onClick={() => beginEdit(transaction)}
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              className="household-button household-button--secondary"
+                              disabled={busy || !authorityConfirmed}
+                              aria-label={`Void ${transaction.description}`}
+                              onClick={(event) =>
+                                openVoidConfirm(
+                                  transaction,
+                                  event.currentTarget,
+                                )
+                              }
+                            >
+                              Void
+                            </button>
+                            {transaction.kind === 'EXPENSE' && (
+                              <button
+                                type="button"
+                                className="household-button household-button--secondary"
+                                disabled={busy || !authorityConfirmed}
+                                aria-label={`Record a refund for ${transaction.description}`}
+                                onClick={() => startRefund(transaction)}
+                              >
+                                Refund
+                              </button>
+                            )}
+                            {isOwn &&
+                              transaction.kind === 'EXPENSE' &&
+                              transaction.visibility === 'HOUSEHOLD' && (
+                                <button
+                                  type="button"
+                                  id={`allocation-trigger-${transaction.id}`}
+                                  className="household-button household-button--secondary"
+                                  disabled={busy || !authorityConfirmed}
+                                  aria-label={`Allocation for ${transaction.description}`}
+                                  onClick={(event) =>
+                                    openSplit(transaction, event.currentTarget)
+                                  }
+                                >
+                                  {allocationByTransaction[transaction.id]
+                                    ? 'Allocation'
+                                    : 'Split'}
+                                </button>
+                              )}
+                          </>
+                        )}
+                        {isOwn && transaction.kind !== 'REFUND' && (
                           <button
                             type="button"
                             className="household-button household-button--secondary"
                             disabled={busy || !authorityConfirmed}
-                            aria-label={`Record a refund for ${transaction.description}`}
-                            onClick={() => startRefund(transaction)}
+                            aria-label={
+                              transaction.visibility === 'HOUSEHOLD'
+                                ? `Make ${transaction.description} private`
+                                : `Share ${transaction.description} with the household`
+                            }
+                            onClick={(event) =>
+                              openShareConfirm(
+                                transaction,
+                                transaction.visibility === 'HOUSEHOLD'
+                                  ? 'REVOKE'
+                                  : 'SHARE',
+                                event.currentTarget,
+                              )
+                            }
                           >
-                            Refund
+                            {transaction.visibility === 'HOUSEHOLD'
+                              ? 'Make private'
+                              : 'Share'}
                           </button>
                         )}
-                        {isOwn &&
-                          transaction.kind === 'EXPENSE' &&
-                          transaction.visibility === 'HOUSEHOLD' && (
-                            <button
-                              type="button"
-                              id={`allocation-trigger-${transaction.id}`}
-                              className="household-button household-button--secondary"
-                              disabled={busy || !authorityConfirmed}
-                              aria-label={`Allocation for ${transaction.description}`}
-                              onClick={(event) =>
-                                openSplit(transaction, event.currentTarget)
-                              }
-                            >
-                              {allocationByTransaction[transaction.id]
-                                ? 'Allocation'
-                                : 'Split'}
-                            </button>
-                          )}
-                      </>
+                      </div>
                     )}
-                    {isOwn && transaction.kind !== 'REFUND' && (
-                      <button
-                        type="button"
-                        className="household-button household-button--secondary"
-                        disabled={busy || !authorityConfirmed}
-                        aria-label={
-                          transaction.visibility === 'HOUSEHOLD'
-                            ? `Make ${transaction.description} private`
-                            : `Share ${transaction.description} with the household`
-                        }
-                        onClick={(event) =>
-                          openShareConfirm(
-                            transaction,
-                            transaction.visibility === 'HOUSEHOLD'
-                              ? 'REVOKE'
-                              : 'SHARE',
-                            event.currentTarget,
-                          )
-                        }
-                      >
-                        {transaction.visibility === 'HOUSEHOLD'
-                          ? 'Make private'
-                          : 'Share'}
-                      </button>
-                    )}
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-
-      {pageError && (
-        <div role="alert" className="household-notice household-notice--error">
-          <p>{pageError} Already loaded transactions remain available.</p>
-        </div>
-      )}
-      {hasMore && activeNextOffset() <= 10000 && (
-        <button
-          ref={bottomPagerRef}
-          type="button"
-          className="household-button household-button--secondary"
-          aria-disabled={pagerBlocked || undefined}
-          onClick={() => {
-            if (pagerBlocked) return;
-            void loadMore();
-          }}
-        >
-          {loadingMore
-            ? 'Loading more…'
-            : pageError
-              ? 'Retry next page'
-              : 'Load more transactions'}
-        </button>
-      )}
-      {hasMore && activeNextOffset() > 10000 && (
-        <p role="status" className="finance-helper">
-          More history exists beyond the 10000 offset limit. This is not a
-          complete export.
-        </p>
-      )}
-
-      {pendingVoid && (
-        <div
-          ref={voidConfirmRef}
-          tabIndex={-1}
-          role="group"
-          aria-label={`Confirm void for ${pendingVoid.transaction.description}`}
-          className="household-notice household-notice--warning finance-void-confirm"
-          onKeyDown={handleVoidConfirmKeyDown}
-        >
-          <p>
-            Void “{pendingVoid.transaction.description}”? It stays listed as
-            voided, stops counting toward spending, and can never be edited or
-            restored. If it is an expense, void its refunds first.
-          </p>
-          <div className="finance-account-actions">
-            <button
-              type="button"
-              className="household-button"
-              disabled={busy}
-              onClick={() => void confirmVoid()}
-            >
-              Void transaction
-            </button>
-            <button
-              type="button"
-              className="household-button household-button--secondary"
-              disabled={busy}
-              onClick={cancelVoidConfirm}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-
-      {pendingShare && (
-        <div
-          ref={shareConfirmRef}
-          tabIndex={-1}
-          role="group"
-          aria-label={
-            pendingShare.action === 'SHARE'
-              ? `Confirm sharing ${pendingShare.transaction.description}`
-              : `Confirm making ${pendingShare.transaction.description} private`
-          }
-          className={`household-notice ${
-            pendingShare.action === 'SHARE'
-              ? 'household-notice--info'
-              : 'household-notice--warning'
-          } finance-share-confirm`}
-          onKeyDown={handleShareConfirmKeyDown}
-        >
-          {pendingShare.action === 'SHARE' ? (
-            <>
-              <h5>
-                Share “{pendingShare.transaction.description}” with the
-                household?
-              </h5>
-              <p>
-                Every current member will be able to read the entry exactly as
-                recorded, and members who join later will see it too. These
-                fields are disclosed:
-              </p>
-              <dl className="finance-detail-list finance-disclosure-list">
-                <div>
-                  <dt>Amount</dt>
-                  <dd>
-                    {formatMoney(
-                      pendingShare.transaction.money.amount,
-                      pendingShare.transaction.money.currency,
-                    )}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Currency</dt>
-                  <dd>{pendingShare.transaction.money.currency}</dd>
-                </div>
-                <div>
-                  <dt>Date</dt>
-                  <dd>
-                    <time dateTime={pendingShare.transaction.occurredOn}>
-                      {pendingShare.transaction.occurredOn}
-                    </time>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Kind</dt>
-                  <dd>{kindLabel(pendingShare.transaction.kind)}</dd>
-                </div>
-                <div>
-                  <dt>Description</dt>
-                  <dd>{pendingShare.transaction.description}</dd>
-                </div>
-                <div>
-                  <dt>Category</dt>
-                  <dd>
-                    {categoryLabel(
-                      pendingShare.transaction.category,
-                      categories,
-                    )}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Owner</dt>
-                  <dd>You ({pendingShare.transaction.ownerUserId})</dd>
-                </div>
-                <div>
-                  <dt>Status</dt>
-                  <dd>
-                    {pendingShare.transaction.status === 'POSTED'
-                      ? 'Posted'
-                      : 'Voided'}
-                  </dd>
-                </div>
-                <div>
-                  <dt>Refund relationship</dt>
-                  <dd>{refundRelationshipText(pendingShare.transaction)}</dd>
-                </div>
-              </dl>
-              <p>
-                Account details stay private: the account name, kind, and
-                balances are never disclosed, and other members never see which
-                account an entry came from.
-              </p>
-            </>
-          ) : (
-            <>
-              <h5>
-                Make “{pendingShare.transaction.description}” private again?
-              </h5>
-              <p>
-                Household members lose access on their next refresh. Information
-                already read cannot be retracted.
-              </p>
-              <p>
-                The whole refund group changes together: every linked refund,
-                including voided ones, becomes private with this entry.
-              </p>
-            </>
-          )}
-          <div className="finance-account-actions">
-            <button
-              type="button"
-              className="household-button"
-              disabled={busy}
-              onClick={() => void confirmShare()}
-            >
-              {pendingShare.action === 'SHARE'
-                ? 'Share with household'
-                : 'Make private'}
-            </button>
-            <button
-              type="button"
-              className="household-button household-button--secondary"
-              disabled={busy}
-              onClick={cancelShareConfirm}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-
-      {pendingShare &&
-        pendingShare.action === 'REVOKE' &&
-        Boolean(allocationByTransaction[pendingShare.transaction.id]) && (
-          <p role="status" className="household-hint finance-allocation-guide">
-            This expense has an active allocation. Making it private is blocked
-            while the allocation is active — revoke the allocation first.
-            Revoking keeps the recorded shares on the server but removes them
-            from member balances.
-          </p>
-        )}
-
-      {splitTransaction && (
-        <div
-          ref={splitPanelRef}
-          tabIndex={-1}
-          role="group"
-          aria-label={`Allocation for ${splitTransaction.description}`}
-          className="finance-detail-panel finance-allocation-panel"
-          onKeyDown={handleSplitKeyDown}
-        >
-          <h5>Allocation — “{splitTransaction.description}”</h5>
-          {splitLoadingId === splitTransaction.id ? (
-            <p role="status" aria-live="polite">
-              Checking the current allocation…
-            </p>
-          ) : splitAllocationState === undefined ? (
-            <p role="alert" className="household-error">
-              The allocation state could not be checked. Close and reopen the
-              allocation, or refresh the transactions, to retry.
-            </p>
-          ) : splitAllocationState ? (
-            <div className="finance-allocation-active">
-              <dl className="finance-detail-list">
-                <div>
-                  <dt>Amount allocated</dt>
-                  <dd>
-                    {formatMoney(
-                      splitAllocationState.originalAmount.amount,
-                      splitAllocationState.currency,
-                    )}{' '}
-                    — the full amount, never a partial share
-                  </dd>
-                </div>
-                <div>
-                  <dt>Payer</dt>
-                  <dd>
-                    {splitAllocationState.payerUserId === currentUserId
-                      ? 'You'
-                      : 'Financial owner'}{' '}
-                    ({splitAllocationState.payerUserId})
-                  </dd>
-                </div>
-                <div>
-                  <dt>Status</dt>
-                  <dd>Active</dd>
-                </div>
-                <div>
-                  <dt>Recorded</dt>
-                  <dd>
-                    <time dateTime={splitAllocationState.createdAt}>
-                      {splitAllocationState.createdAt}
-                    </time>
-                  </dd>
-                </div>
-                <div>
-                  <dt>Expense version</dt>
-                  <dd>
-                    {splitAllocationState.transactionVersion} — informational;
-                    mutations always read the live version first
-                  </dd>
-                </div>
-              </dl>
-              <p className="finance-helper">
-                Recorded shares, in participant order. They are frozen: the
-                participant set changes only by revoking this allocation and
-                creating a new one with a fresh request. Members who leave keep
-                their recorded shares.
-              </p>
-              <ul className="finance-allocation-shares">
-                {splitAllocationState.participants.map((participant) => (
-                  <li key={participant.userId}>
-                    <span>
-                      {participant.userId === currentUserId ? 'You' : 'Member'}{' '}
-                      {participant.userId}
-                    </span>
-                    <span>
-                      {formatMoney(
-                        participant.share.amount,
-                        splitAllocationState.currency,
-                      )}
-                    </span>
                   </li>
-                ))}
-              </ul>
-              <AllocationImpactView allocation={splitAllocationState} />
-              <p className="finance-helper">
-                Household visibility alone creates no debt; only this active
-                allocation does. While it is active, the entry cannot be made
-                private and its amount cannot be corrected.
-              </p>
-              {splitTransaction.ownerUserId === currentUserId ? (
-                <div className="finance-account-actions">
-                  <button
-                    type="button"
-                    className="household-button"
-                    disabled={busy || !authorityConfirmed}
-                    onClick={(event) =>
-                      openRevokeConfirm(
-                        splitTransaction,
-                        splitAllocationState,
-                        event.currentTarget,
-                      )
-                    }
-                  >
-                    Revoke allocation
-                  </button>
-                </div>
-              ) : (
-                <p className="finance-helper">
-                  Read-only: only this expense's financial owner can change or
-                  revoke this allocation.
-                </p>
-              )}
-            </div>
-          ) : splitTransaction.ownerUserId !== currentUserId ? (
-            <p className="finance-helper">
-              No active allocation. Only the financial owner can preview or
-              create one.
-            </p>
-          ) : (
-            <AllocationCreateForm
-              transaction={splitTransaction}
-              magnitude={expenseMagnitudeOf(splitTransaction)}
-              roster={roster}
-              rosterLoading={rosterLoading}
-              rosterError={rosterError}
-              selected={splitParticipants}
-              method={splitMethod}
-              amounts={splitAmounts}
-              preview={splitPreview}
-              previewLoading={previewLoading}
-              previewError={previewError}
-              fieldError={splitFieldErrors.participants}
-              busy={busy}
-              creating={allocationCreating}
-              currentUserId={currentUserId}
-              onToggle={toggleSplitParticipant}
-              onMethodChange={(method) => {
-                setSplitMethod(method);
-                invalidateSplitPreview();
-                setSplitFieldErrors({});
-              }}
-              onAmountChange={(userId, amount) => {
-                setSplitAmounts((current) => ({
-                  ...current,
-                  [userId]: amount,
-                }));
-                invalidateSplitPreview();
-                setSplitFieldErrors({});
-              }}
-              onPreview={() => void handleAllocationPreview()}
-              onSubmit={() => {
-                void handleAllocationSubmit();
-              }}
-              onCancel={() => cancelSplit(true)}
-            />
+                );
+              })}
+            </ul>
           )}
-          <div className="finance-account-actions">
+
+          {pageError && (
+            <div
+              role="alert"
+              className="household-notice household-notice--error"
+            >
+              <p>{pageError} Already loaded transactions remain available.</p>
+            </div>
+          )}
+          {hasMore && activeNextOffset() <= 10000 && (
             <button
+              ref={bottomPagerRef}
               type="button"
               className="household-button household-button--secondary"
-              disabled={busy}
-              onClick={() => cancelSplit(true)}
+              aria-disabled={pagerBlocked || undefined}
+              onClick={() => {
+                if (pagerBlocked) return;
+                void loadMore();
+              }}
             >
-              Close allocation
+              {loadingMore
+                ? 'Loading more…'
+                : pageError
+                  ? 'Retry next page'
+                  : 'Load more transactions'}
             </button>
-          </div>
-        </div>
-      )}
+          )}
+          {hasMore && activeNextOffset() > 10000 && (
+            <p role="status" className="finance-helper">
+              More history exists beyond the 10000 offset limit. This is not a
+              complete export.
+            </p>
+          )}
 
-      {pendingAllocation !== null && (
-        // Durable same-key retry affordance for the allocation create, like
-        // the transaction block: the exact request and its original key stay
-        // reconcilable until a same-key retry returns a known outcome.
-        <div className="finance-pending-request">
-          <p>
-            An earlier allocation request still has an unknown result. Retry the
-            exact same request with its original key, or refresh the list first.
-            Refreshing keeps this request available.
-          </p>
-          <div className="finance-account-actions">
-            <button
-              type="button"
-              className="household-button"
-              disabled={busy || !authorityConfirmed}
-              onClick={() => void submitAllocationCreate(pendingAllocation)}
+          {pendingVoid && (
+            <div
+              ref={voidConfirmRef}
+              tabIndex={-1}
+              role="group"
+              aria-label={`Confirm void for ${pendingVoid.transaction.description}`}
+              className="household-notice household-notice--warning finance-void-confirm"
+              onKeyDown={handleVoidConfirmKeyDown}
             >
-              Retry same request
-            </button>
-            <button
-              type="button"
-              className="household-button household-button--secondary"
-              disabled={busy}
-              onClick={refresh}
-            >
-              Refresh transactions
-            </button>
-          </div>
-        </div>
-      )}
+              <p>
+                Void “{pendingVoid.transaction.description}”? It stays listed as
+                voided, stops counting toward spending, and can never be edited
+                or restored. If it is an expense, void its refunds first.
+              </p>
+              <div className="finance-account-actions">
+                <button
+                  type="button"
+                  className="household-button"
+                  disabled={busy}
+                  onClick={() => void confirmVoid()}
+                >
+                  Void transaction
+                </button>
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  disabled={busy}
+                  onClick={cancelVoidConfirm}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
 
-      {pendingRevoke && (
-        <div
-          ref={revokeConfirmRef}
-          tabIndex={-1}
-          role="group"
-          aria-label={`Confirm allocation revoke for ${pendingRevoke.transaction.description}`}
-          className="household-notice household-notice--warning finance-void-confirm"
-          onKeyDown={handleRevokeConfirmKeyDown}
-        >
-          <p>
-            Revoke the allocation for “{pendingRevoke.transaction.description}
-            ”? Member balances will no longer include this expense, and the
-            recorded shares stay retained on the server but are never shown
-            again. You can create a new allocation afterwards with a fresh
-            request.
-          </p>
-          <div className="finance-account-actions">
-            <button
-              type="button"
-              className="household-button"
-              disabled={busy}
-              onClick={() => void confirmAllocationRevoke()}
+          {pendingShare && (
+            <div
+              ref={shareConfirmRef}
+              tabIndex={-1}
+              role="group"
+              aria-label={
+                pendingShare.action === 'SHARE'
+                  ? `Confirm sharing ${pendingShare.transaction.description}`
+                  : `Confirm making ${pendingShare.transaction.description} private`
+              }
+              className={`household-notice ${
+                pendingShare.action === 'SHARE'
+                  ? 'household-notice--info'
+                  : 'household-notice--warning'
+              } finance-share-confirm`}
+              onKeyDown={handleShareConfirmKeyDown}
             >
-              Revoke allocation
-            </button>
-            <button
-              type="button"
-              className="household-button household-button--secondary"
-              disabled={busy}
-              onClick={cancelRevokeConfirm}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-
-      {detail && (
-        <div
-          ref={detailPanelRef}
-          tabIndex={-1}
-          role="group"
-          aria-label={`Details for ${detail.description}`}
-          className="finance-detail-panel"
-        >
-          <h5>Transaction details</h5>
-          <dl className="finance-detail-list">
-            <div>
-              <dt>Description</dt>
-              <dd>{detail.description}</dd>
-            </div>
-            <div>
-              <dt>Amount</dt>
-              <dd>{formatMoney(detail.money.amount, detail.money.currency)}</dd>
-            </div>
-            <div>
-              <dt>Kind</dt>
-              <dd>{kindLabel(detail.kind)}</dd>
-            </div>
-            <div>
-              <dt>Date</dt>
-              <dd>
-                <time dateTime={detail.occurredOn}>{detail.occurredOn}</time>
-              </dd>
-            </div>
-            <div>
-              <dt>Account</dt>
-              <dd>
-                {detail.accountId === null
-                  ? 'Hidden — account details stay private with the owner.'
-                  : (accountNameById.get(detail.accountId) ?? detail.accountId)}
-              </dd>
-            </div>
-            <div>
-              <dt>Owner</dt>
-              <dd>
-                {detail.ownerUserId === currentUserId
-                  ? `You (${detail.ownerUserId})`
-                  : detail.ownerUserId}
-              </dd>
-            </div>
-            <div>
-              <dt>Privacy</dt>
-              <dd>
-                {detail.visibility === 'HOUSEHOLD'
-                  ? detail.ownerUserId === currentUserId
-                    ? 'Household — every member can read these details; account details stay private.'
-                    : 'Household — shared by another member; read-only for you.'
-                  : 'Private — only you can read this entry.'}
-              </dd>
-            </div>
-            <div>
-              <dt>Category</dt>
-              <dd>
-                {detail.kind === 'REFUND'
-                  ? `${categoryLabel(detail.category, categories)} — inherited from the source expense.`
-                  : categoryLabel(detail.category, categories)}
-              </dd>
-            </div>
-            {detailProvenanceRow(detail)}
-            <div>
-              <dt>Status</dt>
-              <dd>{detail.status === 'POSTED' ? 'Posted' : 'Voided'}</dd>
-            </div>
-            <div>
-              <dt>Source</dt>
-              <dd>{SOURCE_LABELS[detail.source]}</dd>
-            </div>
-            <div>
-              <dt>Refund source</dt>
-              <dd>
-                {detail.refundOfTransactionId ? (
-                  <button
-                    type="button"
-                    className="household-button household-button--secondary"
-                    disabled={busy || !authorityConfirmed}
-                    onClick={() => {
-                      if (detail.refundOfTransactionId)
-                        void openDetail(detail.refundOfTransactionId);
-                    }}
-                  >
-                    View source expense
-                  </button>
-                ) : (
-                  'None — not a refund'
-                )}
-              </dd>
-            </div>
-            {detail.kind === 'EXPENSE' &&
-              detail.status === 'POSTED' &&
-              detail.visibility === 'HOUSEHOLD' &&
-              Boolean(allocationByTransaction[detail.id]) && (
-                <div>
-                  <dt>Allocation</dt>
-                  <dd>
-                    Active — the full amount is divided into recorded shares.
-                    Only the financial owner can change or revoke this
-                    allocation.
-                  </dd>
-                </div>
+              {pendingShare.action === 'SHARE' ? (
+                <>
+                  <h5>
+                    Share “{pendingShare.transaction.description}” with the
+                    household?
+                  </h5>
+                  <p>
+                    Every current member will be able to read the entry exactly
+                    as recorded, and members who join later will see it too.
+                    These fields are disclosed:
+                  </p>
+                  <dl className="finance-detail-list finance-disclosure-list">
+                    <div>
+                      <dt>Amount</dt>
+                      <dd>
+                        {formatMoney(
+                          pendingShare.transaction.money.amount,
+                          pendingShare.transaction.money.currency,
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Currency</dt>
+                      <dd>{pendingShare.transaction.money.currency}</dd>
+                    </div>
+                    <div>
+                      <dt>Date</dt>
+                      <dd>
+                        <time dateTime={pendingShare.transaction.occurredOn}>
+                          {pendingShare.transaction.occurredOn}
+                        </time>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Kind</dt>
+                      <dd>{kindLabel(pendingShare.transaction.kind)}</dd>
+                    </div>
+                    <div>
+                      <dt>Description</dt>
+                      <dd>{pendingShare.transaction.description}</dd>
+                    </div>
+                    <div>
+                      <dt>Category</dt>
+                      <dd>
+                        {categoryLabel(
+                          pendingShare.transaction.category,
+                          categories,
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Owner</dt>
+                      <dd>You ({pendingShare.transaction.ownerUserId})</dd>
+                    </div>
+                    <div>
+                      <dt>Status</dt>
+                      <dd>
+                        {pendingShare.transaction.status === 'POSTED'
+                          ? 'Posted'
+                          : 'Voided'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Refund relationship</dt>
+                      <dd>
+                        {refundRelationshipText(pendingShare.transaction)}
+                      </dd>
+                    </div>
+                  </dl>
+                  <p>
+                    Account details stay private: the account name, kind, and
+                    balances are never disclosed, and other members never see
+                    which account an entry came from.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h5>
+                    Make “{pendingShare.transaction.description}” private again?
+                  </h5>
+                  <p>
+                    Household members lose access on their next refresh.
+                    Information already read cannot be retracted.
+                  </p>
+                  <p>
+                    The whole refund group changes together: every linked
+                    refund, including voided ones, becomes private with this
+                    entry.
+                  </p>
+                </>
               )}
-            {detailAllocation && (
-              <div className="finance-allocation-detail">
-                <dt>Recorded shares (read-only)</dt>
-                <dd>
+              <div className="finance-account-actions">
+                <button
+                  type="button"
+                  className="household-button"
+                  disabled={busy}
+                  onClick={() => void confirmShare()}
+                >
+                  {pendingShare.action === 'SHARE'
+                    ? 'Share with household'
+                    : 'Make private'}
+                </button>
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  disabled={busy}
+                  onClick={cancelShareConfirm}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {pendingShare &&
+            pendingShare.action === 'REVOKE' &&
+            Boolean(allocationByTransaction[pendingShare.transaction.id]) && (
+              <p
+                role="status"
+                className="household-hint finance-allocation-guide"
+              >
+                This expense has an active allocation. Making it private is
+                blocked while the allocation is active — revoke the allocation
+                first. Revoking keeps the recorded shares on the server but
+                removes them from member balances.
+              </p>
+            )}
+
+          {splitTransaction && (
+            <div
+              ref={splitPanelRef}
+              tabIndex={-1}
+              role="group"
+              aria-label={`Allocation for ${splitTransaction.description}`}
+              className="finance-detail-panel finance-allocation-panel"
+              onKeyDown={handleSplitKeyDown}
+            >
+              <h5>Allocation — “{splitTransaction.description}”</h5>
+              {splitLoadingId === splitTransaction.id ? (
+                <p role="status" aria-live="polite">
+                  Checking the current allocation…
+                </p>
+              ) : splitAllocationState === undefined ? (
+                <p role="alert" className="household-error">
+                  The allocation state could not be checked. Close and reopen
+                  the allocation, or refresh the transactions, to retry.
+                </p>
+              ) : splitAllocationState ? (
+                <div className="finance-allocation-active">
+                  <dl className="finance-detail-list">
+                    <div>
+                      <dt>Amount allocated</dt>
+                      <dd>
+                        {formatMoney(
+                          splitAllocationState.originalAmount.amount,
+                          splitAllocationState.currency,
+                        )}{' '}
+                        — the full amount, never a partial share
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Payer</dt>
+                      <dd>
+                        {splitAllocationState.payerUserId === currentUserId
+                          ? 'You'
+                          : 'Financial owner'}{' '}
+                        ({splitAllocationState.payerUserId})
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Status</dt>
+                      <dd>Active</dd>
+                    </div>
+                    <div>
+                      <dt>Recorded</dt>
+                      <dd>
+                        <time dateTime={splitAllocationState.createdAt}>
+                          {splitAllocationState.createdAt}
+                        </time>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Expense version</dt>
+                      <dd>
+                        {splitAllocationState.transactionVersion} —
+                        informational; mutations always read the live version
+                        first
+                      </dd>
+                    </div>
+                  </dl>
+                  <p className="finance-helper">
+                    Recorded shares, in participant order. They are frozen: the
+                    participant set changes only by revoking this allocation and
+                    creating a new one with a fresh request. Members who leave
+                    keep their recorded shares.
+                  </p>
                   <ul className="finance-allocation-shares">
-                    {detailAllocation.participants.map((participant) => (
+                    {splitAllocationState.participants.map((participant) => (
                       <li key={participant.userId}>
                         <span>
                           {participant.userId === currentUserId
@@ -4829,479 +4632,810 @@ export function TransactionsSection({
                         <span>
                           {formatMoney(
                             participant.share.amount,
-                            detailAllocation.currency,
+                            splitAllocationState.currency,
                           )}
                         </span>
                       </li>
                     ))}
                   </ul>
-                  <AllocationImpactView allocation={detailAllocation} />
-                </dd>
+                  <AllocationImpactView allocation={splitAllocationState} />
+                  <p className="finance-helper">
+                    Household visibility alone creates no debt; only this active
+                    allocation does. While it is active, the entry cannot be
+                    made private and its amount cannot be corrected.
+                  </p>
+                  {splitTransaction.ownerUserId === currentUserId ? (
+                    <div className="finance-account-actions">
+                      <button
+                        type="button"
+                        className="household-button"
+                        disabled={busy || !authorityConfirmed}
+                        onClick={(event) =>
+                          openRevokeConfirm(
+                            splitTransaction,
+                            splitAllocationState,
+                            event.currentTarget,
+                          )
+                        }
+                      >
+                        Revoke allocation
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="finance-helper">
+                      Read-only: only this expense's financial owner can change
+                      or revoke this allocation.
+                    </p>
+                  )}
+                </div>
+              ) : splitTransaction.ownerUserId !== currentUserId ? (
+                <p className="finance-helper">
+                  No active allocation. Only the financial owner can preview or
+                  create one.
+                </p>
+              ) : (
+                <AllocationCreateForm
+                  transaction={splitTransaction}
+                  magnitude={expenseMagnitudeOf(splitTransaction)}
+                  roster={roster}
+                  rosterLoading={rosterLoading}
+                  rosterError={rosterError}
+                  selected={splitParticipants}
+                  method={splitMethod}
+                  amounts={splitAmounts}
+                  preview={splitPreview}
+                  previewLoading={previewLoading}
+                  previewError={previewError}
+                  fieldError={splitFieldErrors.participants}
+                  busy={busy}
+                  creating={allocationCreating}
+                  currentUserId={currentUserId}
+                  onToggle={toggleSplitParticipant}
+                  onMethodChange={(method) => {
+                    setSplitMethod(method);
+                    invalidateSplitPreview();
+                    setSplitFieldErrors({});
+                  }}
+                  onAmountChange={(userId, amount) => {
+                    setSplitAmounts((current) => ({
+                      ...current,
+                      [userId]: amount,
+                    }));
+                    invalidateSplitPreview();
+                    setSplitFieldErrors({});
+                  }}
+                  onPreview={() => void handleAllocationPreview()}
+                  onSubmit={() => {
+                    void handleAllocationSubmit();
+                  }}
+                  onCancel={() => cancelSplit(true)}
+                />
+              )}
+              <div className="finance-account-actions">
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  disabled={busy}
+                  onClick={() => cancelSplit(true)}
+                >
+                  Close allocation
+                </button>
               </div>
-            )}
-            <div>
-              <dt>Version</dt>
-              <dd>{detail.version}</dd>
             </div>
-            <div>
-              <dt>Recorded</dt>
-              <dd>
-                <time dateTime={detail.createdAt}>{detail.createdAt}</time>
-              </dd>
+          )}
+
+          {pendingAllocation !== null && (
+            // Durable same-key retry affordance for the allocation create, like
+            // the transaction block: the exact request and its original key stay
+            // reconcilable until a same-key retry returns a known outcome.
+            <div className="finance-pending-request">
+              <p>
+                An earlier allocation request still has an unknown result. Retry
+                the exact same request with its original key, or refresh the
+                list first. Refreshing keeps this request available.
+              </p>
+              <div className="finance-account-actions">
+                <button
+                  type="button"
+                  className="household-button"
+                  disabled={busy || !authorityConfirmed}
+                  onClick={() => void submitAllocationCreate(pendingAllocation)}
+                >
+                  Retry same request
+                </button>
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  disabled={busy}
+                  onClick={refresh}
+                >
+                  Refresh transactions
+                </button>
+              </div>
             </div>
-            <div>
-              <dt>Last changed</dt>
-              <dd>
-                <time dateTime={detail.updatedAt}>{detail.updatedAt}</time>
-              </dd>
+          )}
+
+          {pendingRevoke && (
+            <div
+              ref={revokeConfirmRef}
+              tabIndex={-1}
+              role="group"
+              aria-label={`Confirm allocation revoke for ${pendingRevoke.transaction.description}`}
+              className="household-notice household-notice--warning finance-void-confirm"
+              onKeyDown={handleRevokeConfirmKeyDown}
+            >
+              <p>
+                Revoke the allocation for “
+                {pendingRevoke.transaction.description}
+                ”? Member balances will no longer include this expense, and the
+                recorded shares stay retained on the server but are never shown
+                again. You can create a new allocation afterwards with a fresh
+                request.
+              </p>
+              <div className="finance-account-actions">
+                <button
+                  type="button"
+                  className="household-button"
+                  disabled={busy}
+                  onClick={() => void confirmAllocationRevoke()}
+                >
+                  Revoke allocation
+                </button>
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  disabled={busy}
+                  onClick={cancelRevokeConfirm}
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
-          </dl>
-          <div className="finance-account-actions">
-            {/* A source expense reached by ID may sit outside the loaded
+          )}
+
+          {detail && (
+            <div
+              ref={detailPanelRef}
+              tabIndex={-1}
+              role="group"
+              aria-label={`Details for ${detail.description}`}
+              className="finance-detail-panel"
+            >
+              <h5>Transaction details</h5>
+              <dl className="finance-detail-list">
+                <div>
+                  <dt>Description</dt>
+                  <dd>{detail.description}</dd>
+                </div>
+                <div>
+                  <dt>Amount</dt>
+                  <dd>
+                    {formatMoney(detail.money.amount, detail.money.currency)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Kind</dt>
+                  <dd>{kindLabel(detail.kind)}</dd>
+                </div>
+                <div>
+                  <dt>Date</dt>
+                  <dd>
+                    <time dateTime={detail.occurredOn}>
+                      {detail.occurredOn}
+                    </time>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Account</dt>
+                  <dd>
+                    {detail.accountId === null
+                      ? 'Hidden — account details stay private with the owner.'
+                      : (accountNameById.get(detail.accountId) ??
+                        detail.accountId)}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Owner</dt>
+                  <dd>
+                    {detail.ownerUserId === currentUserId
+                      ? `You (${detail.ownerUserId})`
+                      : detail.ownerUserId}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Privacy</dt>
+                  <dd>
+                    {detail.visibility === 'HOUSEHOLD'
+                      ? detail.ownerUserId === currentUserId
+                        ? 'Household — every member can read these details; account details stay private.'
+                        : 'Household — shared by another member; read-only for you.'
+                      : 'Private — only you can read this entry.'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Category</dt>
+                  <dd>
+                    {detail.kind === 'REFUND'
+                      ? `${categoryLabel(detail.category, categories)} — inherited from the source expense.`
+                      : categoryLabel(detail.category, categories)}
+                  </dd>
+                </div>
+                {detailProvenanceRow(detail)}
+                <div>
+                  <dt>Status</dt>
+                  <dd>{detail.status === 'POSTED' ? 'Posted' : 'Voided'}</dd>
+                </div>
+                <div>
+                  <dt>Source</dt>
+                  <dd>{SOURCE_LABELS[detail.source]}</dd>
+                </div>
+                <div>
+                  <dt>Refund source</dt>
+                  <dd>
+                    {detail.refundOfTransactionId ? (
+                      <button
+                        type="button"
+                        className="household-button household-button--secondary"
+                        disabled={busy || !authorityConfirmed}
+                        onClick={() => {
+                          if (detail.refundOfTransactionId)
+                            void openDetail(detail.refundOfTransactionId);
+                        }}
+                      >
+                        View source expense
+                      </button>
+                    ) : (
+                      'None — not a refund'
+                    )}
+                  </dd>
+                </div>
+                {detail.kind === 'EXPENSE' &&
+                  detail.status === 'POSTED' &&
+                  detail.visibility === 'HOUSEHOLD' &&
+                  Boolean(allocationByTransaction[detail.id]) && (
+                    <div>
+                      <dt>Allocation</dt>
+                      <dd>
+                        Active — the full amount is divided into recorded
+                        shares. Only the financial owner can change or revoke
+                        this allocation.
+                      </dd>
+                    </div>
+                  )}
+                {detailAllocation && (
+                  <div className="finance-allocation-detail">
+                    <dt>Recorded shares (read-only)</dt>
+                    <dd>
+                      <ul className="finance-allocation-shares">
+                        {detailAllocation.participants.map((participant) => (
+                          <li key={participant.userId}>
+                            <span>
+                              {participant.userId === currentUserId
+                                ? 'You'
+                                : 'Member'}{' '}
+                              {participant.userId}
+                            </span>
+                            <span>
+                              {formatMoney(
+                                participant.share.amount,
+                                detailAllocation.currency,
+                              )}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                      <AllocationImpactView allocation={detailAllocation} />
+                    </dd>
+                  </div>
+                )}
+                <div>
+                  <dt>Version</dt>
+                  <dd>{detail.version}</dd>
+                </div>
+                <div>
+                  <dt>Recorded</dt>
+                  <dd>
+                    <time dateTime={detail.createdAt}>{detail.createdAt}</time>
+                  </dd>
+                </div>
+                <div>
+                  <dt>Last changed</dt>
+                  <dd>
+                    <time dateTime={detail.updatedAt}>{detail.updatedAt}</time>
+                  </dd>
+                </div>
+              </dl>
+              <div className="finance-account-actions">
+                {/* A source expense reached by ID may sit outside the loaded
                 pages, so the panel itself offers the same owner actions a
                 row would: the exact versioned visibility change and the
                 allocation route. Another member's shared entry stays
                 read-only, and a refund never carries a direct visibility
                 patch — its group follows the source expense. */}
-            {detail.ownerUserId === currentUserId &&
-              detail.kind !== 'REFUND' && (
+                {detail.ownerUserId === currentUserId &&
+                  detail.kind !== 'REFUND' && (
+                    <button
+                      type="button"
+                      className="household-button household-button--secondary"
+                      disabled={busy || !authorityConfirmed}
+                      aria-label={
+                        detail.visibility === 'HOUSEHOLD'
+                          ? `Make ${detail.description} private from details`
+                          : `Share ${detail.description} with the household from details`
+                      }
+                      onClick={(event) =>
+                        openShareConfirm(
+                          detail,
+                          detail.visibility === 'HOUSEHOLD'
+                            ? 'REVOKE'
+                            : 'SHARE',
+                          event.currentTarget,
+                        )
+                      }
+                    >
+                      {detail.visibility === 'HOUSEHOLD'
+                        ? 'Make private'
+                        : 'Share'}
+                    </button>
+                  )}
+                {isAllocationFetchable(detail) &&
+                  detail.ownerUserId === currentUserId && (
+                    <button
+                      type="button"
+                      className="household-button household-button--secondary"
+                      disabled={busy || !authorityConfirmed}
+                      aria-label={`Allocation for ${detail.description} from details`}
+                      onClick={(event) =>
+                        openSplit(detail, event.currentTarget)
+                      }
+                    >
+                      {allocationByTransaction[detail.id]
+                        ? 'Allocation'
+                        : 'Split'}
+                    </button>
+                  )}
                 <button
                   type="button"
                   className="household-button household-button--secondary"
-                  disabled={busy || !authorityConfirmed}
-                  aria-label={
-                    detail.visibility === 'HOUSEHOLD'
-                      ? `Make ${detail.description} private from details`
-                      : `Share ${detail.description} with the household from details`
-                  }
-                  onClick={(event) =>
-                    openShareConfirm(
-                      detail,
-                      detail.visibility === 'HOUSEHOLD' ? 'REVOKE' : 'SHARE',
-                      event.currentTarget,
-                    )
-                  }
+                  disabled={busy}
+                  onClick={closeDetail}
                 >
-                  {detail.visibility === 'HOUSEHOLD' ? 'Make private' : 'Share'}
+                  Close details
                 </button>
+              </div>
+            </div>
+          )}
+
+          {transactions !== null && !loading && (
+            <form
+              className="finance-create-form"
+              onSubmit={handleCreate}
+              noValidate
+            >
+              <h5>Record a transaction</h5>
+              {refundSource && (
+                <p className="finance-refund-context">
+                  Refund of the expense “{refundSource.description}” recorded on{' '}
+                  {refundSource.occurredOn}. The account, currency, and source
+                  are fixed to it, and the refund inherits this expense's
+                  category and privacy.
+                </p>
               )}
-            {isAllocationFetchable(detail) &&
-              detail.ownerUserId === currentUserId && (
+              {!refundSource && (
+                <div className="household-field">
+                  <label htmlFor={`new-transaction-account-${household.id}`}>
+                    Account
+                  </label>
+                  <select
+                    ref={createAccountRef}
+                    id={`new-transaction-account-${household.id}`}
+                    value={createAccountId}
+                    onChange={(event) => {
+                      setCreateAccountId(event.target.value);
+                      setCreateFieldErrors({});
+                    }}
+                    disabled={
+                      busy || pendingCreate !== null || !authorityConfirmed
+                    }
+                    aria-invalid={Boolean(createFieldErrors.account)}
+                    aria-describedby={
+                      createFieldErrors.account
+                        ? `new-transaction-account-error-${household.id}`
+                        : undefined
+                    }
+                  >
+                    <option value="">Choose an account…</option>
+                    {activeAccounts.map((account) => (
+                      <option key={account.id} value={account.id}>
+                        {account.name} · {account.currency}
+                      </option>
+                    ))}
+                  </select>
+                  {createFieldErrors.account && (
+                    <p
+                      id={`new-transaction-account-error-${household.id}`}
+                      className="household-error"
+                      role="alert"
+                    >
+                      {createFieldErrors.account}
+                    </p>
+                  )}
+                </div>
+              )}
+              <div className="finance-create-grid">
+                <div className="household-field">
+                  <label htmlFor={`new-transaction-kind-${household.id}`}>
+                    Entry type
+                  </label>
+                  {refundSource ? (
+                    <p className="finance-locked-value">Refund (fixed)</p>
+                  ) : (
+                    <select
+                      id={`new-transaction-kind-${household.id}`}
+                      value={createKind}
+                      onChange={(event) =>
+                        setCreateKind(
+                          event.target.value as
+                            'EXPENSE' | 'INCOME' | 'TRANSFER',
+                        )
+                      }
+                      disabled={
+                        busy || pendingCreate !== null || !authorityConfirmed
+                      }
+                    >
+                      {KIND_OPTIONS.filter(
+                        (option) => option.value !== 'REFUND',
+                      ).map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label} — {option.hint}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+                <div className="household-field">
+                  <span className="household-field-label">Currency</span>
+                  <p className="finance-locked-value">
+                    {selectedCurrency ??
+                      (refundSource ? refundSource.money.currency : '—')}
+                  </p>
+                </div>
+              </div>
+              {createKind === 'TRANSFER' && !refundSource && (
+                <fieldset className="finance-direction-fieldset">
+                  <legend>Transfer direction</legend>
+                  <label className="finance-direction-option">
+                    <input
+                      type="radio"
+                      name={`transfer-direction-${household.id}`}
+                      value="OUT"
+                      checked={createDirection === 'OUT'}
+                      onChange={() => setCreateDirection('OUT')}
+                      disabled={
+                        busy || pendingCreate !== null || !authorityConfirmed
+                      }
+                    />
+                    <span>Money out (−)</span>
+                  </label>
+                  <label className="finance-direction-option">
+                    <input
+                      type="radio"
+                      name={`transfer-direction-${household.id}`}
+                      value="IN"
+                      checked={createDirection === 'IN'}
+                      onChange={() => setCreateDirection('IN')}
+                      disabled={
+                        busy || pendingCreate !== null || !authorityConfirmed
+                      }
+                    />
+                    <span>Money in (+)</span>
+                  </label>
+                </fieldset>
+              )}
+              <div className="household-field">
+                <label htmlFor={`new-transaction-amount-${household.id}`}>
+                  Amount
+                </label>
+                <input
+                  ref={amountRef}
+                  id={`new-transaction-amount-${household.id}`}
+                  value={createAmount}
+                  onChange={(event) => {
+                    setCreateAmount(event.target.value);
+                    setCreateFieldErrors({});
+                  }}
+                  inputMode="decimal"
+                  autoComplete="off"
+                  disabled={
+                    busy || pendingCreate !== null || !authorityConfirmed
+                  }
+                  aria-invalid={Boolean(createFieldErrors.amount)}
+                  aria-describedby={
+                    createFieldErrors.amount
+                      ? `new-transaction-amount-hint-${household.id} new-transaction-amount-error-${household.id}`
+                      : `new-transaction-amount-hint-${household.id}`
+                  }
+                />
+                <p
+                  id={`new-transaction-amount-hint-${household.id}`}
+                  className="household-hint"
+                >
+                  {refundSource
+                    ? 'The returned amount, without a sign.'
+                    : 'Positive size only; the entry type sets the direction. Use a decimal point (12.50), not a comma.'}
+                </p>
+                {createFieldErrors.amount && (
+                  <p
+                    id={`new-transaction-amount-error-${household.id}`}
+                    className="household-error"
+                    role="alert"
+                  >
+                    {createFieldErrors.amount}
+                  </p>
+                )}
+                <p role="status" className="finance-amount-preview">
+                  {createAmountPreview()}
+                </p>
+              </div>
+              <div className="finance-create-grid">
+                <div className="household-field">
+                  <label htmlFor={`new-transaction-date-${household.id}`}>
+                    Date
+                  </label>
+                  <input
+                    id={`new-transaction-date-${household.id}`}
+                    type="date"
+                    value={createDate}
+                    min={createMinDate}
+                    max={MAX_DATE}
+                    onChange={(event) => {
+                      setCreateDate(event.target.value);
+                      createDateTouchedRef.current = true;
+                      setCreateFieldErrors({});
+                    }}
+                    disabled={
+                      busy || pendingCreate !== null || !authorityConfirmed
+                    }
+                    aria-invalid={Boolean(createFieldErrors.date)}
+                    aria-describedby={
+                      createFieldErrors.date
+                        ? `new-transaction-date-error-${household.id}`
+                        : undefined
+                    }
+                  />
+                  {createFieldErrors.date && (
+                    <p
+                      id={`new-transaction-date-error-${household.id}`}
+                      className="household-error"
+                      role="alert"
+                    >
+                      {createFieldErrors.date}
+                    </p>
+                  )}
+                  {createFutureWarning && (
+                    <p role="status" className="household-hint">
+                      This date is in the future. It stays a recorded fact and
+                      appears in reports only when a period covers its date.
+                    </p>
+                  )}
+                </div>
+                <div className="household-field">
+                  <label
+                    htmlFor={`new-transaction-description-${household.id}`}
+                  >
+                    Description
+                  </label>
+                  <input
+                    id={`new-transaction-description-${household.id}`}
+                    value={createDescription}
+                    onChange={(event) => {
+                      setCreateDescription(event.target.value);
+                      setCreateFieldErrors({});
+                    }}
+                    autoComplete="off"
+                    disabled={
+                      busy || pendingCreate !== null || !authorityConfirmed
+                    }
+                    aria-invalid={Boolean(createFieldErrors.description)}
+                    aria-describedby={
+                      createFieldErrors.description
+                        ? `new-transaction-description-error-${household.id}`
+                        : undefined
+                    }
+                  />
+                  {createFieldErrors.description && (
+                    <p
+                      id={`new-transaction-description-error-${household.id}`}
+                      className="household-error"
+                      role="alert"
+                    >
+                      {createFieldErrors.description}
+                    </p>
+                  )}
+                </div>
+              </div>
+              {!refundSource && (
+                <div className="household-field">
+                  <label htmlFor={`new-transaction-category-${household.id}`}>
+                    Category
+                  </label>
+                  <select
+                    ref={createCategoryRef}
+                    id={`new-transaction-category-${household.id}`}
+                    value={createCategory}
+                    onChange={(event) => {
+                      setCreateCategory(event.target.value);
+                      setCreateFieldErrors({});
+                    }}
+                    disabled={
+                      busy || pendingCreate !== null || !authorityConfirmed
+                    }
+                    aria-invalid={Boolean(createFieldErrors.category)}
+                    aria-describedby={
+                      createFieldErrors.category
+                        ? `new-transaction-category-error-${household.id}`
+                        : undefined
+                    }
+                  >
+                    <option value="">Uncategorized — no category</option>
+                    {(categories ?? []).map((category) => (
+                      <option key={category.code} value={category.code}>
+                        {category.label}
+                      </option>
+                    ))}
+                  </select>
+                  {categories === null && (
+                    <p className="household-hint">
+                      Category unavailable. Refresh the section to retry the
+                      list.
+                    </p>
+                  )}
+                  {createFieldErrors.category && (
+                    <p
+                      id={`new-transaction-category-error-${household.id}`}
+                      className="household-error"
+                      role="alert"
+                    >
+                      {createFieldErrors.category}
+                    </p>
+                  )}
+                </div>
+              )}
+              <p className="finance-helper">
+                {refundSource
+                  ? 'The refund is recorded against this expense in its account and currency. Its category and privacy follow the expense.'
+                  : 'Privacy stays private unless you explicitly share. Account and entry type cannot be changed later; a wrong one is corrected by voiding and recording a new entry.'}
+              </p>
+              <div className="finance-account-actions">
                 <button
-                  type="button"
-                  className="household-button household-button--secondary"
-                  disabled={busy || !authorityConfirmed}
-                  aria-label={`Allocation for ${detail.description} from details`}
-                  onClick={(event) => openSplit(detail, event.currentTarget)}
+                  type="submit"
+                  className="household-button"
+                  disabled={
+                    busy || pendingCreate !== null || !authorityConfirmed
+                  }
                 >
-                  {allocationByTransaction[detail.id] ? 'Allocation' : 'Split'}
+                  {creating ? 'Recording…' : 'Record transaction'}
                 </button>
-              )}
-            <button
-              type="button"
-              className="household-button household-button--secondary"
-              disabled={busy}
-              onClick={closeDetail}
-            >
-              Close details
-            </button>
-          </div>
-        </div>
+                {refundSource && (
+                  <button
+                    type="button"
+                    className="household-button household-button--secondary"
+                    disabled={busy || pendingCreate !== null}
+                    onClick={cancelRefund}
+                  >
+                    Cancel refund
+                  </button>
+                )}
+              </div>
+            </form>
+          )}
+        </>
       )}
 
-      {transactions !== null && !loading && (
-        <form
-          className="finance-create-form"
-          onSubmit={handleCreate}
-          noValidate
-        >
-          <h5>Record a transaction</h5>
-          {refundSource && (
-            <p className="finance-refund-context">
-              Refund of the expense “{refundSource.description}” recorded on{' '}
-              {refundSource.occurredOn}. The account, currency, and source are
-              fixed to it, and the refund inherits this expense's category and
-              privacy.
-            </p>
-          )}
-          {!refundSource && (
-            <div className="household-field">
-              <label htmlFor={`new-transaction-account-${household.id}`}>
-                Account
-              </label>
-              <select
-                ref={createAccountRef}
-                id={`new-transaction-account-${household.id}`}
-                value={createAccountId}
-                onChange={(event) => {
-                  setCreateAccountId(event.target.value);
-                  setCreateFieldErrors({});
-                }}
-                disabled={busy || pendingCreate !== null || !authorityConfirmed}
-                aria-invalid={Boolean(createFieldErrors.account)}
-                aria-describedby={
-                  createFieldErrors.account
-                    ? `new-transaction-account-error-${household.id}`
-                    : undefined
-                }
-              >
-                <option value="">Choose an account…</option>
-                {activeAccounts.map((account) => (
-                  <option key={account.id} value={account.id}>
-                    {account.name} · {account.currency}
-                  </option>
-                ))}
-              </select>
-              {createFieldErrors.account && (
-                <p
-                  id={`new-transaction-account-error-${household.id}`}
-                  className="household-error"
-                  role="alert"
-                >
-                  {createFieldErrors.account}
-                </p>
-              )}
-            </div>
-          )}
-          <div className="finance-create-grid">
-            <div className="household-field">
-              <label htmlFor={`new-transaction-kind-${household.id}`}>
-                Entry type
-              </label>
-              {refundSource ? (
-                <p className="finance-locked-value">Refund (fixed)</p>
-              ) : (
-                <select
-                  id={`new-transaction-kind-${household.id}`}
-                  value={createKind}
-                  onChange={(event) =>
-                    setCreateKind(
-                      event.target.value as 'EXPENSE' | 'INCOME' | 'TRANSFER',
-                    )
-                  }
-                  disabled={
-                    busy || pendingCreate !== null || !authorityConfirmed
-                  }
-                >
-                  {KIND_OPTIONS.filter(
-                    (option) => option.value !== 'REFUND',
-                  ).map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label} — {option.hint}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
-            <div className="household-field">
-              <span className="household-field-label">Currency</span>
-              <p className="finance-locked-value">
-                {selectedCurrency ??
-                  (refundSource ? refundSource.money.currency : '—')}
-              </p>
-            </div>
-          </div>
-          {createKind === 'TRANSFER' && !refundSource && (
-            <fieldset className="finance-direction-fieldset">
-              <legend>Transfer direction</legend>
-              <label className="finance-direction-option">
-                <input
-                  type="radio"
-                  name={`transfer-direction-${household.id}`}
-                  value="OUT"
-                  checked={createDirection === 'OUT'}
-                  onChange={() => setCreateDirection('OUT')}
-                  disabled={
-                    busy || pendingCreate !== null || !authorityConfirmed
-                  }
-                />
-                <span>Money out (−)</span>
-              </label>
-              <label className="finance-direction-option">
-                <input
-                  type="radio"
-                  name={`transfer-direction-${household.id}`}
-                  value="IN"
-                  checked={createDirection === 'IN'}
-                  onChange={() => setCreateDirection('IN')}
-                  disabled={
-                    busy || pendingCreate !== null || !authorityConfirmed
-                  }
-                />
-                <span>Money in (+)</span>
-              </label>
-            </fieldset>
-          )}
-          <div className="household-field">
-            <label htmlFor={`new-transaction-amount-${household.id}`}>
-              Amount
-            </label>
-            <input
-              ref={amountRef}
-              id={`new-transaction-amount-${household.id}`}
-              value={createAmount}
-              onChange={(event) => {
-                setCreateAmount(event.target.value);
-                setCreateFieldErrors({});
-              }}
-              inputMode="decimal"
-              autoComplete="off"
-              disabled={busy || pendingCreate !== null || !authorityConfirmed}
-              aria-invalid={Boolean(createFieldErrors.amount)}
-              aria-describedby={
-                createFieldErrors.amount
-                  ? `new-transaction-amount-hint-${household.id} new-transaction-amount-error-${household.id}`
-                  : `new-transaction-amount-hint-${household.id}`
-              }
-            />
-            <p
-              id={`new-transaction-amount-hint-${household.id}`}
-              className="household-hint"
-            >
-              {refundSource
-                ? 'The returned amount, without a sign.'
-                : 'Positive size only; the entry type sets the direction. Use a decimal point (12.50), not a comma.'}
-            </p>
-            {createFieldErrors.amount && (
-              <p
-                id={`new-transaction-amount-error-${household.id}`}
-                className="household-error"
-                role="alert"
-              >
-                {createFieldErrors.amount}
-              </p>
-            )}
-            <p role="status" className="finance-amount-preview">
-              {createAmountPreview()}
-            </p>
-          </div>
-          <div className="finance-create-grid">
-            <div className="household-field">
-              <label htmlFor={`new-transaction-date-${household.id}`}>
-                Date
-              </label>
-              <input
-                id={`new-transaction-date-${household.id}`}
-                type="date"
-                value={createDate}
-                min={createMinDate}
-                max={MAX_DATE}
-                onChange={(event) => {
-                  setCreateDate(event.target.value);
-                  createDateTouchedRef.current = true;
-                  setCreateFieldErrors({});
-                }}
-                disabled={busy || pendingCreate !== null || !authorityConfirmed}
-                aria-invalid={Boolean(createFieldErrors.date)}
-                aria-describedby={
-                  createFieldErrors.date
-                    ? `new-transaction-date-error-${household.id}`
-                    : undefined
-                }
-              />
-              {createFieldErrors.date && (
-                <p
-                  id={`new-transaction-date-error-${household.id}`}
-                  className="household-error"
-                  role="alert"
-                >
-                  {createFieldErrors.date}
-                </p>
-              )}
-              {createFutureWarning && (
-                <p role="status" className="household-hint">
-                  This date is in the future. It stays a recorded fact and
-                  appears in reports only when a period covers its date.
-                </p>
-              )}
-            </div>
-            <div className="household-field">
-              <label htmlFor={`new-transaction-description-${household.id}`}>
-                Description
-              </label>
-              <input
-                id={`new-transaction-description-${household.id}`}
-                value={createDescription}
-                onChange={(event) => {
-                  setCreateDescription(event.target.value);
-                  setCreateFieldErrors({});
-                }}
-                autoComplete="off"
-                disabled={busy || pendingCreate !== null || !authorityConfirmed}
-                aria-invalid={Boolean(createFieldErrors.description)}
-                aria-describedby={
-                  createFieldErrors.description
-                    ? `new-transaction-description-error-${household.id}`
-                    : undefined
-                }
-              />
-              {createFieldErrors.description && (
-                <p
-                  id={`new-transaction-description-error-${household.id}`}
-                  className="household-error"
-                  role="alert"
-                >
-                  {createFieldErrors.description}
-                </p>
-              )}
-            </div>
-          </div>
-          {!refundSource && (
-            <div className="household-field">
-              <label htmlFor={`new-transaction-category-${household.id}`}>
-                Category
-              </label>
-              <select
-                ref={createCategoryRef}
-                id={`new-transaction-category-${household.id}`}
-                value={createCategory}
-                onChange={(event) => {
-                  setCreateCategory(event.target.value);
-                  setCreateFieldErrors({});
-                }}
-                disabled={busy || pendingCreate !== null || !authorityConfirmed}
-                aria-invalid={Boolean(createFieldErrors.category)}
-                aria-describedby={
-                  createFieldErrors.category
-                    ? `new-transaction-category-error-${household.id}`
-                    : undefined
-                }
-              >
-                <option value="">Uncategorized — no category</option>
-                {(categories ?? []).map((category) => (
-                  <option key={category.code} value={category.code}>
-                    {category.label}
-                  </option>
-                ))}
-              </select>
-              {categories === null && (
-                <p className="household-hint">
-                  Category unavailable. Refresh the section to retry the list.
-                </p>
-              )}
-              {createFieldErrors.category && (
-                <p
-                  id={`new-transaction-category-error-${household.id}`}
-                  className="household-error"
-                  role="alert"
-                >
-                  {createFieldErrors.category}
-                </p>
-              )}
-            </div>
-          )}
-          <p className="finance-helper">
-            {refundSource
-              ? 'The refund is recorded against this expense in its account and currency. Its category and privacy follow the expense.'
-              : 'Privacy stays private unless you explicitly share. Account and entry type cannot be changed later; a wrong one is corrected by voiding and recording a new entry.'}
-          </p>
-          <div className="finance-account-actions">
-            <button
-              type="submit"
-              className="household-button"
-              disabled={busy || pendingCreate !== null || !authorityConfirmed}
-            >
-              {creating ? 'Recording…' : 'Record transaction'}
-            </button>
-            {refundSource && (
-              <button
-                type="button"
-                className="household-button household-button--secondary"
-                disabled={busy || pendingCreate !== null}
-                onClick={cancelRefund}
-              >
-                Cancel refund
-              </button>
-            )}
-          </div>
-        </form>
+      {page === 'rules' && (
+        <CategorizationRulesSection
+          household={household}
+          csrf={csrf}
+          onCsrfRefreshed={onCsrfRefreshed}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdAccessChanged}
+          authorityConfirmed={authorityConfirmed}
+          categories={categories}
+          refreshSignal={rulesRefresh}
+          scopeResetSignal={scopeReset}
+        />
       )}
-
-      <CategorizationRulesSection
-        household={household}
-        csrf={csrf}
-        onCsrfRefreshed={onCsrfRefreshed}
-        onSessionExpired={onSessionExpired}
-        onHouseholdAccessChanged={onHouseholdAccessChanged}
-        authorityConfirmed={authorityConfirmed}
-        categories={categories}
-        refreshSignal={rulesRefresh}
-        scopeResetSignal={scopeReset}
-      />
-      <CategorizationReviewsSection
-        household={household}
-        csrf={csrf}
-        onCsrfRefreshed={onCsrfRefreshed}
-        onSessionExpired={onSessionExpired}
-        onHouseholdAccessChanged={onHouseholdAccessChanged}
-        authorityConfirmed={authorityConfirmed}
-        categories={categories}
-        refreshSignal={reviewsRefresh}
-        scopeResetSignal={scopeReset}
-        onTransactionChanged={handleReviewedTransaction}
-      />
-      <RepaymentsSection
-        household={household}
-        currentUserId={currentUserId}
-        csrf={csrf}
-        onCsrfRefreshed={onCsrfRefreshed}
-        onSessionExpired={onSessionExpired}
-        onHouseholdAccessChanged={onHouseholdAccessChanged}
-        authorityConfirmed={authorityConfirmed}
-        reportingZone={reportingZone}
-        refreshSignal={repaymentsRefresh + membershipRefreshSignal}
-        onBalancesChanged={bumpBalances}
-      />
-      <MemberBalancesSection
-        household={household}
-        currentUserId={currentUserId}
-        refreshSignal={balancesRefresh + membershipRefreshSignal}
-        onSessionExpired={onSessionExpired}
-        onHouseholdAccessChanged={onHouseholdAccessChanged}
-      />
-      <div
-        id={`insights-m5-${household.id}`}
-        className="insights-m5"
-        role="region"
-        tabIndex={-1}
-        aria-label="Separate member balances and settlement suggestions"
-      >
-        <p>
-          Member balances, settlement suggestions and contributions are separate
-          from Insights spending and budget; these are not payments.
-        </p>
-      </div>
-      <SettlementSuggestionsSection
-        household={household}
-        refreshSignal={balancesRefresh + membershipRefreshSignal}
-        onSessionExpired={onSessionExpired}
-        onHouseholdAccessChanged={onHouseholdAccessChanged}
-      />
-      <ReportingSettingsSection
-        household={household}
-        csrf={csrf}
-        onCsrfRefreshed={onCsrfRefreshed}
-        onSessionExpired={onSessionExpired}
-        onHouseholdAccessChanged={onHouseholdAccessChanged}
-        onZoneLoaded={handleZoneLoaded}
-        authorityConfirmed={authorityConfirmed}
-      />
-      <SpendingDashboardSection
-        household={household}
-        reportingZone={reportingZone}
-        refreshSignal={reportingRefresh}
-        onSessionExpired={onSessionExpired}
-        onHouseholdAccessChanged={onHouseholdAccessChanged}
-      />
-      <ContributionSummarySection
-        household={household}
-        reportingZone={reportingZone}
-        refreshSignal={reportingRefresh}
-        membershipRefreshSignal={membershipRefreshSignal}
-        onSessionExpired={onSessionExpired}
-        onHouseholdAccessChanged={onHouseholdAccessChanged}
-        nowProvider={nowProvider}
-      />
+      {page === 'reviews' && (
+        <CategorizationReviewsSection
+          household={household}
+          csrf={csrf}
+          onCsrfRefreshed={onCsrfRefreshed}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdAccessChanged}
+          authorityConfirmed={authorityConfirmed}
+          categories={categories}
+          refreshSignal={reviewsRefresh}
+          scopeResetSignal={scopeReset}
+          onTransactionChanged={handleReviewedTransaction}
+        />
+      )}
+      {page === 'repayments' && (
+        <RepaymentsSection
+          retainedCreate={repaymentIntent}
+          onRetainedCreateChange={setRepaymentIntent}
+          household={household}
+          currentUserId={currentUserId}
+          csrf={csrf}
+          onCsrfRefreshed={onCsrfRefreshed}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdAccessChanged}
+          authorityConfirmed={authorityConfirmed}
+          reportingZone={reportingZone}
+          refreshSignal={repaymentsRefresh + membershipRefreshSignal}
+          onBalancesChanged={bumpBalances}
+        />
+      )}
+      {page === 'balances' && (
+        <>
+          <MemberBalancesSection
+            household={household}
+            currentUserId={currentUserId}
+            refreshSignal={balancesRefresh + membershipRefreshSignal}
+            onSessionExpired={onSessionExpired}
+            onHouseholdAccessChanged={onHouseholdAccessChanged}
+          />
+          <div
+            id={`insights-m5-${household.id}`}
+            className="insights-m5"
+            role="region"
+            tabIndex={-1}
+            aria-label="Separate member balances and settlement suggestions"
+          >
+            <p>
+              Member balances, settlement suggestions and contributions are
+              separate from Insights spending and budget; these are not
+              payments.
+            </p>
+          </div>
+          <SettlementSuggestionsSection
+            household={household}
+            refreshSignal={balancesRefresh + membershipRefreshSignal}
+            onSessionExpired={onSessionExpired}
+            onHouseholdAccessChanged={onHouseholdAccessChanged}
+          />
+        </>
+      )}
+      {page === 'overview' && (
+        <>
+          <ReportingSettingsSection
+            household={household}
+            csrf={csrf}
+            onCsrfRefreshed={onCsrfRefreshed}
+            onSessionExpired={onSessionExpired}
+            onHouseholdAccessChanged={onHouseholdAccessChanged}
+            onZoneLoaded={handleZoneLoaded}
+            authorityConfirmed={authorityConfirmed}
+          />
+          <SpendingDashboardSection
+            household={household}
+            reportingZone={reportingZone}
+            refreshSignal={reportingRefresh}
+            onSessionExpired={onSessionExpired}
+            onHouseholdAccessChanged={onHouseholdAccessChanged}
+          />
+        </>
+      )}
+      {page === 'contributions' && (
+        <ContributionSummarySection
+          household={household}
+          reportingZone={reportingZone}
+          refreshSignal={reportingRefresh}
+          membershipRefreshSignal={membershipRefreshSignal}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdAccessChanged}
+          nowProvider={nowProvider}
+        />
+      )}
     </section>
   );
 

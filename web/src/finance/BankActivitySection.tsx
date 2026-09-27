@@ -60,8 +60,29 @@ interface Notice {
   correlationId?: string | undefined;
 }
 
+type PendingDecision =
+  | {
+      kind: 'confirm';
+      draft: ConfirmDraft;
+      body: Parameters<typeof confirmBankActivity>[2];
+    }
+  | {
+      kind: 'resolve';
+      draft: ResolveDraft;
+      activity: BankActivity;
+      body: ResolveBody;
+    }
+  | {
+      kind: 'replace';
+      draft: ReplaceDraft;
+      activity: BankActivity;
+      body: ReplaceBody;
+    };
+
 interface BankActivitySectionProps {
   household: Household;
+  /** Visited inactive inbox retains its in-memory decision drafts without DOM or requests. */
+  active?: boolean;
   csrf: CsrfToken | null;
   onCsrfRefreshed: (token: CsrfToken) => void;
   onSessionExpired: () => void;
@@ -597,6 +618,7 @@ function ReplacePanel({
  */
 export function BankActivitySection({
   household,
+  active = true,
   csrf,
   onCsrfRefreshed,
   onSessionExpired,
@@ -619,6 +641,9 @@ export function BankActivitySection({
     'ALL' | BankActivityReviewState
   >('ALL');
   const [syncBusy, setSyncBusy] = useState<string | null>(null);
+  const [pendingSync, setPendingSync] = useState<
+    (Pick<FinancialConnection, 'id' | 'version'> & { key: string }) | null
+  >(null);
   const [cooldownUntil, setCooldownUntil] = useState<Record<string, number>>(
     {},
   );
@@ -635,6 +660,15 @@ export function BankActivitySection({
   const [dismissReason, setDismissReason] =
     useState<BankActivityDismissReason>('ALREADY_RECORDED');
   const [decisionBusy, setDecisionBusy] = useState(false);
+  const [pendingDecision, setPendingDecision] =
+    useState<PendingDecision | null>(null);
+  const [pendingDismiss, setPendingDismiss] = useState<
+    | (Pick<BankActivity, 'id' | 'version'> & {
+        reason: BankActivityDismissReason;
+        key: string;
+      })
+    | null
+  >(null);
   // Reconciliation state. Resolve/replace drafts live beside the
   // confirm drafts so refreshes never discard them; the ledger cache holds
   // the current ledger entry per needs-review activity (null only while
@@ -663,6 +697,10 @@ export function BankActivitySection({
   const [clockMs, setClockMs] = useState(0);
 
   const csrfRef = useRef<CsrfToken | null>(csrf);
+  const authCallbacksRef = useRef({
+    onSessionExpired,
+    onHouseholdAccessChanged,
+  });
   const generationRef = useRef(0);
   const unmountedRef = useRef(false);
   const ownedRef = useRef<Set<AbortController>>(new Set());
@@ -683,20 +721,45 @@ export function BankActivitySection({
   // parked flag for signals that arrive before the initial load settles.
   const servedRefreshSignalRef = useRef(refreshSignal);
   const pendingRefreshSignalRef = useRef(false);
+  const [previousActive, setPreviousActive] = useState(active);
+  if (previousActive !== active) {
+    setPreviousActive(active);
+    if (!active) {
+      // Aborted requests cannot run their generation-guarded finally blocks.
+      // Keep decision drafts, but release transient locks before re-entry.
+      setDecisionBusy(false);
+      setSyncBusy(null);
+      setLoadingMore(false);
+      setLedgerLoading({});
+    }
+  }
 
   useEffect(() => {
     csrfRef.current = csrf;
   }, [csrf]);
 
+  // Parent form edits can replace callback identities without changing this
+  // inbox's scope. Read the latest handlers without restarting its load (and
+  // refocusing an error notice) on every unrelated keystroke.
   useEffect(() => {
-    unmountedRef.current = false;
+    authCallbacksRef.current = { onSessionExpired, onHouseholdAccessChanged };
+  }, [onSessionExpired, onHouseholdAccessChanged]);
+
+  useEffect(() => {
+    unmountedRef.current = !active;
+    if (!active) {
+      generationRef.current += 1;
+      loadGenerationRef.current += 1;
+      for (const controller of ownedRef.current) controller.abort();
+      ownedRef.current.clear();
+    }
     const owned = ownedRef.current;
     return () => {
       unmountedRef.current = true;
       for (const controller of owned) controller.abort();
       owned.clear();
     };
-  }, []);
+  }, [active]);
 
   const track = useCallback(() => {
     const controller = new AbortController();
@@ -737,17 +800,17 @@ export function BankActivitySection({
     (apiError: ApiError, generation: number) => {
       if (!current(generation)) return true;
       if (apiError.code === 'UNAUTHENTICATED') {
-        onSessionExpired();
+        authCallbacksRef.current.onSessionExpired();
         return true;
       }
       if (apiError.code === 'CSRF_INVALID' || apiError.status === 403) {
-        onHouseholdAccessChanged();
+        authCallbacksRef.current.onHouseholdAccessChanged();
         showNotice('warning', 'Refresh to continue: your session changed.');
         return true;
       }
       return false;
     },
-    [current, onHouseholdAccessChanged, onSessionExpired, showNotice],
+    [current, showNotice],
   );
 
   const load = useCallback(
@@ -799,13 +862,14 @@ export function BankActivitySection({
   );
 
   useEffect(() => {
+    if (!active) return;
     const generation = ++loadGenerationRef.current;
     generationRef.current = generation;
     void load(generation);
     return () => {
       // The next effect run or unmount invalidates in-flight work.
     };
-  }, [load]);
+  }, [load, active]);
 
   /**
    * Serves a sibling refresh signal with a quiet refetch of both the
@@ -827,19 +891,21 @@ export function BankActivitySection({
   }
 
   useEffect(() => {
+    if (!active) return;
     serveRefreshSignal();
     // The signal alone drives this effect; `page` is read only to park a
     // pre-load signal for the settling effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshSignal]);
+  }, [refreshSignal, active]);
 
   useEffect(() => {
+    if (!active) return;
     if (!pendingRefreshSignalRef.current || page === null) return;
     serveRefreshSignal();
     // `page` becoming non-null is the trigger; the parked flag and signal
     // decide whether a fetch is owed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page]);
+  }, [page, active]);
 
   /** Appends the next bounded page; the offset is the current item count. */
   async function loadMore() {
@@ -890,6 +956,7 @@ export function BankActivitySection({
   // Categories are optional enrichment for the confirm form; a failure never
   // blocks the inbox.
   useEffect(() => {
+    if (!active) return;
     const controller = track();
     void (async () => {
       try {
@@ -906,7 +973,7 @@ export function BankActivitySection({
       }
     })();
     return () => controller.abort();
-  }, [household.id, track]);
+  }, [household.id, track, active]);
 
   async function refresh() {
     const generation = ++loadGenerationRef.current;
@@ -914,7 +981,11 @@ export function BankActivitySection({
     await load(generation, true);
   }
 
-  async function runSync(connection: FinancialConnection) {
+  async function runSync(
+    connection: Pick<FinancialConnection, 'id' | 'version'>,
+  ) {
+    if (!active || !authorityConfirmed || syncBusy !== null) return;
+    if (pendingSync && pendingSync.id !== connection.id) return;
     const generation = generationRef.current;
     const controller = track();
     const requestedAt = currentTimeMs();
@@ -926,15 +997,24 @@ export function BankActivitySection({
         onSessionExpired();
         return;
       }
+      const request = pendingSync ?? {
+        id: connection.id,
+        version: connection.version,
+        key: crypto.randomUUID(),
+      };
+      // Retain before dispatch: leaving the page can abort the response after
+      // the server has committed. The next attempt must replay this exact key.
+      setPendingSync(request);
       await postConnectionSync(
         household.id,
-        connection.id,
-        connection.version,
-        crypto.randomUUID(),
+        request.id,
+        request.version,
+        request.key,
         activeCsrf,
         controller.signal,
       );
       if (!current(generation)) return;
+      setPendingSync(null);
       setClockMs(requestedAt);
       setCooldownUntil((currentCooldowns) => ({
         ...currentCooldowns,
@@ -948,6 +1028,9 @@ export function BankActivitySection({
     } catch (error) {
       if (!current(generation)) return;
       if (error instanceof ApiError) {
+        if (error.status >= 400 && error.status < 500 && !error.timedOut) {
+          setPendingSync(null);
+        }
         if (error.code === 'MANUAL_SYNC_RATE_LIMITED') {
           setClockMs(requestedAt);
           setCooldownUntil((currentCooldowns) => ({
@@ -1034,7 +1117,10 @@ export function BankActivitySection({
   }
 
   async function submitConfirm() {
-    const draft = confirmDraft;
+    const pending =
+      pendingDecision?.kind === 'confirm' ? pendingDecision : null;
+    if (pendingDecision && !pending) return;
+    const draft = pending?.draft ?? confirmDraft;
     if (!draft) return;
     if (!draft.descriptionValid && draft.description.trim().length === 0) {
       showNotice(
@@ -1057,23 +1143,26 @@ export function BankActivitySection({
         onSessionExpired();
         return;
       }
+      const body = pending?.body ?? {
+        expectedVersion: draft.version,
+        kind: draft.kind,
+        description: draft.description,
+        category: draft.category.length === 0 ? null : draft.category,
+        refundOfTransactionId:
+          draft.kind === 'REFUND' ? draft.refundOfTransactionId : undefined,
+        acknowledgeDisclosure: draft.acknowledgeDisclosure,
+      };
+      setPendingDecision({ kind: 'confirm', draft, body });
       const decision = await confirmBankActivity(
         household.id,
         draft.activityId,
-        {
-          expectedVersion: draft.version,
-          kind: draft.kind,
-          description: draft.description,
-          category: draft.category.length === 0 ? null : draft.category,
-          refundOfTransactionId:
-            draft.kind === 'REFUND' ? draft.refundOfTransactionId : undefined,
-          acknowledgeDisclosure: draft.acknowledgeDisclosure,
-        },
+        body,
         draft.idempotencyKey,
         activeCsrf,
         controller.signal,
       );
       if (!current(generation)) return;
+      setPendingDecision(null);
       delete draftsRef.current[draft.activityId];
       delete draftEvidenceRef.current[draft.activityId];
       setConfirmCategoryError(undefined);
@@ -1090,6 +1179,9 @@ export function BankActivitySection({
     } catch (error) {
       if (!current(generation)) return;
       if (error instanceof ApiError) {
+        if (error.status >= 400 && error.status < 500 && !error.timedOut) {
+          setPendingDecision(null);
+        }
         if (handleAuthFailure(error, generation)) return;
         if (staleDecisionRecovery(error, draft.activityId)) return;
         const categoryError = categoryRejectionError(error, draft.category);
@@ -1130,7 +1222,9 @@ export function BankActivitySection({
     }
   }
 
-  async function submitDismiss(activity: BankActivity) {
+  async function submitDismiss(activity: Pick<BankActivity, 'id' | 'version'>) {
+    if (!active || !authorityConfirmed || decisionBusy) return;
+    if (pendingDismiss && pendingDismiss.id !== activity.id) return;
     const generation = generationRef.current;
     const controller = track();
     setDecisionBusy(true);
@@ -1141,16 +1235,24 @@ export function BankActivitySection({
         onSessionExpired();
         return;
       }
+      const request = pendingDismiss ?? {
+        id: activity.id,
+        version: activity.version,
+        reason: dismissReason,
+        key: crypto.randomUUID(),
+      };
+      setPendingDismiss(request);
       const decision = await dismissBankActivity(
         household.id,
-        activity.id,
-        activity.version,
-        dismissReason,
-        crypto.randomUUID(),
+        request.id,
+        request.version,
+        request.reason,
+        request.key,
         activeCsrf,
         controller.signal,
       );
       if (!current(generation)) return;
+      setPendingDismiss(null);
       setDismissOpen(null);
       applyDecision(decision);
       showNotice(
@@ -1161,6 +1263,9 @@ export function BankActivitySection({
     } catch (error) {
       if (!current(generation)) return;
       if (error instanceof ApiError) {
+        if (error.status >= 400 && error.status < 500 && !error.timedOut) {
+          setPendingDismiss(null);
+        }
         if (handleAuthFailure(error, generation)) return;
         if (staleDecisionRecovery(error, activity.id)) return;
         showNotice(
@@ -1537,7 +1642,11 @@ export function BankActivitySection({
   }
 
   async function submitResolve(activity: BankActivity) {
-    const draft = resolveDraft;
+    const pending =
+      pendingDecision?.kind === 'resolve' ? pendingDecision : null;
+    if (pendingDecision && !pending) return;
+    if (pending) activity = pending.activity;
+    const draft = pending?.draft ?? resolveDraft;
     if (!draft || draft.activityId !== activity.id) return;
     if (draft.expectedLedgerVersion === null) {
       showNotice(
@@ -1580,7 +1689,12 @@ export function BankActivitySection({
       ledgerByActivity[activity.id] !== null
         ? allocationByLedger[ledgerByActivity[activity.id]?.id ?? '']
         : undefined;
-    if (draft.action === 'APPLY_BANK' && draft.applyMoney && activeAllocation) {
+    if (
+      !pending &&
+      draft.action === 'APPLY_BANK' &&
+      draft.applyMoney &&
+      activeAllocation
+    ) {
       showNotice(
         'warning',
         'The amount is locked by the active allocation. Uncheck the amount, revoke the allocation in the ledger, or void/replace instead — nothing was sent and the ledger is unchanged.',
@@ -1597,13 +1711,14 @@ export function BankActivitySection({
         onSessionExpired();
         return;
       }
-      const body: ResolveBody = {
+      const body: ResolveBody = pending?.body ?? {
         expectedVersion: draft.version,
         expectedLedgerVersion: draft.expectedLedgerVersion,
         action: draft.action,
         fields:
           draft.action === 'APPLY_BANK' ? resolveFieldsOf(draft) : undefined,
       };
+      setPendingDecision({ kind: 'resolve', draft, activity, body });
       const decision = await resolveBankActivity(
         household.id,
         draft.activityId,
@@ -1613,6 +1728,7 @@ export function BankActivitySection({
         controller.signal,
       );
       if (!current(generation)) return;
+      setPendingDecision(null);
       delete resolveDraftsRef.current[draft.activityId];
       setResolveDraft(null);
       applyDecision(decision);
@@ -1649,6 +1765,9 @@ export function BankActivitySection({
     } catch (error) {
       if (!current(generation)) return;
       if (error instanceof ApiError) {
+        if (error.status >= 400 && error.status < 500 && !error.timedOut) {
+          setPendingDecision(null);
+        }
         if (handleAuthFailure(error, generation)) return;
         if (resolveFailureNotice(error, activity)) return;
         showNotice(
@@ -1666,7 +1785,11 @@ export function BankActivitySection({
   }
 
   async function submitReplace(activity: BankActivity) {
-    const draft = replaceDraft;
+    const pending =
+      pendingDecision?.kind === 'replace' ? pendingDecision : null;
+    if (pendingDecision && !pending) return;
+    if (pending) activity = pending.activity;
+    const draft = pending?.draft ?? replaceDraft;
     if (!draft || draft.activityId !== activity.id) return;
     if (draft.expectedLedgerVersion === null) {
       showNotice(
@@ -1688,7 +1811,7 @@ export function BankActivitySection({
       ledger !== undefined && ledger !== null
         ? allocationByLedger[ledger.id]
         : undefined;
-    if (activeAllocation && !draft.acknowledgeAllocationRemoval) {
+    if (!pending && activeAllocation && !draft.acknowledgeAllocationRemoval) {
       showNotice(
         'warning',
         'This replacement removes the recorded allocation and its obligations. Review the shares below and acknowledge the removal before replacing.',
@@ -1705,7 +1828,7 @@ export function BankActivitySection({
         onSessionExpired();
         return;
       }
-      const body: ReplaceBody = {
+      const body: ReplaceBody = pending?.body ?? {
         expectedVersion: draft.version,
         expectedLedgerVersion: draft.expectedLedgerVersion,
         kind: draft.kind,
@@ -1724,6 +1847,7 @@ export function BankActivitySection({
         acknowledgeDisclosure: draft.acknowledgeDisclosure,
         acknowledgeAllocationRemoval: draft.acknowledgeAllocationRemoval,
       };
+      setPendingDecision({ kind: 'replace', draft, activity, body });
       const decision = await replaceBankActivityLedger(
         household.id,
         draft.activityId,
@@ -1733,6 +1857,7 @@ export function BankActivitySection({
         controller.signal,
       );
       if (!current(generation)) return;
+      setPendingDecision(null);
       delete replaceDraftsRef.current[draft.activityId];
       setReplaceDraft(null);
       // The replacement response carries the full new entry plus the
@@ -1769,6 +1894,9 @@ export function BankActivitySection({
     } catch (error) {
       if (!current(generation)) return;
       if (error instanceof ApiError) {
+        if (error.status >= 400 && error.status < 500 && !error.timedOut) {
+          setPendingDecision(null);
+        }
         if (handleAuthFailure(error, generation)) return;
         if (resolveFailureNotice(error, activity)) return;
         showNotice(
@@ -1838,6 +1966,7 @@ export function BankActivitySection({
       isSyncStale(connection.lastSuccessfulSyncAt),
   );
 
+  if (!active) return null;
   return (
     <section
       className="bank-activity"
@@ -1866,6 +1995,61 @@ export function BankActivitySection({
         </p>
       )}
 
+      {pendingSync && (
+        <div className="household-notice">
+          <p>
+            A sync request has not been confirmed. Retry its original request
+            before starting another.
+          </p>
+          <button
+            type="button"
+            className="household-button"
+            disabled={busy || syncBusy !== null || !authorityConfirmed}
+            onClick={() => void runSync(pendingSync)}
+          >
+            Retry same sync request
+          </button>
+        </div>
+      )}
+      {pendingDismiss && (
+        <div className="household-notice">
+          <p>
+            A dismissal has not been confirmed. Retry the original decision with
+            reason {pendingDismiss.reason}.
+          </p>
+          <button
+            type="button"
+            className="household-button"
+            disabled={busy || !authorityConfirmed}
+            onClick={() => void submitDismiss(pendingDismiss)}
+          >
+            Retry same dismissal
+          </button>
+        </div>
+      )}
+      {pendingDecision && (
+        <div className="household-notice">
+          <p>
+            A bank decision has not been confirmed. Its exact request is
+            retained; editing and other decisions stay locked until it is
+            reconciled.
+          </p>
+          <button
+            type="button"
+            className="household-button"
+            disabled={busy || !authorityConfirmed}
+            onClick={() => {
+              if (pendingDecision.kind === 'confirm') void submitConfirm();
+              else if (pendingDecision.kind === 'resolve')
+                void submitResolve(pendingDecision.activity);
+              else void submitReplace(pendingDecision.activity);
+            }}
+          >
+            Retry same bank decision
+          </button>
+        </div>
+      )}
+
       {notice && (
         <div
           ref={noticeRef}
@@ -1882,527 +2066,540 @@ export function BankActivitySection({
         </div>
       )}
 
-      <div className="bank-activity-toolbar">
-        <label>
-          Status
-          <select
-            value={stateFilter}
-            onChange={(event) =>
-              setStateFilter(event.target.value as 'ALL' | BankActivityState)
-            }
+      <fieldset
+        className="bank-activity-controls"
+        aria-label="Bank activity controls"
+        disabled={pendingDecision !== null || pendingDismiss !== null}
+      >
+        <div className="bank-activity-toolbar">
+          <label>
+            Status
+            <select
+              value={stateFilter}
+              onChange={(event) =>
+                setStateFilter(event.target.value as 'ALL' | BankActivityState)
+              }
+            >
+              {STATE_FILTERS.map((state) => (
+                <option key={state} value={state}>
+                  {state === 'ALL' ? 'All statuses' : stateLabel(state)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Review
+            <select
+              value={reviewFilter}
+              onChange={(event) =>
+                setReviewFilter(
+                  event.target.value as 'ALL' | BankActivityReviewState,
+                )
+              }
+            >
+              {REVIEW_FILTERS.map((review) => (
+                <option key={review} value={review}>
+                  {review === 'ALL' ? 'All reviews' : reviewLabel(review)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            className="household-button household-button--secondary"
+            disabled={busy || !authorityConfirmed}
+            onClick={() => void refresh()}
           >
-            {STATE_FILTERS.map((state) => (
-              <option key={state} value={state}>
-                {state === 'ALL' ? 'All statuses' : stateLabel(state)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Review
-          <select
-            value={reviewFilter}
-            onChange={(event) =>
-              setReviewFilter(
-                event.target.value as 'ALL' | BankActivityReviewState,
-              )
-            }
-          >
-            {REVIEW_FILTERS.map((review) => (
-              <option key={review} value={review}>
-                {review === 'ALL' ? 'All reviews' : reviewLabel(review)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <button
-          type="button"
-          className="household-button household-button--secondary"
-          disabled={busy || !authorityConfirmed}
-          onClick={() => void refresh()}
-        >
-          Refresh inbox
-        </button>
-      </div>
-
-      {page && (
-        <p className="bank-activity-counts" role="status">
-          {page.unreviewedCount} awaiting review · {page.changedCount} bank
-          revisions need attention
-        </p>
-      )}
-
-      {(connections ?? []).length > 0 && (
-        <div className="bank-activity-sync">
-          <h5>Sync</h5>
-          <ul aria-label="Connected bank sync controls">
-            {(connections ?? []).map((connection) => {
-              const cooling = (cooldownUntil[connection.id] ?? 0) > clockMs;
-              const active = connection.state === 'ACTIVE';
-              return (
-                <li key={connection.id}>
-                  <span>
-                    {active
-                      ? staleConnections.some(
-                          (stale) => stale.id === connection.id,
-                        )
-                        ? 'Active · no successful sync in 24 hours'
-                        : 'Active'
-                      : connectionStateLabel(connection.state)}
-                    {connection.lastSuccessfulSyncAt && (
-                      <>
-                        {' '}
-                        · last success{' '}
-                        <time dateTime={connection.lastSuccessfulSyncAt}>
-                          {connection.lastSuccessfulSyncAt.slice(0, 10)}
-                        </time>
-                      </>
-                    )}
-                    {syncStateLabel(connection) && (
-                      <span className="bank-sync-state" role="status">
-                        {' '}
-                        · {syncStateLabel(connection)}
-                      </span>
-                    )}
-                    {!connection.historyReady && (
-                      <span className="bank-sync-state">
-                        {' '}
-                        · history import incomplete
-                      </span>
-                    )}
-                  </span>
-                  <button
-                    type="button"
-                    className="household-button household-button--secondary"
-                    disabled={
-                      !active ||
-                      !authorityConfirmed ||
-                      busy ||
-                      syncBusy === connection.id ||
-                      cooling
-                    }
-                    aria-label={`Sync bank connection ${connection.id}`}
-                    onClick={() => void runSync(connection)}
-                  >
-                    {syncBusy === connection.id ? 'Requesting…' : 'Sync now'}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-          <p className="finance-helper">
-            Sync asks the bank for changes; it never adds anything to the
-            ledger. At most one request per connection per minute.
-          </p>
+            Refresh inbox
+          </button>
         </div>
-      )}
 
-      {loading && page === null && (
-        <p role="status" aria-live="polite">
-          Loading your bank activity…
-        </p>
-      )}
+        {page && (
+          <p className="bank-activity-counts" role="status">
+            {page.unreviewedCount} awaiting review · {page.changedCount} bank
+            revisions need attention
+          </p>
+        )}
 
-      {page !== null && items.length === 0 && (
-        <p className="bank-activity-empty">
-          No bank activity matches these filters yet.{' '}
-          {staleConnections.length > 0
-            ? 'A connection has not synced recently; request a sync above.'
-            : ''}
-        </p>
-      )}
-
-      {items.length > 0 && (
-        <ul className="bank-activity-list" aria-label="Bank activity">
-          {items.map((activity) => (
-            <li key={activity.id} className="bank-activity-item">
-              <div className="bank-activity-item-head">
-                <p className="bank-activity-item-title">
-                  {activity.money === null
-                    ? 'Amount unavailable'
-                    : formatMoney(
-                        activity.money.amount,
-                        activity.money.currency,
+        {(connections ?? []).length > 0 && (
+          <div className="bank-activity-sync">
+            <h5>Sync</h5>
+            <ul aria-label="Connected bank sync controls">
+              {(connections ?? []).map((connection) => {
+                const cooling = (cooldownUntil[connection.id] ?? 0) > clockMs;
+                const active = connection.state === 'ACTIVE';
+                return (
+                  <li key={connection.id}>
+                    <span>
+                      {active
+                        ? staleConnections.some(
+                            (stale) => stale.id === connection.id,
+                          )
+                          ? 'Active · no successful sync in 24 hours'
+                          : 'Active'
+                        : connectionStateLabel(connection.state)}
+                      {connection.lastSuccessfulSyncAt && (
+                        <>
+                          {' '}
+                          · last success{' '}
+                          <time dateTime={connection.lastSuccessfulSyncAt}>
+                            {connection.lastSuccessfulSyncAt.slice(0, 10)}
+                          </time>
+                        </>
                       )}
-                </p>
-                <p className="bank-activity-badges">
-                  <span className="bank-badge">
-                    {stateLabel(activity.state)}
-                  </span>
-                  <span className="bank-badge">
-                    {reviewLabel(activity.reviewState)}
-                  </span>
-                  {isNeedsReview(activity) && (
-                    <span className="bank-badge bank-badge--review">
-                      Needs review
+                      {syncStateLabel(connection) && (
+                        <span className="bank-sync-state" role="status">
+                          {' '}
+                          · {syncStateLabel(connection)}
+                        </span>
+                      )}
+                      {!connection.historyReady && (
+                        <span className="bank-sync-state">
+                          {' '}
+                          · history import incomplete
+                        </span>
+                      )}
                     </span>
-                  )}
+                    <button
+                      type="button"
+                      className="household-button household-button--secondary"
+                      disabled={
+                        !active ||
+                        !authorityConfirmed ||
+                        busy ||
+                        syncBusy === connection.id ||
+                        pendingSync !== null ||
+                        cooling
+                      }
+                      aria-label={`Sync bank connection ${connection.id}`}
+                      onClick={() => void runSync(connection)}
+                    >
+                      {syncBusy === connection.id ? 'Requesting…' : 'Sync now'}
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="finance-helper">
+              Sync asks the bank for changes; it never adds anything to the
+              ledger. At most one request per connection per minute.
+            </p>
+          </div>
+        )}
+
+        {loading && page === null && (
+          <p role="status" aria-live="polite">
+            Loading your bank activity…
+          </p>
+        )}
+
+        {page !== null && items.length === 0 && (
+          <p className="bank-activity-empty">
+            No bank activity matches these filters yet.{' '}
+            {staleConnections.length > 0
+              ? 'A connection has not synced recently; request a sync above.'
+              : ''}
+          </p>
+        )}
+
+        {items.length > 0 && (
+          <ul className="bank-activity-list" aria-label="Bank activity">
+            {items.map((activity) => (
+              <li key={activity.id} className="bank-activity-item">
+                <div className="bank-activity-item-head">
+                  <p className="bank-activity-item-title">
+                    {activity.money === null
+                      ? 'Amount unavailable'
+                      : formatMoney(
+                          activity.money.amount,
+                          activity.money.currency,
+                        )}
+                  </p>
+                  <p className="bank-activity-badges">
+                    <span className="bank-badge">
+                      {stateLabel(activity.state)}
+                    </span>
+                    <span className="bank-badge">
+                      {reviewLabel(activity.reviewState)}
+                    </span>
+                    {isNeedsReview(activity) && (
+                      <span className="bank-badge bank-badge--review">
+                        Needs review
+                      </span>
+                    )}
+                  </p>
+                </div>
+                <p className="bank-activity-meta">
+                  {activity.occurredOn ?? 'Date unavailable'}
+                  {activity.providerDescription
+                    ? ` · ${activity.providerDescription}`
+                    : ''}
                 </p>
-              </div>
-              <p className="bank-activity-meta">
-                {activity.occurredOn ?? 'Date unavailable'}
-                {activity.providerDescription
-                  ? ` · ${activity.providerDescription}`
-                  : ''}
-              </p>
-              {requiresOwnerDescription(activity) &&
-                activity.reviewState === 'UNREVIEWED' &&
-                activity.state === 'POSTED' && (
-                  <p className="bank-activity-warning" role="status">
-                    The bank description needs your own text before this can be
-                    added.
+                {requiresOwnerDescription(activity) &&
+                  activity.reviewState === 'UNREVIEWED' &&
+                  activity.state === 'POSTED' && (
+                    <p className="bank-activity-warning" role="status">
+                      The bank description needs your own text before this can
+                      be added.
+                    </p>
+                  )}
+                {activity.invalidReason && (
+                  <p className="bank-activity-warning">
+                    Quarantined: {activity.invalidReason}. This item can only be
+                    dismissed.
                   </p>
                 )}
-              {activity.invalidReason && (
-                <p className="bank-activity-warning">
-                  Quarantined: {activity.invalidReason}. This item can only be
-                  dismissed.
-                </p>
-              )}
-              {changeLabel(activity) && (
-                <p className="bank-activity-warning">{changeLabel(activity)}</p>
-              )}
-              {activity.pendingPredecessorId && (
-                <p className="bank-activity-meta">
-                  Linked from an earlier pending entry.
-                </p>
-              )}
+                {changeLabel(activity) && (
+                  <p className="bank-activity-warning">
+                    {changeLabel(activity)}
+                  </p>
+                )}
+                {activity.pendingPredecessorId && (
+                  <p className="bank-activity-meta">
+                    Linked from an earlier pending entry.
+                  </p>
+                )}
 
-              <div className="finance-account-actions">
-                {isConfirmable(activity) && (
-                  <button
-                    type="button"
-                    className="household-button"
-                    disabled={busy || !authorityConfirmed}
-                    aria-label={`Confirm bank activity ${activitySummary(activity)}`}
-                    aria-expanded={confirmDraft?.activityId === activity.id}
-                    onClick={() => openConfirm(activity)}
-                  >
-                    Confirm…
-                  </button>
-                )}
-                {isDismissable(activity) && (
-                  <button
-                    type="button"
-                    className="household-button household-button--secondary"
-                    disabled={busy || !authorityConfirmed}
-                    aria-label={`Dismiss bank activity ${activitySummary(activity)}`}
-                    aria-expanded={dismissOpen === activity.id}
-                    onClick={() => {
-                      setDismissOpen(
-                        dismissOpen === activity.id ? null : activity.id,
-                      );
-                      setDismissReason('ALREADY_RECORDED');
-                    }}
-                  >
-                    Dismiss…
-                  </button>
-                )}
-                {/*
+                <div className="finance-account-actions">
+                  {isConfirmable(activity) && (
+                    <button
+                      type="button"
+                      className="household-button"
+                      disabled={busy || !authorityConfirmed}
+                      aria-label={`Confirm bank activity ${activitySummary(activity)}`}
+                      aria-expanded={confirmDraft?.activityId === activity.id}
+                      onClick={() => openConfirm(activity)}
+                    >
+                      Confirm…
+                    </button>
+                  )}
+                  {isDismissable(activity) && (
+                    <button
+                      type="button"
+                      className="household-button household-button--secondary"
+                      disabled={busy || !authorityConfirmed}
+                      aria-label={`Dismiss bank activity ${activitySummary(activity)}`}
+                      aria-expanded={dismissOpen === activity.id}
+                      onClick={() => {
+                        setDismissOpen(
+                          dismissOpen === activity.id ? null : activity.id,
+                        );
+                        setDismissReason('ALREADY_RECORDED');
+                      }}
+                    >
+                      Dismiss…
+                    </button>
+                  )}
+                  {/*
                   Needs-review actions never depend on connection state: a
                   retained admitted entry may be resolved after disconnect,
                   and resolution never restarts sync or admits new history.
                 */}
-                {isNeedsReview(activity) && (
-                  <button
-                    type="button"
-                    id={`review-trigger-${activity.id}`}
-                    className="household-button"
-                    disabled={busy || !authorityConfirmed}
-                    aria-label={`Review bank revision ${activitySummary(activity)}`}
-                    aria-expanded={resolveDraft?.activityId === activity.id}
-                    onClick={() => openResolve(activity)}
-                  >
-                    Review…
-                  </button>
-                )}
-                {isNeedsReview(activity) && activity.state === 'POSTED' && (
-                  <button
-                    type="button"
-                    id={`replace-trigger-${activity.id}`}
-                    className="household-button household-button--secondary"
-                    disabled={busy || !authorityConfirmed}
-                    aria-label={`Replace ledger entry for bank activity ${activitySummary(activity)}`}
-                    aria-expanded={replaceDraft?.activityId === activity.id}
-                    onClick={() => openReplace(activity)}
-                  >
-                    Replace…
-                  </button>
-                )}
-              </div>
+                  {isNeedsReview(activity) && (
+                    <button
+                      type="button"
+                      id={`review-trigger-${activity.id}`}
+                      className="household-button"
+                      disabled={busy || !authorityConfirmed}
+                      aria-label={`Review bank revision ${activitySummary(activity)}`}
+                      aria-expanded={resolveDraft?.activityId === activity.id}
+                      onClick={() => openResolve(activity)}
+                    >
+                      Review…
+                    </button>
+                  )}
+                  {isNeedsReview(activity) && activity.state === 'POSTED' && (
+                    <button
+                      type="button"
+                      id={`replace-trigger-${activity.id}`}
+                      className="household-button household-button--secondary"
+                      disabled={busy || !authorityConfirmed}
+                      aria-label={`Replace ledger entry for bank activity ${activitySummary(activity)}`}
+                      aria-expanded={replaceDraft?.activityId === activity.id}
+                      onClick={() => openReplace(activity)}
+                    >
+                      Replace…
+                    </button>
+                  )}
+                </div>
 
-              {confirmDraft?.activityId === activity.id && (
-                <div
-                  className="bank-activity-form"
-                  role="group"
-                  aria-labelledby={`confirm-heading-${activity.id}`}
-                >
-                  <h5
-                    ref={confirmHeadingRef}
-                    tabIndex={-1}
-                    id={`confirm-heading-${activity.id}`}
+                {confirmDraft?.activityId === activity.id && (
+                  <div
+                    className="bank-activity-form"
+                    role="group"
+                    aria-labelledby={`confirm-heading-${activity.id}`}
                   >
-                    Add {activitySummary(activity)} to your ledger
-                  </h5>
-                  <label>
-                    Entry type
-                    <select
-                      value={confirmDraft.kind}
-                      onChange={(event) => {
-                        const kind = event.target.value as ConfirmDraft['kind'];
-                        updateDraft({ kind });
-                        if (kind === 'REFUND') {
-                          void loadRefundOptions({
-                            ...confirmDraft,
-                            kind,
-                          });
+                    <h5
+                      ref={confirmHeadingRef}
+                      tabIndex={-1}
+                      id={`confirm-heading-${activity.id}`}
+                    >
+                      Add {activitySummary(activity)} to your ledger
+                    </h5>
+                    <label>
+                      Entry type
+                      <select
+                        value={confirmDraft.kind}
+                        onChange={(event) => {
+                          const kind = event.target
+                            .value as ConfirmDraft['kind'];
+                          updateDraft({ kind });
+                          if (kind === 'REFUND') {
+                            void loadRefundOptions({
+                              ...confirmDraft,
+                              kind,
+                            });
+                          }
+                        }}
+                      >
+                        <option value="EXPENSE">Expense</option>
+                        <option value="INCOME">Income</option>
+                        <option value="TRANSFER">Transfer</option>
+                        <option value="REFUND">Refund</option>
+                      </select>
+                    </label>
+                    <label>
+                      Description
+                      <input
+                        type="text"
+                        maxLength={200}
+                        value={confirmDraft.description}
+                        placeholder={
+                          activity.providerDescription ?? 'Enter a description'
                         }
-                      }}
-                    >
-                      <option value="EXPENSE">Expense</option>
-                      <option value="INCOME">Income</option>
-                      <option value="TRANSFER">Transfer</option>
-                      <option value="REFUND">Refund</option>
-                    </select>
-                  </label>
-                  <label>
-                    Description
-                    <input
-                      type="text"
-                      maxLength={200}
-                      value={confirmDraft.description}
-                      placeholder={
-                        activity.providerDescription ?? 'Enter a description'
-                      }
-                      onChange={(event) =>
-                        updateDraft({ description: event.target.value })
-                      }
-                    />
-                  </label>
-                  {categories.length > 0 && (
-                    <>
-                      <label>
-                        Category
-                        <select
-                          ref={confirmCategoryRef}
-                          value={confirmDraft.category}
-                          aria-invalid={Boolean(confirmCategoryError)}
-                          aria-describedby={
-                            confirmCategoryError
-                              ? `confirm-category-error-${activity.id}`
-                              : undefined
-                          }
-                          onChange={(event) =>
-                            updateDraft({ category: event.target.value })
-                          }
-                        >
-                          <option value="">Uncategorized</option>
-                          {categories.map((category) => (
-                            <option key={category.code} value={category.code}>
-                              {category.label}
+                        onChange={(event) =>
+                          updateDraft({ description: event.target.value })
+                        }
+                      />
+                    </label>
+                    {categories.length > 0 && (
+                      <>
+                        <label>
+                          Category
+                          <select
+                            ref={confirmCategoryRef}
+                            value={confirmDraft.category}
+                            aria-invalid={Boolean(confirmCategoryError)}
+                            aria-describedby={
+                              confirmCategoryError
+                                ? `confirm-category-error-${activity.id}`
+                                : undefined
+                            }
+                            onChange={(event) =>
+                              updateDraft({ category: event.target.value })
+                            }
+                          >
+                            <option value="">Uncategorized</option>
+                            {categories.map((category) => (
+                              <option key={category.code} value={category.code}>
+                                {category.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        {confirmCategoryError && (
+                          <p
+                            id={`confirm-category-error-${activity.id}`}
+                            className="household-error"
+                            role="alert"
+                          >
+                            {confirmCategoryError}
+                          </p>
+                        )}
+                      </>
+                    )}
+                    {confirmDraft.kind === 'REFUND' && (
+                      <>
+                        <label>
+                          Refunded expense
+                          <select
+                            value={confirmDraft.refundOfTransactionId}
+                            onChange={(event) =>
+                              updateDraft({
+                                refundOfTransactionId: event.target.value,
+                              })
+                            }
+                          >
+                            <option value="">
+                              Choose a connected expense…
                             </option>
-                          ))}
-                        </select>
-                      </label>
-                      {confirmCategoryError && (
-                        <p
-                          id={`confirm-category-error-${activity.id}`}
-                          className="household-error"
-                          role="alert"
-                        >
-                          {confirmCategoryError}
-                        </p>
-                      )}
-                    </>
-                  )}
-                  {confirmDraft.kind === 'REFUND' && (
-                    <>
-                      <label>
-                        Refunded expense
-                        <select
-                          value={confirmDraft.refundOfTransactionId}
-                          onChange={(event) =>
-                            updateDraft({
-                              refundOfTransactionId: event.target.value,
-                            })
-                          }
-                        >
-                          <option value="">Choose a connected expense…</option>
-                          {(refundOptions ?? []).map((option) => (
-                            <option key={option.id} value={option.id}>
-                              {formatMoney(
-                                option.money.amount,
-                                option.money.currency,
-                              )}{' '}
-                              · {option.description} · {option.occurredOn}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label className="bank-activity-checkbox">
-                        <input
-                          type="checkbox"
-                          checked={confirmDraft.acknowledgeDisclosure}
-                          onChange={(event) =>
-                            updateDraft({
-                              acknowledgeDisclosure: event.target.checked,
-                            })
-                          }
-                        />
-                        Share this refund with the household (required when the
-                        expense is shared)
-                      </label>
-                      {refundOptions !== null && refundOptions.length === 0 && (
-                        <p className="bank-activity-warning">
-                          No connected posted expense matches this account and
-                          currency yet.
-                        </p>
-                      )}
-                    </>
-                  )}
-                  <div className="finance-account-actions">
-                    <button
-                      type="button"
-                      className="household-button"
-                      disabled={decisionBusy}
-                      onClick={() => void submitConfirm()}
-                    >
-                      {decisionBusy ? 'Adding…' : 'Add to ledger'}
-                    </button>
-                    <button
-                      type="button"
-                      className="household-button household-button--secondary"
-                      disabled={decisionBusy}
-                      onClick={closeConfirm}
-                    >
-                      Cancel
-                    </button>
+                            {(refundOptions ?? []).map((option) => (
+                              <option key={option.id} value={option.id}>
+                                {formatMoney(
+                                  option.money.amount,
+                                  option.money.currency,
+                                )}{' '}
+                                · {option.description} · {option.occurredOn}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="bank-activity-checkbox">
+                          <input
+                            type="checkbox"
+                            checked={confirmDraft.acknowledgeDisclosure}
+                            onChange={(event) =>
+                              updateDraft({
+                                acknowledgeDisclosure: event.target.checked,
+                              })
+                            }
+                          />
+                          Share this refund with the household (required when
+                          the expense is shared)
+                        </label>
+                        {refundOptions !== null &&
+                          refundOptions.length === 0 && (
+                            <p className="bank-activity-warning">
+                              No connected posted expense matches this account
+                              and currency yet.
+                            </p>
+                          )}
+                      </>
+                    )}
+                    <div className="finance-account-actions">
+                      <button
+                        type="button"
+                        className="household-button"
+                        disabled={decisionBusy}
+                        onClick={() => void submitConfirm()}
+                      >
+                        {decisionBusy ? 'Adding…' : 'Add to ledger'}
+                      </button>
+                      <button
+                        type="button"
+                        className="household-button household-button--secondary"
+                        disabled={decisionBusy}
+                        onClick={closeConfirm}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {resolveDraft?.activityId === activity.id && (
-                <ResolvePanel
-                  activity={activity}
-                  draft={resolveDraft}
-                  ledger={ledgerByActivity[activity.id]}
-                  ledgerLoading={ledgerLoading[activity.id] === true}
-                  activeAllocation={
-                    ledgerByActivity[activity.id] === undefined ||
-                    ledgerByActivity[activity.id] === null ||
-                    ledgerByActivity[activity.id]?.id === undefined
-                      ? undefined
-                      : allocationByLedger[
-                          ledgerByActivity[activity.id]?.id as string
-                        ]
-                  }
-                  decisionBusy={decisionBusy}
-                  ref={resolveHeadingRef}
-                  onPatch={(patch) => updateResolveDraft(patch)}
-                  onSubmit={(item) => void submitResolve(item)}
-                  onCancel={(activityId) =>
-                    closeReviewPanels(activityId, 'resolve')
-                  }
-                />
-              )}
-
-              {replaceDraft?.activityId === activity.id && (
-                <ReplacePanel
-                  activity={activity}
-                  draft={replaceDraft}
-                  ledgerLoading={ledgerLoading[activity.id] === true}
-                  ledgerGone={ledgerByActivity[activity.id] === null}
-                  activeAllocation={
-                    ledgerByActivity[activity.id] === undefined ||
-                    ledgerByActivity[activity.id] === null ||
-                    ledgerByActivity[activity.id]?.id === undefined
-                      ? undefined
-                      : allocationByLedger[
-                          ledgerByActivity[activity.id]?.id as string
-                        ]
-                  }
-                  categories={categories}
-                  refundOptions={replaceRefundOptions}
-                  decisionBusy={decisionBusy}
-                  ref={replaceHeadingRef}
-                  onPatch={(patch) => updateReplaceDraft(patch)}
-                  onKindChange={(kind, draft) => {
-                    updateReplaceDraft({ kind });
-                    if (kind === 'REFUND') {
-                      void loadReplaceRefundOptions({ ...draft, kind });
+                {resolveDraft?.activityId === activity.id && (
+                  <ResolvePanel
+                    activity={activity}
+                    draft={resolveDraft}
+                    ledger={ledgerByActivity[activity.id]}
+                    ledgerLoading={ledgerLoading[activity.id] === true}
+                    activeAllocation={
+                      ledgerByActivity[activity.id] === undefined ||
+                      ledgerByActivity[activity.id] === null ||
+                      ledgerByActivity[activity.id]?.id === undefined
+                        ? undefined
+                        : allocationByLedger[
+                            ledgerByActivity[activity.id]?.id as string
+                          ]
                     }
-                  }}
-                  onSubmit={(item) => void submitReplace(item)}
-                  onCancel={(activityId) =>
-                    closeReviewPanels(activityId, 'replace')
-                  }
-                />
-              )}
+                    decisionBusy={decisionBusy}
+                    ref={resolveHeadingRef}
+                    onPatch={(patch) => updateResolveDraft(patch)}
+                    onSubmit={(item) => void submitResolve(item)}
+                    onCancel={(activityId) =>
+                      closeReviewPanels(activityId, 'resolve')
+                    }
+                  />
+                )}
 
-              {dismissOpen === activity.id && (
-                <div
-                  className="bank-activity-form"
-                  role="group"
-                  aria-label={`Dismiss ${activitySummary(activity)}`}
-                >
-                  <label>
-                    Reason
-                    <select
-                      value={dismissReason}
-                      onChange={(event) =>
-                        setDismissReason(
-                          event.target.value as BankActivityDismissReason,
-                        )
+                {replaceDraft?.activityId === activity.id && (
+                  <ReplacePanel
+                    activity={activity}
+                    draft={replaceDraft}
+                    ledgerLoading={ledgerLoading[activity.id] === true}
+                    ledgerGone={ledgerByActivity[activity.id] === null}
+                    activeAllocation={
+                      ledgerByActivity[activity.id] === undefined ||
+                      ledgerByActivity[activity.id] === null ||
+                      ledgerByActivity[activity.id]?.id === undefined
+                        ? undefined
+                        : allocationByLedger[
+                            ledgerByActivity[activity.id]?.id as string
+                          ]
+                    }
+                    categories={categories}
+                    refundOptions={replaceRefundOptions}
+                    decisionBusy={decisionBusy}
+                    ref={replaceHeadingRef}
+                    onPatch={(patch) => updateReplaceDraft(patch)}
+                    onKindChange={(kind, draft) => {
+                      updateReplaceDraft({ kind });
+                      if (kind === 'REFUND') {
+                        void loadReplaceRefundOptions({ ...draft, kind });
                       }
-                    >
-                      {DISMISS_REASONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <p className="finance-helper">
-                    Dismissing keeps the item as evidence and never touches the
-                    ledger.
-                  </p>
-                  <div className="finance-account-actions">
-                    <button
-                      type="button"
-                      className="household-button"
-                      disabled={decisionBusy}
-                      onClick={() => void submitDismiss(activity)}
-                    >
-                      {decisionBusy ? 'Dismissing…' : 'Dismiss item'}
-                    </button>
-                    <button
-                      type="button"
-                      className="household-button household-button--secondary"
-                      disabled={decisionBusy}
-                      onClick={() => setDismissOpen(null)}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
+                    }}
+                    onSubmit={(item) => void submitReplace(item)}
+                    onCancel={(activityId) =>
+                      closeReviewPanels(activityId, 'replace')
+                    }
+                  />
+                )}
 
-      {page !== null && page.hasMore && (
-        <div className="bank-activity-more">
-          <button
-            type="button"
-            className="household-button household-button--secondary"
-            disabled={busy || loadingMore}
-            onClick={() => void loadMore()}
-          >
-            {loadingMore ? 'Loading more…' : 'Load more activity'}
-          </button>
-        </div>
-      )}
+                {dismissOpen === activity.id && (
+                  <div
+                    className="bank-activity-form"
+                    role="group"
+                    aria-label={`Dismiss ${activitySummary(activity)}`}
+                  >
+                    <label>
+                      Reason
+                      <select
+                        value={dismissReason}
+                        onChange={(event) =>
+                          setDismissReason(
+                            event.target.value as BankActivityDismissReason,
+                          )
+                        }
+                      >
+                        {DISMISS_REASONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <p className="finance-helper">
+                      Dismissing keeps the item as evidence and never touches
+                      the ledger.
+                    </p>
+                    <div className="finance-account-actions">
+                      <button
+                        type="button"
+                        className="household-button"
+                        disabled={decisionBusy}
+                        onClick={() => void submitDismiss(activity)}
+                      >
+                        {decisionBusy ? 'Dismissing…' : 'Dismiss item'}
+                      </button>
+                      <button
+                        type="button"
+                        className="household-button household-button--secondary"
+                        disabled={decisionBusy}
+                        onClick={() => setDismissOpen(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {page !== null && page.hasMore && (
+          <div className="bank-activity-more">
+            <button
+              type="button"
+              className="household-button household-button--secondary"
+              disabled={busy || loadingMore}
+              onClick={() => void loadMore()}
+            >
+              {loadingMore ? 'Loading more…' : 'Load more activity'}
+            </button>
+          </div>
+        )}
+      </fieldset>
     </section>
   );
 }

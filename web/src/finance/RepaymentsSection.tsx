@@ -41,8 +41,10 @@ interface Props {
   reportingZone: string;
   refreshSignal: number;
   onBalancesChanged: () => void;
+  retainedCreate?: PendingCreate | null;
+  onRetainedCreateChange?: (intent: PendingCreate | null) => void;
 }
-interface PendingCreate {
+export interface PendingCreate {
   key: string;
   input: { recipientUserId: string; money: RepaymentMoney; occurredOn: string };
 }
@@ -75,6 +77,8 @@ export function RepaymentsSection({
   reportingZone,
   refreshSignal,
   onBalancesChanged,
+  retainedCreate,
+  onRetainedCreateChange,
 }: Props) {
   const [roster, setRoster] = useState<HouseholdMember[] | null>(null);
   const [items, setItems] = useState<Repayment[]>([]);
@@ -100,9 +104,11 @@ export function RepaymentsSection({
   const [date, setDate] = useState('');
   const [replacementAmount, setReplacementAmount] = useState('');
   const [replacementDate, setReplacementDate] = useState('');
-  const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(
-    null,
-  );
+  const [localPendingCreate, setLocalPendingCreate] =
+    useState<PendingCreate | null>(null);
+  const pendingCreate =
+    retainedCreate === undefined ? localPendingCreate : retainedCreate;
+  const setPendingCreate = onRetainedCreateChange ?? setLocalPendingCreate;
   const [detail, setDetail] = useState<Repayment | null>(null);
   const [events, setEvents] = useState<RepaymentEvent[]>([]);
   const [eventsMore, setEventsMore] = useState(false);
@@ -115,7 +121,7 @@ export function RepaymentsSection({
   const sectionHeading = useRef<HTMLHeadingElement>(null);
   const filterControl = useRef<HTMLSelectElement>(null);
   const createInFlight = useRef(false);
-  const createIntent = useRef<PendingCreate | null>(null);
+  const createIntent = useRef<PendingCreate | null>(pendingCreate);
   const currentDetailId = useRef<string | null>(null);
   const knownRecords = useRef<Map<string, Repayment>>(new Map());
   const initialList = useRef(true);
@@ -385,9 +391,10 @@ export function RepaymentsSection({
       controllers.current.delete(controller);
     }
   }
-  async function ensureCsrf(): Promise<CsrfToken> {
+  async function ensureCsrf(signal?: AbortSignal): Promise<CsrfToken> {
     if (csrfRef.current) return csrfRef.current;
-    const token = await fetchCsrf();
+    const token = await fetchCsrf(signal);
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     csrfRef.current = token;
     onCsrfRefreshed(token);
     return token;
@@ -451,13 +458,20 @@ export function RepaymentsSection({
     createInFlight.current = true;
     setBusy(true);
     setNotice(null);
+    const run = generation.current;
+    const controller = new AbortController();
+    controllers.current.add(controller);
     try {
+      const token = await ensureCsrf(controller.signal);
+      if (controller.signal.aborted || run !== generation.current) return;
       const result = await postRepayment(
         household.id,
         intent.input,
         intent.key,
-        await ensureCsrf(),
+        token,
+        controller.signal,
       );
+      if (controller.signal.aborted || run !== generation.current) return;
       createIntent.current = null;
       setPendingCreate(null);
       setAmount('');
@@ -467,6 +481,7 @@ export function RepaymentsSection({
       );
       committed(result);
     } catch (error) {
+      if (controller.signal.aborted || run !== generation.current) return;
       const problem = failure(error);
       if (handleAccess(problem)) return;
       if (problem.code === 'IDEMPOTENCY_CONFLICT') {
@@ -488,13 +503,15 @@ export function RepaymentsSection({
         void loadRoster();
       } else if (problem.code === 'CSRF_INVALID') {
         try {
-          const token = await fetchCsrf();
+          const token = await fetchCsrf(controller.signal);
+          if (controller.signal.aborted || run !== generation.current) return;
           csrfRef.current = token;
           onCsrfRefreshed(token);
           setNotice(
             'Security token refreshed. Review and retry the same unchanged assertion and key.',
           );
         } catch {
+          if (controller.signal.aborted || run !== generation.current) return;
           setNotice(
             'Security setup failed. Retry the same unchanged assertion after your session recovers.',
           );
@@ -505,20 +522,32 @@ export function RepaymentsSection({
         );
       }
     } finally {
+      controllers.current.delete(controller);
       createInFlight.current = false;
-      setBusy(false);
+      if (!controller.signal.aborted && run === generation.current)
+        setBusy(false);
     }
   }
-  async function transition(request: (token: CsrfToken) => Promise<Repayment>) {
+  async function transition(
+    request: (token: CsrfToken, signal: AbortSignal) => Promise<Repayment>,
+  ) {
     if (!detail || busy || reviewRequired || !authorityConfirmed) return;
+    const run = generation.current;
+    const controller = new AbortController();
+    controllers.current.add(controller);
     setBusy(true);
     setNotice(null);
     try {
-      committed(await request(await ensureCsrf()));
+      const token = await ensureCsrf(controller.signal);
+      if (controller.signal.aborted || run !== generation.current) return;
+      const result = await request(token, controller.signal);
+      if (controller.signal.aborted || run !== generation.current) return;
+      committed(result);
       setNotice(
         'Decision recorded. Confirmed repayments affect household-visible net balances, but amount, date and history remain party-only.',
       );
     } catch (error) {
+      if (controller.signal.aborted || run !== generation.current) return;
       const e = failure(error);
       if (handleAccess(e)) return;
       setReviewRequired(true);
@@ -533,7 +562,9 @@ export function RepaymentsSection({
         setEvents([]);
       } else void openDetailForReview(detail.id);
     } finally {
-      setBusy(false);
+      controllers.current.delete(controller);
+      if (!controller.signal.aborted && run === generation.current)
+        setBusy(false);
     }
   }
   function openDetailForReview(id: string) {
@@ -876,13 +907,14 @@ export function RepaymentsSection({
                   disabled={busy || reviewRequired || !authorityConfirmed}
                   className="household-button household-button--secondary"
                   onClick={() =>
-                    void transition((token) =>
+                    void transition((token, signal) =>
                       postRepaymentDecision(
                         household.id,
                         detail.id,
                         detail.version,
                         action,
                         token,
+                        signal,
                       ),
                     )
                   }
@@ -902,12 +934,13 @@ export function RepaymentsSection({
                 disabled={busy || reviewRequired || !authorityConfirmed}
                 className="household-button household-button--secondary"
                 onClick={() =>
-                  void transition((token) =>
+                  void transition((token, signal) =>
                     postRepaymentAmendment(
                       household.id,
                       detail.id,
                       { expectedVersion: detail.version, action: 'VOID' },
                       token,
+                      signal,
                     ),
                   )
                 }
@@ -928,7 +961,7 @@ export function RepaymentsSection({
                   replacementDate,
                 );
                 if (money)
-                  void transition((token) =>
+                  void transition((token, signal) =>
                     postRepaymentAmendment(
                       household.id,
                       detail.id,
@@ -939,6 +972,7 @@ export function RepaymentsSection({
                         occurredOn: replacementDate,
                       },
                       token,
+                      signal,
                     ),
                   );
               }}
@@ -992,7 +1026,7 @@ export function RepaymentsSection({
                   disabled={busy || reviewRequired || !authorityConfirmed}
                   className="household-button household-button--secondary"
                   onClick={() =>
-                    void transition((token) =>
+                    void transition((token, signal) =>
                       postRepaymentAmendmentDecision(
                         household.id,
                         detail.id,
@@ -1003,6 +1037,7 @@ export function RepaymentsSection({
                             ? 'REJECT'
                             : 'CANCEL',
                         token,
+                        signal,
                       ),
                     )
                   }

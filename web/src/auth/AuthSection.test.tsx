@@ -129,17 +129,18 @@ describe('auth bootstrap', () => {
     expect(screen.queryByText(/session ended/i)).not.toBeInTheDocument();
   });
 
-  it('shows the account shell with households when bootstrap finds a session', async () => {
+  it('shows the household directory without account security controls', async () => {
     stubFetch({ csrf: csrfOk, me: meAuthenticated });
-    render(<AuthSection />);
-    expect(await screen.findByText(USER.email)).toBeInTheDocument();
-    expect(screen.getByText('Households')).toBeInTheDocument();
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(
       await screen.findByText(/You do not belong to a household yet/),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole('button', { name: 'Sign out' }),
-    ).toBeInTheDocument();
+      screen.queryByRole('heading', { name: 'Change password' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Sign out' }),
+    ).not.toBeInTheDocument();
   });
 
   it('shows a retry state on server failure without signing out', async () => {
@@ -443,6 +444,23 @@ describe('operator account links', () => {
       'Password updated. Sign in with your new password.',
     );
     expect(leave).toHaveBeenCalledOnce();
+    expect(screen.getByLabelText('New password')).toHaveValue('');
+  });
+});
+
+describe('account security route lifetime', () => {
+  it('keeps the new-password field focused while typing and clears drafts after leaving security', async () => {
+    stubFetch({ me: meAuthenticated });
+    const view = render(<AuthSection route={{ kind: 'security' }} />);
+    const input = await screen.findByLabelText('New password');
+    input.focus();
+    fireEvent.change(input, { target: { value: 'first' } });
+    expect(document.activeElement).toBe(input);
+    fireEvent.change(input, { target: { value: 'first second' } });
+    expect(document.activeElement).toBe(input);
+    view.rerender(<AuthSection route={{ kind: 'home' }} />);
+    expect(screen.queryByLabelText('New password')).not.toBeInTheDocument();
+    view.rerender(<AuthSection route={{ kind: 'security' }} />);
     expect(screen.getByLabelText('New password')).toHaveValue('');
   });
 });

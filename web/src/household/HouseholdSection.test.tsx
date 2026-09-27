@@ -6,11 +6,14 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
-import { StrictMode, useState } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { StrictMode, useEffect, useState } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthSection } from '../auth/AuthSection';
 import { HouseholdSection } from './HouseholdSection';
 import { validateHouseholdName } from '../auth/validation';
+import { NAVIGATION_EVENT, readAppRoute } from '../navigation';
+beforeEach(() => window.history.replaceState(null, '', '/households'));
+afterEach(() => window.history.replaceState(null, '', '/'));
 
 const CSRF = { token: 'csrf-token-1', headerName: 'X-CSRF-TOKEN' };
 const CSRF_FRESH = { token: 'csrf-token-2', headerName: 'X-CSRF-TOKEN' };
@@ -361,8 +364,18 @@ async function signIn(
   clickLastButton('Sign in');
 }
 
+function RoutedAuth() {
+  const [route, setRoute] = useState(readAppRoute);
+  useEffect(() => {
+    const update = () => setRoute(readAppRoute());
+    window.addEventListener(NAVIGATION_EVENT, update);
+    return () => window.removeEventListener(NAVIGATION_EVENT, update);
+  }, []);
+  return <AuthSection route={route} />;
+}
+
 describe('transaction section integration', () => {
-  it('mounts a keyed private-transaction section inside each household card', async () => {
+  it('opens the private transaction destination without preloading it in the directory', async () => {
     stubFetch({
       csrf: csrfOk,
       me: meAuthenticated,
@@ -373,8 +386,14 @@ describe('transaction section integration', () => {
         jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
       categoriesGet: () => jsonResponse({ items: CATEGORY_ITEMS }),
     });
-    render(<AuthSection />);
-    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    render(<RoutedAuth />);
+    expect(
+      await screen.findByRole('link', { name: 'Open Elm Street home' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('No transactions yet.')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: 'Open Elm Street home' }));
+    fireEvent.click(screen.getByText('Household pages'));
+    fireEvent.click(screen.getByRole('link', { name: 'Transactions' }));
     expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Transactions' })).toBeVisible();
     expect(
@@ -386,14 +405,147 @@ describe('transaction section integration', () => {
   });
 });
 
+describe('focused household destinations', () => {
+  it('loads only the selected authorized page and refuses an unknown household', async () => {
+    const { calls } = stubFetch({
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+      financialAccountsGet: () =>
+        jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+    });
+    const props = {
+      csrf: CSRF,
+      onCsrfRefreshed: vi.fn(),
+      onSessionExpired: vi.fn(),
+      currentUserId: USER.id,
+    };
+    const { rerender } = render(
+      <HouseholdSection
+        {...props}
+        route={{ householdId: HOUSEHOLD_1.id, page: 'accounts' }}
+      />,
+    );
+    expect(
+      await screen.findByRole('heading', { name: 'Financial accounts' }),
+    ).toBeInTheDocument();
+    expect(calls.some(({ url }) => url.includes('/transactions?'))).toBe(false);
+    expect(
+      screen.queryByRole('heading', { name: 'Bank connections' }),
+    ).not.toBeInTheDocument();
+    rerender(
+      <HouseholdSection
+        {...props}
+        route={{ householdId: HOUSEHOLD_2.id, page: 'accounts' }}
+      />,
+    );
+    expect(
+      screen.getByText('This household is not available to your account.'),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('heading', { name: 'Financial accounts' }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(calls.some(({ url }) => url.includes(HOUSEHOLD_2.id))).toBe(false);
+  });
+});
+
+describe('retained account recovery across destinations', () => {
+  it('offers the same account creation request after leaving and returning', async () => {
+    let attempts = 0;
+    const { calls } = stubFetch({
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+      financialAccountsGet: () =>
+        jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+      financialAccountsPost: () =>
+        ++attempts === 1
+          ? jsonResponse(
+              { code: 'FINANCE_BUSY', message: 'Outcome unknown.' },
+              503,
+            )
+          : jsonResponse(
+              {
+                id: '10000000-0000-4000-8000-000000000002',
+                householdId: HOUSEHOLD_1.id,
+                ownerUserId: USER.id,
+                name: 'Holiday fund',
+                kind: 'SAVINGS',
+                currency: 'BRL',
+                source: 'MANUAL',
+                visibility: 'PRIVATE',
+                status: 'ACTIVE',
+                version: 0,
+                createdAt: '2026-09-16T12:00:00Z',
+                updatedAt: '2026-09-16T12:00:00Z',
+              },
+              201,
+            ),
+      transactionsGet: () =>
+        jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+    });
+    const props = {
+      csrf: CSRF,
+      onCsrfRefreshed: vi.fn(),
+      onSessionExpired: vi.fn(),
+      currentUserId: USER.id,
+    };
+    const { rerender } = render(
+      <HouseholdSection
+        {...props}
+        route={{ householdId: HOUSEHOLD_1.id, page: 'accounts' }}
+      />,
+    );
+    fireEvent.change(await screen.findByLabelText('Account name'), {
+      target: { value: 'Holiday fund' },
+    });
+    fireEvent.change(screen.getByLabelText('Account type'), {
+      target: { value: 'SAVINGS' },
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Add private account' }),
+    );
+    expect(
+      await screen.findByRole('button', { name: 'Retry same request' }),
+    ).toBeInTheDocument();
+    rerender(
+      <HouseholdSection
+        {...props}
+        route={{ householdId: HOUSEHOLD_1.id, page: 'transactions' }}
+      />,
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Retry same request' }),
+    ).not.toBeInTheDocument();
+    rerender(
+      <HouseholdSection
+        {...props}
+        route={{ householdId: HOUSEHOLD_1.id, page: 'accounts' }}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Retry same request' }),
+    );
+    await screen.findByText('Holiday fund');
+    const writes = calls.filter(
+      ({ url, init }) =>
+        url.endsWith('/financial-accounts') && init?.method === 'POST',
+    );
+    expect(writes).toHaveLength(2);
+    expect(writes[0]?.init?.body).toEqual(writes[1]?.init?.body);
+    expect(new Headers(writes[0]?.init?.headers).get('Idempotency-Key')).toBe(
+      new Headers(writes[1]?.init?.headers).get('Idempotency-Key'),
+    );
+  });
+});
+
 describe('manual account to transaction selector propagation', () => {
-  function financeSection(signal: number) {
+  function financeSection(signal: number, page: 'accounts' | 'transactions') {
     return (
       <HouseholdSection
         csrf={CSRF}
         onCsrfRefreshed={() => {}}
         onSessionExpired={() => {}}
         refreshSignal={signal}
+        route={{ householdId: HOUSEHOLD_1.id, page }}
         currentUserId={USER.id}
       />
     );
@@ -437,9 +589,7 @@ describe('manual account to transaction selector propagation', () => {
         jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
       categoriesGet: () => jsonResponse({ items: CATEGORY_ITEMS }),
     });
-    render(financeSection(0));
-
-    expect(await screen.findByText('Daily spending')).toBeInTheDocument();
+    const { rerender } = render(financeSection(0, 'transactions'));
     expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
 
     // Start an in-progress transaction draft against the known account.
@@ -453,19 +603,21 @@ describe('manual account to transaction selector propagation', () => {
       target: { value: 'Draft groceries' },
     });
 
-    // Commit a manual account in the sibling section.
+    // Open the account destination without discarding the transaction controller.
+    rerender(financeSection(0, 'accounts'));
+    expect(await screen.findByText('Daily spending')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Account name'), {
       target: { value: 'Holiday fund' },
     });
     fireEvent.click(
       screen.getByRole('button', { name: 'Add private account' }),
     );
+    await screen.findByText('Private account “Holiday fund” is ready.');
 
-    // The selector lists the new account with no manual refresh...
+    rerender(financeSection(0, 'transactions'));
     expect(
       await screen.findByRole('option', { name: 'Holiday fund · BRL' }),
     ).toBeInTheDocument();
-    // ...and the in-progress draft survives the background refresh.
     expect(screen.getByLabelText('Account')).toHaveValue(checking.id);
     expect(screen.getByLabelText('Amount')).toHaveValue('12.34');
     expect(screen.getByLabelText('Description')).toHaveValue('Draft groceries');
@@ -481,6 +633,7 @@ describe('transaction section authority gating', () => {
         onSessionExpired={() => {}}
         refreshSignal={signal}
         currentUserId={USER.id}
+        route={{ householdId: HOUSEHOLD_1.id, page: 'transactions' }}
       />
     );
   }
@@ -538,7 +691,7 @@ describe('household name validation', () => {
 describe('signed-out suppression', () => {
   it('never requests households while signed out', async () => {
     const { calls } = stubFetch({ me: meAnonymous, csrf: csrfOk });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(
       await screen.findByRole('heading', { name: 'Sign in' }),
     ).toBeInTheDocument();
@@ -558,7 +711,7 @@ describe('household bootstrap', () => {
       me: meAuthenticated,
       householdsGet: () => gate,
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(
       await screen.findByText('Loading your households…'),
     ).toBeInTheDocument();
@@ -575,7 +728,7 @@ describe('household bootstrap', () => {
       me: meAuthenticated,
       householdsGet: () => householdsOk([HOUSEHOLD_1, HOUSEHOLD_2]),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
     expect(screen.getByText('Lake cabin')).toBeInTheDocument();
     expect(screen.getByText('Role: OWNER')).toBeInTheDocument();
@@ -597,7 +750,7 @@ describe('household creation', () => {
       householdsGet: () => householdsOk([]),
       householdsPost: () => jsonResponse(HOUSEHOLD_1, 201),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(
       await screen.findByText(/You do not belong to a household yet/),
     ).toBeInTheDocument();
@@ -625,7 +778,7 @@ describe('household creation', () => {
       me: meAuthenticated,
       householdsGet: () => householdsOk([]),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', '   ');
     clickLastButton('Create household');
@@ -646,7 +799,7 @@ describe('household creation', () => {
       me: meAuthenticated,
       householdsGet: () => householdsOk([]),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     await screen.findByLabelText('Household name');
     const longName = 'a'.repeat(101);
     typeInto('Household name', longName);
@@ -666,7 +819,7 @@ describe('household creation', () => {
       me: meAuthenticated,
       householdsGet: () => householdsOk([]),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', `Home${String.fromCharCode(7)}bell`);
     clickLastButton('Create household');
@@ -694,7 +847,7 @@ describe('household creation', () => {
           400,
         ),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', 'Elm Street home');
     clickLastButton('Create household');
@@ -718,7 +871,7 @@ describe('household creation', () => {
       householdsGet: () => householdsOk([]),
       householdsPost: () => gate,
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', 'Elm Street home');
     const button = screen.getByRole('button', { name: 'Create household' });
@@ -744,7 +897,7 @@ describe('household recovery', () => {
           401,
         ),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(
       await screen.findByText('Your session ended. Sign in again.'),
     ).toBeInTheDocument();
@@ -780,7 +933,7 @@ describe('household recovery', () => {
         return jsonResponse(HOUSEHOLD_1, 201);
       },
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', 'Elm Street home');
     clickLastButton('Create household');
@@ -821,7 +974,7 @@ describe('household recovery', () => {
         return householdsOk([]);
       },
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(
       await screen.findByText('Something went wrong. Retry.'),
     ).toBeInTheDocument();
@@ -854,7 +1007,7 @@ describe('household recovery', () => {
       },
     );
     vi.stubGlobal('fetch', fetchMock);
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', 'Elm Street home');
     vi.useFakeTimers();
@@ -903,10 +1056,11 @@ describe('household logout and lifecycle', () => {
       householdsGet: () => gate,
       logout: () => new Response(null, { status: 204 }),
     });
-    render(<AuthSection />);
+    const { rerender } = render(<AuthSection route={{ kind: 'directory' }} />);
     expect(
       await screen.findByText('Loading your households…'),
     ).toBeInTheDocument();
+    rerender(<AuthSection route={{ kind: 'security' }} />);
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     expect(await screen.findByText('Signed out.')).toBeInTheDocument();
     expect(
@@ -925,7 +1079,7 @@ describe('household logout and lifecycle', () => {
       me: meAnonymous,
       householdsGet: () => householdsOk([HOUSEHOLD_1]),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(
       await screen.findByRole('heading', { name: 'Sign in' }),
     ).toBeInTheDocument();
@@ -965,7 +1119,7 @@ describe('household logout and lifecycle', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(
       <StrictMode>
-        <AuthSection />
+        <AuthSection route={{ kind: 'directory' }} />
       </StrictMode>,
     );
     expect(
@@ -989,7 +1143,7 @@ describe('household logout and lifecycle', () => {
         householdsGet: () => householdsOk([]),
         householdsPost: () => gate,
       });
-      const { unmount } = render(<AuthSection />);
+      const { unmount } = render(<AuthSection route={{ kind: 'directory' }} />);
       await screen.findByLabelText('Household name');
       typeInto('Household name', 'Elm Street home');
       clickLastButton('Create household');
@@ -1029,7 +1183,7 @@ describe('household list gating', () => {
         return householdsOk([]);
       },
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(
       await screen.findByText('Something went wrong. Retry.'),
     ).toBeInTheDocument();
@@ -1082,7 +1236,7 @@ describe('household list gating', () => {
       },
     );
     vi.stubGlobal('fetch', fetchMock);
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
     typeInto('Household name', 'Lake cabin');
     vi.useFakeTimers();
@@ -1132,7 +1286,7 @@ describe('household list gating', () => {
       householdsGet: () => householdsOk([]),
       householdsPost: () => jsonResponse(created, 201),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     const input = await screen.findByLabelText('Household name');
     expect(input).not.toHaveAttribute('maxlength');
     typeInto('Household name', emojiName);
@@ -1165,7 +1319,7 @@ describe('household ordering', () => {
       me: meAuthenticated,
       householdsGet: () => householdsOk([exact, fractional]),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(await screen.findByText('Exact second')).toBeInTheDocument();
     const items = screen.getAllByRole('listitem');
     expect(items).toHaveLength(2);
@@ -1189,7 +1343,7 @@ describe('household ordering', () => {
       me: meAuthenticated,
       householdsGet: () => householdsOk([laterId, earlierId]),
     });
-    render(<AuthSection />);
+    render(<AuthSection route={{ kind: 'directory' }} />);
     expect(await screen.findByText('Earlier id')).toBeInTheDocument();
     const items = screen.getAllByRole('listitem');
     expect(items).toHaveLength(2);
@@ -1379,7 +1533,15 @@ describe('invitation access recovery', () => {
           403,
         ),
     });
-    render(<AuthSection />);
+    render(
+      <AuthSection
+        route={{
+          kind: 'household',
+          householdId: HOUSEHOLD_1.id,
+          page: 'invitations',
+        }}
+      />,
+    );
     await screen.findByRole('button', { name: 'Create invitation' });
     fireEvent.click(screen.getByRole('button', { name: 'Create invitation' }));
     expect(
@@ -1393,9 +1555,11 @@ describe('invitation access recovery', () => {
     await waitFor(() =>
       expect(screen.getByText('Role: MEMBER')).toBeInTheDocument(),
     );
-    expect(
-      screen.queryByRole('button', { name: 'Create invitation' }),
-    ).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Create invitation' }),
+      ).not.toBeInTheDocument(),
+    );
     expect(householdGets).toBe(2);
   });
 });
@@ -1411,7 +1575,15 @@ describe('membership roster identity', () => {
           ? jsonResponse({ members: [USER_MEMBER, OTHER_MEMBER] })
           : jsonResponse({ members: [] }),
     });
-    render(<AuthSection />);
+    render(
+      <AuthSection
+        route={{
+          kind: 'household',
+          householdId: HOUSEHOLD_1.id,
+          page: 'members',
+        }}
+      />,
+    );
     // AuthSection supplies the actual signed-in user ID: the actor's row is
     // marked and offers no mutation controls for themself.
     expect(
@@ -1442,20 +1614,39 @@ describe('membership roster identity', () => {
 });
 
 describe('membership reconciliation wiring', () => {
-  function ReconcileHarness({ settled }: { settled: (value: number) => void }) {
-    // Mirrors the AuthSection wiring: the membership reconcile callback
-    // bumps the queued refresh signal and reports each settled reload.
+  function ReconcileHarness({
+    settled,
+    initialPage = 'members',
+  }: {
+    settled: (value: number) => void;
+    initialPage?: 'members' | 'invitations';
+  }) {
     const [signal, setSignal] = useState(0);
+    const [page, setPage] = useState<'members' | 'invitations' | null>(
+      initialPage,
+    );
     return (
-      <HouseholdSection
-        csrf={CSRF}
-        onCsrfRefreshed={() => {}}
-        onSessionExpired={() => {}}
-        refreshSignal={signal}
-        onRefreshSettled={settled}
-        currentUserId={USER.id}
-        onHouseholdReconcile={() => setSignal((version) => version + 1)}
-      />
+      <>
+        <button type="button" onClick={() => setPage(null)}>
+          Show directory
+        </button>
+        <button type="button" onClick={() => setPage('members')}>
+          Show members
+        </button>
+        <button type="button" onClick={() => setPage('invitations')}>
+          Show invitations
+        </button>
+        <HouseholdSection
+          csrf={CSRF}
+          onCsrfRefreshed={() => {}}
+          onSessionExpired={() => {}}
+          refreshSignal={signal}
+          onRefreshSettled={settled}
+          currentUserId={USER.id}
+          route={page ? { householdId: HOUSEHOLD_1.id, page } : null}
+          onHouseholdReconcile={() => setSignal((version) => version + 1)}
+        />
+      </>
     );
   }
 
@@ -1530,14 +1721,16 @@ describe('membership reconciliation wiring', () => {
       name: 'Remove member@example.test from Elm Street home',
     });
     // A creation is in flight, so the collection is busy.
+    fireEvent.click(screen.getByRole('button', { name: 'Show directory' }));
     typeInto('Household name', 'Lake cabin');
     fireEvent.click(screen.getByRole('button', { name: 'Create household' }));
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Creating…' })).toBeDisabled(),
     );
     // The membership write starts and settles while the collection is busy.
+    fireEvent.click(screen.getByRole('button', { name: 'Show members' }));
     fireEvent.click(
-      screen.getByRole('button', {
+      await screen.findByRole('button', {
         name: 'Remove member@example.test from Elm Street home',
       }),
     );
@@ -1550,6 +1743,7 @@ describe('membership reconciliation wiring', () => {
     expect(householdCalls(calls, 'GET')).toHaveLength(1);
     expect(settledSignals).toHaveLength(0);
     resolveCreate(jsonResponse(HOUSEHOLD_2, 201));
+    fireEvent.click(screen.getByRole('button', { name: 'Show directory' }));
     expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
     // The queued signal drains into a second collection fetch that settles.
     await waitFor(() => expect(settledSignals).toEqual([1]));
@@ -1583,17 +1777,24 @@ describe('membership reconciliation wiring', () => {
         ),
     });
     render(
-      <ReconcileHarness settled={(value) => settledSignals.push(value)} />,
+      <ReconcileHarness
+        initialPage="invitations"
+        settled={(value) => settledSignals.push(value)}
+      />,
     );
     await screen.findByRole('button', { name: 'Create invitation' });
     // A creation is in flight, so the collection is busy.
+    fireEvent.click(screen.getByRole('button', { name: 'Show directory' }));
     typeInto('Household name', 'Lake cabin');
     fireEvent.click(screen.getByRole('button', { name: 'Create household' }));
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Creating…' })).toBeDisabled(),
     );
     // The owner invitation write reports changed access while busy.
-    fireEvent.click(screen.getByRole('button', { name: 'Create invitation' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Show invitations' }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Create invitation' }),
+    );
     expect(
       await screen.findByText(/access to this household may have changed/i),
     ).toBeInTheDocument();
@@ -1604,6 +1805,7 @@ describe('membership reconciliation wiring', () => {
     // The invitation reconcile entered the queue instead of being dropped.
     expect(householdCalls(calls, 'GET')).toHaveLength(1);
     resolveCreate(jsonResponse(HOUSEHOLD_2, 201));
+    fireEvent.click(screen.getByRole('button', { name: 'Show directory' }));
     expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
     await waitFor(() => expect(householdCalls(calls, 'GET')).toHaveLength(2));
   });
@@ -1618,6 +1820,7 @@ describe('financial section authority gating', () => {
         onSessionExpired={() => {}}
         refreshSignal={signal}
         currentUserId={USER.id}
+        route={{ householdId: HOUSEHOLD_1.id, page: 'accounts' }}
       />
     );
   }
@@ -1768,7 +1971,10 @@ describe('bank activity to ledger propagation', () => {
       ...overrides,
     };
   }
-  function householdSection(signal: number) {
+  function householdSection(
+    signal: number,
+    page: 'transactions' | 'bank-activity',
+  ) {
     return (
       <HouseholdSection
         csrf={CSRF}
@@ -1776,6 +1982,7 @@ describe('bank activity to ledger propagation', () => {
         onSessionExpired={() => {}}
         refreshSignal={signal}
         currentUserId={USER.id}
+        route={{ householdId: HOUSEHOLD_1.id, page }}
       />
     );
   }
@@ -1860,15 +2067,11 @@ describe('bank activity to ledger propagation', () => {
         );
       },
     });
-    render(householdSection(0));
+    const { rerender } = render(householdSection(0, 'transactions'));
 
     expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
     expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
-    // The private inbox and its sync controls are discoverable.
-    expect(await screen.findByText(/Starbucks/)).toBeInTheDocument();
-    expect(
-      await screen.findByRole('list', { name: 'Connected bank sync controls' }),
-    ).toBeInTheDocument();
+    expect(screen.queryByText(/Starbucks/)).not.toBeInTheDocument();
 
     // Start a manual-entry draft in the sibling section.
     fireEvent.change(screen.getByLabelText('Account'), {
@@ -1884,6 +2087,11 @@ describe('bank activity to ledger propagation', () => {
       url.includes('/transactions?'),
     ).length;
 
+    rerender(householdSection(0, 'bank-activity'));
+    expect(await screen.findByText(/Starbucks/)).toBeInTheDocument();
+    expect(
+      await screen.findByRole('list', { name: 'Connected bank sync controls' }),
+    ).toBeInTheDocument();
     // Confirm the posted observation in the bank-activity inbox.
     fireEvent.click(
       screen.getByRole('button', {
@@ -1894,10 +2102,14 @@ describe('bank activity to ledger propagation', () => {
       await screen.findByRole('button', { name: 'Add to ledger' }),
     );
 
-    // The confirmed CONNECTED entry reaches the visible feed without a reload...
+    await waitFor(() => expect(confirmed).toBe(true));
+    rerender(householdSection(0, 'transactions'));
     expect(await screen.findByText('Starbucks coffee')).toBeInTheDocument();
-    // ...while the manual draft survives the sibling ledger refresh.
-    expect(screen.getByLabelText('Description')).toHaveValue('Draft groceries');
+    expect(
+      screen.getByLabelText('Description', {
+        selector: '.finance-create-form input',
+      }),
+    ).toHaveValue('Draft groceries');
     expect(screen.getByLabelText('Amount')).toHaveValue('12.34');
     expect(
       calls.filter(({ url }) => url.includes('/transactions?')).length,
@@ -1964,9 +2176,10 @@ describe('bank activity to ledger propagation', () => {
         });
       },
     });
-    render(householdSection(0));
+    const { rerender } = render(householdSection(0, 'transactions'));
 
     await screen.findByText('No transactions yet.');
+    rerender(householdSection(0, 'bank-activity'));
     await screen.findByText(/Pending charge/);
     // Wait for the initial sibling loads to settle so the dismiss control is
     // enabled, re-querying the row each time (the list can re-render).
@@ -2078,12 +2291,16 @@ describe('confirmed household leave privacy', () => {
         return original(input, init);
       }),
     );
-    render(
+    const sectionProps = {
+      csrf: CSRF,
+      onCsrfRefreshed: vi.fn(),
+      onSessionExpired: vi.fn(),
+      currentUserId: USER.id,
+    };
+    const { rerender } = render(
       <HouseholdSection
-        csrf={CSRF}
-        onCsrfRefreshed={vi.fn()}
-        onSessionExpired={vi.fn()}
-        currentUserId={USER.id}
+        {...sectionProps}
+        route={{ householdId: HOUSEHOLD_2.id, page: 'repayments' }}
       />,
     );
     expect(await screen.findByText(/You sent 739.00 USD/)).toBeInTheDocument();
@@ -2091,14 +2308,27 @@ describe('confirmed household leave privacy', () => {
       await screen.findByRole('button', { name: 'Review party-only record' }),
     );
     expect(await screen.findByText(/CREATED by/)).toBeInTheDocument();
+    rerender(
+      <HouseholdSection
+        {...sectionProps}
+        route={{ householdId: HOUSEHOLD_2.id, page: 'members' }}
+      />,
+    );
     fireEvent.click(
       await screen.findByRole('button', { name: `Leave ${HOUSEHOLD_2.name}` }),
     );
     fireEvent.click(screen.getByRole('button', { name: 'Leave household' }));
     await waitFor(() => expect(lists).toBeGreaterThan(1));
+    rerender(
+      <HouseholdSection
+        {...sectionProps}
+        route={{ householdId: HOUSEHOLD_2.id, page: 'repayments' }}
+      />,
+    );
     expect(screen.queryByText(/CREATED by/)).not.toBeInTheDocument();
     expect(screen.queryByText(/739.00 USD/)).not.toBeInTheDocument();
     expect(screen.queryByText(HOUSEHOLD_2.name)).not.toBeInTheDocument();
+    rerender(<HouseholdSection {...sectionProps} />);
     expect(screen.getByText(HOUSEHOLD_1.name)).toBeInTheDocument();
   });
 });

@@ -1,11 +1,12 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
   waitFor,
   within,
 } from '@testing-library/react';
-import { StrictMode } from 'react';
+import { StrictMode, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CsrfToken, Household } from '../auth/client';
 import { BankActivitySection } from './BankActivitySection';
@@ -545,6 +546,16 @@ function renderSection(
           <BankActivitySection {...props} refreshSignal={signal} />
         </StrictMode>,
       ),
+    rerenderActive: (active: boolean) =>
+      rendered.rerender(
+        <StrictMode>
+          <BankActivitySection
+            {...props}
+            active={active}
+            refreshSignal={options.refreshSignal ?? 0}
+          />
+        </StrictMode>,
+      ),
   };
 }
 
@@ -574,6 +585,184 @@ afterEach(() => {
 });
 
 describe('BankActivitySection', () => {
+  it('keeps typing focused when parent callbacks change after an inbox error', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(
+          {
+            code: 'SERVICE_UNAVAILABLE',
+            message: 'Bank activity unavailable.',
+          },
+          503,
+        ),
+      ),
+    );
+    function Parent() {
+      const [password, setPassword] = useState('');
+      return (
+        <>
+          <label>
+            New password
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+            />
+          </label>
+          <BankActivitySection
+            household={HOUSEHOLD}
+            csrf={CSRF}
+            onCsrfRefreshed={() => undefined}
+            onSessionExpired={() => undefined}
+            onHouseholdAccessChanged={() => undefined}
+            authorityConfirmed
+          />
+        </>
+      );
+    }
+    render(<Parent />);
+    await screen.findByText('Bank activity unavailable.');
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveFocus());
+    const password = screen.getByLabelText('New password');
+    password.focus();
+    await act(async () => {
+      fireEvent.change(password, { target: { value: 'synthetic password' } });
+    });
+    expect(password).toHaveFocus();
+    expect(password).toHaveValue('synthetic password');
+  });
+
+  it.each(['sync', 'dismiss', 'confirm', 'resolve', 'replace-ledger'] as const)(
+    'replays an interrupted %s with its original body and key after route return',
+    async (action) => {
+      const rendered = renderSection();
+      await screen.findByText(/awaiting review/);
+      if (action === 'resolve' || action === 'replace-ledger') {
+        rendered.harness.setItems([
+          activity({
+            id: NEEDS_REVIEW_ID,
+            reviewState: 'CONFIRMED',
+            changeState: 'MODIFIED',
+            ledgerTransactionId: LEDGER_ID,
+            money: { amount: '-13.00', currency: 'USD' },
+            version: 3,
+          }),
+        ]);
+        fireEvent.click(screen.getByRole('button', { name: 'Refresh inbox' }));
+        await findItemByAmount('-13.00');
+      }
+      const original = globalThis.fetch;
+      let release: (() => void) | undefined;
+      let interrupted = false;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const result = await original(input, init);
+          if (
+            !interrupted &&
+            init?.method === 'POST' &&
+            String(input).endsWith(`/${action}`)
+          ) {
+            interrupted = true;
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          }
+          return result;
+        }),
+      );
+      if (action === 'sync') {
+        fireEvent.click(
+          screen.getByRole('button', {
+            name: `Sync bank connection ${CONNECTION_ID}`,
+          }),
+        );
+      } else if (action === 'dismiss') {
+        const item = await findItemByAmount('-5.00');
+        fireEvent.click(
+          within(item).getByRole('button', { name: /^Dismiss bank activity/ }),
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'Dismiss item' }));
+      } else if (action === 'confirm') {
+        const item = await findItemByAmount('-12.34');
+        fireEvent.click(
+          within(item).getByRole('button', { name: /^Confirm bank activity/ }),
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'Add to ledger' }));
+      } else {
+        const row = await findItemByAmount('-13.00');
+        fireEvent.click(
+          within(row).getByRole('button', {
+            name:
+              action === 'resolve'
+                ? /^Review bank revision/
+                : /^Replace ledger entry/,
+          }),
+        );
+        const panel = await screen.findByRole('group', {
+          name:
+            action === 'resolve'
+              ? /Review the bank revision/
+              : /Replace the ledger entry/,
+        });
+        if (action === 'resolve') {
+          await within(panel).findByText(/Ledger now:/);
+        } else {
+          await waitFor(() =>
+            expect(
+              within(panel).getByRole('button', { name: 'Replace entry' }),
+            ).not.toBeDisabled(),
+          );
+          fireEvent.change(within(panel).getByLabelText('Description'), {
+            target: { value: 'Retained correction' },
+          });
+        }
+        fireEvent.click(
+          within(panel).getByRole('button', {
+            name: action === 'resolve' ? 'Resolve revision' : 'Replace entry',
+          }),
+        );
+      }
+      const writes = () =>
+        rendered.harness.calls.filter(
+          (call) =>
+            call.init?.method === 'POST' && call.url.endsWith(`/${action}`),
+        );
+      await waitFor(() => expect(release).toBeDefined());
+      const originalRequest = writes()[0]!;
+      rendered.rerenderActive(false);
+      rendered.rerenderActive(true);
+      const retryName =
+        action === 'sync'
+          ? 'Retry same sync request'
+          : action === 'dismiss'
+            ? 'Retry same dismissal'
+            : 'Retry same bank decision';
+      const retry = await screen.findByRole('button', { name: retryName });
+      if (action !== 'sync') {
+        expect(
+          screen.getByRole('group', { name: 'Bank activity controls' }),
+        ).toBeDisabled();
+      }
+      await waitFor(() => expect(retry).not.toBeDisabled());
+      fireEvent.click(retry);
+      await waitFor(() => expect(writes()).toHaveLength(2));
+      expect(idempotencyKeyOf(writes()[1])).toBe(
+        idempotencyKeyOf(originalRequest),
+      );
+      expect(writes()[1]?.init?.body).toBe(originalRequest.init?.body);
+      await waitFor(() =>
+        expect(
+          screen.queryByRole('button', { name: retryName }),
+        ).not.toBeInTheDocument(),
+      );
+      await act(async () => {
+        release?.();
+      });
+    },
+  );
+
   it('renders badges, counts, and only the permitted actions per state', async () => {
     renderSection();
     expect(await screen.findByText(/awaiting review/)).toBeInTheDocument();
@@ -658,6 +847,26 @@ describe('BankActivitySection', () => {
         'Typed draft text',
       );
     });
+  });
+
+  it('pauses the inbox off-route and restores a retained confirmation draft', async () => {
+    const { rerenderActive } = renderSection();
+    const posted = await findItemByAmount('-12.34');
+    fireEvent.click(
+      within(posted).getByRole('button', { name: /^Confirm bank activity/ }),
+    );
+    fireEvent.change(await screen.findByLabelText('Description'), {
+      target: { value: 'Typed draft text' },
+    });
+    rerenderActive(false);
+    expect(
+      screen.queryByRole('list', { name: 'Bank activity' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Description')).not.toBeInTheDocument();
+    rerenderActive(true);
+    expect(await screen.findByLabelText('Description')).toHaveValue(
+      'Typed draft text',
+    );
   });
 
   it('keeps a confirm draft across a non-material evidence refresh', async () => {

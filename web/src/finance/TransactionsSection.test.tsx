@@ -18,6 +18,7 @@ import type {
   Transaction,
 } from '../auth/client';
 import { TransactionsSection } from './TransactionsSection';
+import type { HouseholdPage } from '../navigation';
 
 const CSRF = { token: 'csrf-token-1', headerName: 'X-CSRF-TOKEN' };
 const HOUSEHOLD: Household = {
@@ -530,6 +531,7 @@ function renderSection(
     nowProvider?: () => Date;
     accountsRefreshSignal?: number;
     ledgerRefreshSignal?: number;
+    page?: HouseholdPage;
   } = {},
 ) {
   const calls = stubFetch(routes);
@@ -539,8 +541,10 @@ function renderSection(
   const household = options.household ?? HOUSEHOLD;
   const authorityConfirmed = options.authorityConfirmed ?? true;
   const nowProvider = options.nowProvider;
+  const page = options.page ?? 'transactions';
   const rendered = render(
     <TransactionsSection
+      page={page}
       household={household}
       currentUserId={ACTOR_ID}
       csrf={CSRF}
@@ -562,6 +566,7 @@ function renderSection(
     rerenderWithLedgerSignal: (signal: number) =>
       rendered.rerender(
         <TransactionsSection
+          page={page}
           household={household}
           currentUserId={ACTOR_ID}
           csrf={CSRF}
@@ -577,6 +582,7 @@ function renderSection(
     rerenderWithAccountSignal: (signal: number) =>
       rendered.rerender(
         <TransactionsSection
+          page={page}
           household={household}
           currentUserId={ACTOR_ID}
           csrf={CSRF}
@@ -586,6 +592,22 @@ function renderSection(
           authorityConfirmed={authorityConfirmed}
           nowProvider={nowProvider}
           accountsRefreshSignal={signal}
+        />,
+      ),
+    showPage: (nextPage: HouseholdPage) =>
+      rendered.rerender(
+        <TransactionsSection
+          household={household}
+          page={nextPage}
+          currentUserId={ACTOR_ID}
+          csrf={CSRF}
+          onCsrfRefreshed={onCsrfRefreshed}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdAccessChanged}
+          authorityConfirmed={authorityConfirmed}
+          nowProvider={nowProvider}
+          accountsRefreshSignal={options.accountsRefreshSignal ?? 0}
+          ledgerRefreshSignal={options.ledgerRefreshSignal ?? 0}
         />,
       ),
   };
@@ -967,18 +989,23 @@ describe('transaction list', () => {
     ).toBeInTheDocument();
   });
 
-  it('keeps empty transaction and member-balance lists distinct from reporting', async () => {
-    renderSection({
+  it('keeps the transaction destination free of unrelated report and balance requests', async () => {
+    const { calls } = renderSection({
       transactionsGet: () => transactionPage([]),
     });
     expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
     expect(
-      screen.getByText(/No household spending in this period/),
-    ).toBeInTheDocument();
-    // An empty authoritative balance projection must not fabricate rows.
-    const balances = screen.getByRole('region', { name: 'Member balances' });
-    expect(await within(balances).findByRole('status')).toBeInTheDocument();
-    expect(within(balances).queryByRole('list')).not.toBeInTheDocument();
+      screen.queryByRole('region', { name: 'Member balances' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/No household spending in this period/),
+    ).not.toBeInTheDocument();
+    expect(calls.some(({ url }) => url.includes('/member-balances'))).toBe(
+      false,
+    );
+    expect(calls.some(({ url }) => url.includes('/spending-summary'))).toBe(
+      false,
+    );
   });
 
   it('reports a failed list with a refresh recovery path', async () => {
@@ -1441,7 +1468,7 @@ describe('refund creation', () => {
 describe('durable creation retries', () => {
   it('retries an unknown outcome with the exact same key and payload', async () => {
     let attempts = 0;
-    const { calls } = renderSection({
+    const { calls, showPage } = renderSection({
       accountsGet: () => accountPage([account()]),
       transactionsGet: () => transactionPage([]),
       transactionsPost: () => {
@@ -1469,6 +1496,14 @@ describe('durable creation retries', () => {
       screen.getByRole('button', { name: 'Retry same request' }),
     ).toBeInTheDocument();
 
+    showPage('overview');
+    expect(
+      screen.queryByRole('button', { name: 'Retry same request' }),
+    ).not.toBeInTheDocument();
+    showPage('transactions');
+    expect(
+      screen.getByRole('button', { name: 'Retry same request' }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Retry same request' }));
     expect(
       await screen.findByText(`Expense recorded: -12.34 BRL on ${FIXED_DATE}.`),
@@ -2993,12 +3028,6 @@ describe('feeds', () => {
       await screen.findByText('No shared transactions yet.'),
     ).toBeInTheDocument();
     expect(screen.queryByText('No transactions yet.')).toBeNull();
-    // The spending dashboard names its per-currency rows honestly
-    // ("Expense total") and shows its own empty state; the household feed
-    // itself fabricates no totals line.
-    expect(
-      screen.getByText(/No household spending in this period/),
-    ).toBeInTheDocument();
   });
 
   it('reconciles session loss from the household feed with cleared scoped data', async () => {
@@ -4132,462 +4161,39 @@ describe('allocations', () => {
     calls: Array<{ url: string; init?: RequestInit | undefined }>,
   ) => calls.filter(({ url }) => url.endsWith('/member-balances'));
 
-  it('refreshes all-time balances once for an externally changed allocated expense, not for unchanged or older pages', async () => {
-    const otherId = '40000000-0000-4000-8000-000000000009';
-    let version = 1;
-    let otherVersion = 1;
-    let balanceAmount = '6.66';
-    const { calls } = renderSection({
-      transactionsGet: () =>
-        transactionPage([
-          householdExpense({ version }),
-          transaction({
-            id: otherId,
-            kind: 'INCOME',
-            description: 'Other',
-            money: { amount: '10.00', currency: 'USD' },
-            visibility: 'HOUSEHOLD',
-            version: otherVersion,
-          }),
-        ]),
-      allocationsGet: (id) =>
-        id === EXPENSE_ID
-          ? jsonResponse(activeAllocation({ transactionVersion: version }))
-          : allocationNotFound(),
+  it('loads authoritative balances only on their destination and reloads after returning', async () => {
+    let amount = '6.66';
+    const { calls, showPage } = renderSection({
       balancesGet: () =>
         jsonResponse({
           currencies: [
             {
               currency: 'USD',
               balances: [
-                {
-                  userId: ACTOR_ID,
-                  membershipStatus: 'CURRENT',
-                  amount: balanceAmount,
-                },
+                { userId: ACTOR_ID, membershipStatus: 'CURRENT', amount },
                 {
                   userId: MEMBER_B,
                   membershipStatus: 'CURRENT',
-                  amount: balanceAmount === '6.66' ? '-6.66' : '-5.66',
+                  amount: amount === '6.66' ? '-6.66' : '-4.66',
                 },
               ],
             },
           ],
         }),
+      transactionsGet: () => transactionPage([]),
     });
-    const balances = screen.getByRole('region', { name: 'Member balances' });
-    await within(balances).findByText('6.66 USD');
-    await screen.findByText('Groceries');
-    await waitFor(() =>
-      expect(
-        calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
-      ).toHaveLength(1),
-    );
-    fireEvent.change(screen.getByLabelText('Description'), {
-      target: { value: 'Unrelated draft' },
-    });
-    const refreshFeed = async (view: 'Household feed' | 'My transactions') => {
-      const count = calls.filter(
-        ({ url }) =>
-          url.includes('view=OWN&status=ALL') ||
-          url.includes('view=HOUSEHOLD&status=ALL'),
-      ).length;
-      fireEvent.click(screen.getByRole('radio', { name: view }));
-      await waitFor(() =>
-        expect(
-          calls.filter(
-            ({ url }) =>
-              url.includes('view=OWN&status=ALL') ||
-              url.includes('view=HOUSEHOLD&status=ALL'),
-          ).length,
-        ).toBeGreaterThan(count),
-      );
-      await waitFor(() =>
-        expect(screen.getByRole('radio', { name: view })).toBeEnabled(),
-      );
-    };
-    await refreshFeed('Household feed');
-    expect(balanceCalls(calls)).toHaveLength(1);
-    // Changing an unrelated income does not invalidate this allocation.
-    otherVersion = 2;
-    await refreshFeed('My transactions');
-    expect(balanceCalls(calls)).toHaveLength(1);
-    balanceAmount = '5.66';
-    version = 2;
-    await refreshFeed('Household feed');
-    await within(balances).findByText('5.66 USD');
-    expect(within(balances).queryByText('6.66 USD')).toBeNull();
+    expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
+    expect(balanceCalls(calls)).toHaveLength(0);
+    showPage('balances');
+    expect(await screen.findByText('6.66 USD')).toBeInTheDocument();
+    showPage('transactions');
+    expect(
+      screen.queryByRole('region', { name: 'Member balances' }),
+    ).not.toBeInTheDocument();
+    amount = '4.66';
+    showPage('balances');
+    expect(await screen.findByText('4.66 USD')).toBeInTheDocument();
     expect(balanceCalls(calls)).toHaveLength(2);
-    expect(screen.getByLabelText('Description')).toHaveValue('Unrelated draft');
-    await refreshFeed('My transactions');
-    expect(balanceCalls(calls)).toHaveLength(2);
-    version = 1;
-    await refreshFeed('Household feed');
-    expect(balanceCalls(calls)).toHaveLength(2);
-  });
-
-  it('restates the applied contribution period after a newer authorized expense version, preserving the draft', async () => {
-    let version = 1;
-    const { calls } = renderSection(
-      {
-        transactionsGet: () => transactionPage([householdExpense({ version })]),
-        allocationsGet: () =>
-          jsonResponse(activeAllocation({ transactionVersion: version })),
-        contributionGet: (from, to, currency) =>
-          jsonResponse({
-            from,
-            to,
-            currency,
-            reportingTimeZone: 'Etc/UTC',
-            snapshot: (version === 1 ? 'a' : 'b').repeat(64),
-            totals: {
-              expenseTotal: '10.00',
-              refundTotal: version === 1 ? '0.00' : '2.00',
-              netSpending: version === 1 ? '10.00' : '8.00',
-              allocatedCostTotal: version === 1 ? '10.00' : '8.00',
-              unallocatedNet: '0.00',
-            },
-            items: [
-              {
-                userId: ACTOR_ID,
-                membershipStatus: 'CURRENT',
-                expensePaid: '10.00',
-                refundReceived: version === 1 ? '0.00' : '2.00',
-                netPaid: version === 1 ? '10.00' : '8.00',
-                allocatedCost: version === 1 ? '10.00' : '8.00',
-              },
-            ],
-            limit: 50,
-            offset: 0,
-            hasMore: false,
-          }),
-      },
-      { nowProvider: () => new Date('2026-09-17T12:00:00Z') },
-    );
-    const contributions = screen.getByRole('region', {
-      name: 'Period contributions',
-    });
-    await within(contributions).findAllByText('10.00 USD');
-    await waitFor(() =>
-      expect(
-        calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
-      ).toHaveLength(1),
-    );
-    await screen.findByText('Allocated');
-    fireEvent.change(
-      within(contributions).getByLabelText('Contribution from date'),
-      {
-        target: { value: '2026-08-01' },
-      },
-    );
-    version = 2;
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await within(contributions).findAllByText('8.00 USD');
-    expect(
-      within(contributions).getByLabelText('Contribution from date'),
-    ).toHaveValue('2026-08-01');
-    expect(
-      within(contributions).getByText(/Showing 2026-09-01 to 2026-10-01/),
-    ).toBeInTheDocument();
-  });
-
-  it('refreshes spending and contributions when a different member unshares a previously visible expense', async () => {
-    const remainingId = '40000000-0000-4000-8000-000000000009';
-    let shared = true;
-    renderSection(
-      {
-        transactionsGet: (view) =>
-          transactionPage(
-            view === 'OWN'
-              ? []
-              : [
-                  householdExpense({
-                    ownerUserId: MEMBER_B,
-                    description: 'Revoke elsewhere',
-                    money: { amount: '-4.00', currency: 'USD' },
-                  }),
-                  householdExpense({
-                    id: remainingId,
-                    ownerUserId: MEMBER_B,
-                    description: 'Still shared',
-                    money: { amount: '-5.00', currency: 'USD' },
-                  }),
-                ].filter((entry) => shared || entry.id !== EXPENSE_ID),
-          ),
-        summaryGet: (from, to) =>
-          jsonResponse({
-            from,
-            to,
-            reportingTimeZone: 'Etc/UTC',
-            currencies: [
-              {
-                currency: 'USD',
-                expenseTotal: shared ? '9.00' : '5.00',
-                refundTotal: '0.00',
-                netSpending: shared ? '9.00' : '5.00',
-                incomeTotal: '0.00',
-              },
-            ],
-          }),
-        contributionGet: (from, to, currency) =>
-          jsonResponse({
-            from,
-            to,
-            currency,
-            reportingTimeZone: 'Etc/UTC',
-            snapshot: (shared ? 'a' : 'b').repeat(64),
-            totals: {
-              expenseTotal: shared ? '9.00' : '5.00',
-              refundTotal: '0.00',
-              netSpending: shared ? '9.00' : '5.00',
-              allocatedCostTotal: '0.00',
-              unallocatedNet: shared ? '9.00' : '5.00',
-            },
-            items: [
-              {
-                userId: MEMBER_B,
-                membershipStatus: 'CURRENT',
-                expensePaid: shared ? '9.00' : '5.00',
-                refundReceived: '0.00',
-                netPaid: shared ? '9.00' : '5.00',
-                allocatedCost: '0.00',
-              },
-            ],
-            limit: 50,
-            offset: 0,
-            hasMore: false,
-          }),
-      },
-      { nowProvider: () => new Date('2026-09-17T12:00:00Z') },
-    );
-    const contributions = screen.getByRole('region', {
-      name: 'Period contributions',
-    });
-    const spending = screen.getByRole('region', { name: 'Household spending' });
-    await within(contributions).findAllByText('9.00 USD');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await screen.findByText('Revoke elsewhere');
-    await screen.findByText('Still shared');
-    fireEvent.change(
-      within(contributions).getByLabelText('Contribution from date'),
-      {
-        target: { value: '2026-08-01' },
-      },
-    );
-    shared = false;
-    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole('radio', { name: 'Household feed' }),
-      ).toBeEnabled(),
-    );
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await waitFor(() =>
-      expect(screen.queryByText('Revoke elsewhere')).not.toBeInTheDocument(),
-    );
-    await within(contributions).findAllByText('5.00 USD');
-    await within(spending).findAllByText('5.00 USD');
-    expect(
-      within(contributions).getByLabelText('Contribution from date'),
-    ).toHaveValue('2026-08-01');
-    expect(
-      within(contributions).getByText(/Showing 2026-09-01 to 2026-10-01/),
-    ).toBeInTheDocument();
-  });
-
-  it('coalesces two known expenses changed in one authorized feed commit into one balances refresh', async () => {
-    const otherId = '40000000-0000-4000-8000-000000000009';
-    let version = 1;
-    const { calls } = renderSection({
-      transactionsGet: () =>
-        transactionPage([
-          householdExpense({ version }),
-          householdExpense({
-            id: otherId,
-            description: 'Other expense',
-            version,
-          }),
-        ]),
-      allocationsGet: (id) =>
-        jsonResponse(
-          activeAllocation({
-            transactionId: id,
-            transactionVersion: version,
-          }),
-        ),
-    });
-    await screen.findByText('Groceries');
-    await screen.findByText('Other expense');
-    await waitFor(() =>
-      expect(screen.getAllByText('Allocated')).toHaveLength(2),
-    );
-    expect(balanceCalls(calls)).toHaveLength(1);
-    version = 2;
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await waitFor(() => expect(balanceCalls(calls)).toHaveLength(2));
-    await waitFor(() =>
-      expect(
-        calls.filter(({ url }) => url.endsWith('/allocation')),
-      ).toHaveLength(4),
-    );
-    expect(balanceCalls(calls)).toHaveLength(2);
-  });
-
-  it('does not refresh balances for a version advance before an allocation is first known', async () => {
-    let version = 1;
-    let reads = 0;
-    let finishInitial: ((response: Response) => void) | undefined;
-    const { calls } = renderSection({
-      transactionsGet: () => transactionPage([householdExpense({ version })]),
-      allocationsGet: () => {
-        reads += 1;
-        if (reads === 1)
-          return new Promise<Response>((resolve) => {
-            finishInitial = resolve;
-          });
-        return jsonResponse(activeAllocation({ transactionVersion: version }));
-      },
-    });
-    await screen.findByText('Groceries');
-    await waitFor(() => expect(finishInitial).toBeDefined());
-    expect(balanceCalls(calls)).toHaveLength(1);
-    version = 2;
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await waitFor(() => expect(reads).toBe(2));
-    await screen.findByText('Allocated');
-    expect(balanceCalls(calls)).toHaveLength(1);
-    await act(async () => {
-      finishInitial!(jsonResponse(activeAllocation({ transactionVersion: 1 })));
-    });
-    expect(screen.getByText('Allocated')).toBeInTheDocument();
-    expect(balanceCalls(calls)).toHaveLength(1);
-  });
-
-  it('refreshes again for a newer external refund while the previous allocation and balances reads are pending', async () => {
-    let version = 1;
-    let allocationReads = 0;
-    let balanceReads = 0;
-    let finishOldAllocation: ((response: Response) => void) | undefined;
-    let finishOldBalances: ((response: Response) => void) | undefined;
-    const balanceResponse = (amount: string) =>
-      jsonResponse({
-        currencies: [
-          {
-            currency: 'USD',
-            balances: [
-              { userId: ACTOR_ID, membershipStatus: 'CURRENT', amount },
-              {
-                userId: MEMBER_B,
-                membershipStatus: 'CURRENT',
-                amount: `-${amount}`,
-              },
-            ],
-          },
-        ],
-      });
-    const { calls } = renderSection({
-      transactionsGet: () => transactionPage([householdExpense({ version })]),
-      allocationsGet: () => {
-        allocationReads += 1;
-        if (allocationReads === 3)
-          return new Promise<Response>((resolve) => {
-            finishOldAllocation = resolve;
-          });
-        if (allocationReads === 4)
-          return jsonResponse(
-            activeAllocation({
-              transactionVersion: 3,
-              impact: {
-                cumulativeRefundAmount: { amount: '3.00', currency: 'USD' },
-                payerCredit: { amount: '7.00', currency: 'USD' },
-                participants: [
-                  {
-                    userId: ACTOR_ID,
-                    cumulativeRefundShare: { amount: '1.00', currency: 'USD' },
-                    remainingObligation: { amount: '2.34', currency: 'USD' },
-                  },
-                  {
-                    userId: MEMBER_B,
-                    cumulativeRefundShare: { amount: '1.00', currency: 'USD' },
-                    remainingObligation: { amount: '2.33', currency: 'USD' },
-                  },
-                  {
-                    userId: MEMBER_C,
-                    cumulativeRefundShare: { amount: '1.00', currency: 'USD' },
-                    remainingObligation: { amount: '2.33', currency: 'USD' },
-                  },
-                ],
-              },
-            }),
-          );
-        return jsonResponse(activeAllocation());
-      },
-      balancesGet: () => {
-        balanceReads += 1;
-        if (balanceReads === 2)
-          return new Promise<Response>((resolve) => {
-            finishOldBalances = resolve;
-          });
-        return balanceResponse(balanceReads === 1 ? '6.66' : '4.66');
-      },
-    });
-    const balances = screen.getByRole('region', { name: 'Member balances' });
-    await within(balances).findByText('6.66 USD');
-    await screen.findByText('Allocated');
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Allocation for Groceries' }),
-    );
-    const panel = await screen.findByRole('group', {
-      name: 'Allocation for Groceries',
-    });
-    await within(panel).findByText(/Cumulative posted refunds: 0.00 USD/);
-    expect(allocationReads).toBe(2);
-    expect(balanceReads).toBe(1);
-
-    version = 2;
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await waitFor(() => expect(finishOldAllocation).toBeDefined());
-    await waitFor(() => expect(finishOldBalances).toBeDefined());
-    expect(
-      within(panel).queryByText(/Cumulative posted refunds: 0.00 USD/),
-    ).toBeNull();
-    version = 3;
-    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
-    await waitFor(() => expect(allocationReads).toBe(4));
-    await within(balances).findByText('4.66 USD');
-    await within(panel).findByText(/Cumulative posted refunds: 3.00 USD/);
-    expect(balanceCalls(calls)).toHaveLength(3);
-
-    await act(async () => {
-      finishOldAllocation!(
-        jsonResponse(activeAllocation({ transactionVersion: 2 })),
-      );
-      finishOldBalances!(balanceResponse('5.34'));
-    });
-    expect(within(balances).getByText('4.66 USD')).toBeInTheDocument();
-    expect(within(balances).queryByText('5.34 USD')).toBeNull();
-    expect(
-      within(panel).getByText(/Cumulative posted refunds: 3.00 USD/),
-    ).toBeInTheDocument();
-    expect(
-      within(panel).queryByText(/Cumulative posted refunds: 0.00 USD/),
-    ).toBeNull();
-
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole('radio', { name: 'My transactions' }),
-      ).toBeEnabled(),
-    );
-    version = 2;
-    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole('radio', { name: 'Household feed' }),
-      ).toBeEnabled(),
-    );
-    expect(balanceCalls(calls)).toHaveLength(3);
-    expect(allocationReads).toBe(4);
   });
 
   it('reconciles cached refund impact on a newer background feed without probing unchanged rows', async () => {
@@ -4686,132 +4292,6 @@ describe('allocations', () => {
     expect(
       calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
     ).toHaveLength(3);
-  });
-
-  it('rechecks a cached none only after a newer expense version reveals an external allocation', async () => {
-    const otherId = '40000000-0000-4000-8000-000000000009';
-    let version = 1;
-    let created = false;
-    const { calls } = renderSection({
-      transactionsGet: () =>
-        transactionPage([
-          householdExpense({ version }),
-          householdExpense({ id: otherId, description: 'Other', version: 1 }),
-        ]),
-      allocationsGet: (id) =>
-        id === EXPENSE_ID && created
-          ? jsonResponse(activeAllocation({ transactionVersion: 2 }))
-          : allocationNotFound(),
-      balancesGet: () =>
-        jsonResponse(
-          created
-            ? {
-                currencies: [
-                  {
-                    currency: 'USD',
-                    balances: [
-                      {
-                        userId: ACTOR_ID,
-                        membershipStatus: 'CURRENT',
-                        amount: '6.66',
-                      },
-                      {
-                        userId: MEMBER_B,
-                        membershipStatus: 'CURRENT',
-                        amount: '-6.66',
-                      },
-                    ],
-                  },
-                ],
-              }
-            : { currencies: [] },
-        ),
-    });
-    await screen.findByText('Groceries');
-    const reads = (id: string) =>
-      calls.filter(({ url }) => url.endsWith(`${id}/allocation`)).length;
-    await waitFor(() => expect(reads(EXPENSE_ID)).toBe(1));
-    await waitFor(() => expect(reads(otherId)).toBe(1));
-    const balances = screen.getByRole('region', { name: 'Member balances' });
-    await within(balances).findByRole('status');
-    expect(balanceCalls(calls)).toHaveLength(1);
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole('radio', { name: 'My transactions' }),
-      ).toBeEnabled(),
-    );
-    expect(reads(EXPENSE_ID)).toBe(1);
-    expect(balanceCalls(calls)).toHaveLength(1);
-    created = true;
-    version = 2;
-    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
-    await waitFor(() => expect(reads(EXPENSE_ID)).toBe(2));
-    expect(reads(otherId)).toBe(1);
-    expect(await screen.findByText('Allocated')).toBeInTheDocument();
-    await within(balances).findByText('6.66 USD');
-    expect(balanceCalls(calls)).toHaveLength(2);
-    fireEvent.click(
-      screen.getByRole('button', { name: 'Allocation for Groceries' }),
-    );
-    const panel = await screen.findByRole('group', {
-      name: 'Allocation for Groceries',
-    });
-    await within(panel).findByText(/Cumulative posted refunds: 0.00 USD/);
-    expect(
-      within(panel).queryByRole('button', { name: 'Create allocation' }),
-    ).toBeNull();
-  });
-
-  it('refreshes balances after a newer source revokes its active allocation even when the impact probe returns 404', async () => {
-    let version = 1;
-    const { calls } = renderSection({
-      transactionsGet: () => transactionPage([householdExpense({ version })]),
-      allocationsGet: () =>
-        version === 1 ? jsonResponse(activeAllocation()) : allocationNotFound(),
-      balancesGet: () =>
-        jsonResponse(
-          version === 1
-            ? {
-                currencies: [
-                  {
-                    currency: 'USD',
-                    balances: [
-                      {
-                        userId: ACTOR_ID,
-                        membershipStatus: 'CURRENT',
-                        amount: '6.66',
-                      },
-                      {
-                        userId: MEMBER_B,
-                        membershipStatus: 'CURRENT',
-                        amount: '-6.66',
-                      },
-                    ],
-                  },
-                ],
-              }
-            : { currencies: [] },
-        ),
-    });
-    const balances = screen.getByRole('region', { name: 'Member balances' });
-    await within(balances).findByText('6.66 USD');
-    await screen.findByText('Groceries');
-    await screen.findByText('Allocated');
-    await waitFor(() =>
-      expect(
-        calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
-      ).toHaveLength(1),
-    );
-    version = 2;
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
-    await within(balances).findByRole('status');
-    expect(balanceCalls(calls)).toHaveLength(2);
-    await waitFor(() =>
-      expect(
-        calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
-      ).toHaveLength(2),
-    );
   });
 
   it('reconciles an authorized off-page source detail without restoring impact from a late read', async () => {
@@ -5495,7 +4975,7 @@ describe('allocations', () => {
     expect(allocationPostCalls(calls)).toHaveLength(0);
   });
 
-  it('creates with a fresh key, exact sorted participants, and refreshes balances', async () => {
+  it('creates with a fresh key and exact sorted participants', async () => {
     const calls = renderSection({
       transactionsGet: () => transactionPage([householdExpense()]),
       allocationsGet: () => allocationNotFound(),
@@ -5542,10 +5022,6 @@ describe('allocations', () => {
         'Allocation recorded in participant order: 3.34 USD, 3.33 USD, 3.33 USD. The expense version is now 1.',
       ),
     ).toBeInTheDocument();
-    // The derived balances and both feeds refresh after creation.
-    await waitFor(() =>
-      expect(balanceCalls(calls).length).toBeGreaterThanOrEqual(2),
-    );
   });
 
   it('retains the exact request for unknown outcomes and retries the same key', async () => {
@@ -5809,12 +5285,8 @@ describe('allocations', () => {
         'Allocation revoked. Member balances no longer include this expense; the recorded shares stay retained on the server. A new allocation needs a fresh request.',
       ),
     ).toBeInTheDocument();
-    // The chip cleared and balances refreshed.
     expect(screen.queryByText('Allocated')).toBeNull();
-    await waitFor(() =>
-      expect(balanceCalls(calls).length).toBeGreaterThanOrEqual(3),
-    );
-    // The revoke patch carried the expense version and only REVOKED.
+    // The revoke request includes only the version and revoked status.
     const revokePatches = calls.filter(
       ({ url, init }) =>
         init?.method === 'PATCH' && url.endsWith('/allocation'),
@@ -5981,13 +5453,13 @@ describe('allocations', () => {
     ).toHaveLength(0);
   });
 
-  it('reconciles the allocation and balances after the expense void succeeds', async () => {
-    const calls = renderSection({
+  it('reconciles the allocation after the expense void succeeds', async () => {
+    renderSection({
       transactionsGet: () => transactionPage([householdExpense()]),
       allocationsGet: () => jsonResponse(activeAllocation()),
       transactionsPatch: () =>
         jsonResponse(householdExpense({ status: 'VOIDED', version: 1 })),
-    }).calls;
+    });
     await screen.findByText('Groceries');
     fireEvent.click(screen.getByRole('button', { name: 'Void Groceries' }));
     fireEvent.click(
@@ -6000,10 +5472,6 @@ describe('allocations', () => {
     ).toBeInTheDocument();
     // The deactivated allocation no longer shows on the voided entry.
     await waitFor(() => expect(screen.queryByText('Allocated')).toBeNull());
-    // Balances refresh after the void.
-    await waitFor(() =>
-      expect(balanceCalls(calls).length).toBeGreaterThanOrEqual(2),
-    );
   });
 
   it('clears only the affected allocation state on a stale not-found probe', async () => {
@@ -6186,8 +5654,8 @@ describe('allocations', () => {
     }
   });
 
-  it('refreshes derived balances after a posted refund on an allocated expense', async () => {
-    const calls = renderSection({
+  it('records a posted refund on an allocated expense', async () => {
+    renderSection({
       accountsGet: () => accountPage([account({ currency: 'USD' })]),
       transactionsGet: () =>
         transactionPage([
@@ -6211,11 +5679,8 @@ describe('allocations', () => {
           }),
           201,
         ),
-    }).calls;
+    });
     await screen.findByText('Groceries');
-    await waitFor(() =>
-      expect(balanceCalls(calls).length).toBeGreaterThanOrEqual(1),
-    );
     // Record a refund against the allocated expense.
     fireEvent.click(
       screen.getByRole('button', { name: 'Record a refund for Groceries' }),
@@ -6228,10 +5693,6 @@ describe('allocations', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Record transaction' }));
     await screen.findByText(/Refund recorded: 1.00 USD/);
-    // The balances section refreshed after the refund.
-    await waitFor(() =>
-      expect(balanceCalls(calls).length).toBeGreaterThanOrEqual(2),
-    );
   });
 
   it('clears retained allocation state when the session expires mid-request', async () => {
@@ -6310,7 +5771,7 @@ describe('allocations', () => {
     ).toBeInTheDocument();
   });
 
-  it('refreshes balances and feeds after a create with an unknown outcome', async () => {
+  it('refreshes the feed after a create with an unknown outcome', async () => {
     const { calls } = renderSection({
       accountsGet: () => accountPage([account()]),
       transactionsGet: () => transactionPage([]),
@@ -6321,7 +5782,6 @@ describe('allocations', () => {
         ),
     });
     await screen.findByText('No transactions yet.');
-    const balancesBefore = balanceCalls(calls).length;
     await fillAndSubmit({ date: FIXED_DATE });
     expect(
       await screen.findByText(
@@ -6333,11 +5793,6 @@ describe('allocations', () => {
     expect(
       screen.getByRole('button', { name: 'Retry same request' }),
     ).toBeInTheDocument();
-    // A committed create changes derived balances: they refetch, and the
-    // loaded feeds reload so a committed entry is never left unlisted.
-    await waitFor(() =>
-      expect(balanceCalls(calls).length).toBeGreaterThan(balancesBefore),
-    );
     const listReloads = calls.filter(
       ({ url, init }) =>
         init?.method === 'GET' && url.includes('view=OWN&status=ALL'),
@@ -6345,7 +5800,7 @@ describe('allocations', () => {
     expect(listReloads.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('refreshes balances after an allocation create with an unknown outcome', async () => {
+  it('retains allocation retry through an unknown create outcome', async () => {
     const { calls } = renderSection({
       transactionsGet: () => transactionPage([householdExpense()]),
       allocationsGet: () => allocationNotFound(),
@@ -6366,7 +5821,6 @@ describe('allocations', () => {
     await waitFor(() =>
       expect(within(panel).getAllByRole('checkbox').length).toBe(3),
     );
-    const balancesBefore = balanceCalls(calls).length;
     fireEvent.click(
       within(panel).getByRole('button', { name: 'Preview current allocation' }),
     );
@@ -6379,16 +5833,12 @@ describe('allocations', () => {
         'The allocation request has an unknown outcome. Retry the same request safely, or refresh the list first.',
       ),
     ).toBeInTheDocument();
-    // The durable block keeps the same-key retry available while both
-    // feeds and balances refresh against a possibly committed outcome.
+    // The durable same-key retry remains available during the feed refresh.
     expect(
       screen.getByText(
         /An earlier allocation request still has an unknown result/,
       ),
     ).toBeInTheDocument();
-    await waitFor(() =>
-      expect(balanceCalls(calls).length).toBeGreaterThan(balancesBefore),
-    );
     expect(
       calls.filter(
         ({ url, init }) =>
@@ -6397,8 +5847,8 @@ describe('allocations', () => {
     ).toBeGreaterThanOrEqual(2);
   });
 
-  it('refreshes balances after an expense void with an unknown outcome', async () => {
-    const { calls } = renderSection({
+  it('keeps an unknown void outcome visible until the feed refreshes', async () => {
+    renderSection({
       transactionsGet: () => transactionPage([householdExpense()]),
       allocationsGet: () => jsonResponse(activeAllocation()),
       transactionsPatch: () => Promise.reject(new TypeError('Failed to fetch')),
@@ -6414,11 +5864,6 @@ describe('allocations', () => {
         'The void has an unknown outcome. Refresh the list before retrying.',
       ),
     ).toBeInTheDocument();
-    // The committed void deactivates the allocation and changes balances:
-    // both refresh so nothing stale stays presented as current.
-    await waitFor(() =>
-      expect(balanceCalls(calls).length).toBeGreaterThanOrEqual(2),
-    );
   });
 
   it('returns the allocation cache to unknown when a revoke has an unknown outcome', async () => {
@@ -6459,9 +5904,6 @@ describe('allocations', () => {
       ({ url, init }) => url.endsWith('/allocation') && init?.method === 'GET',
     );
     expect(allocationGets.length).toBeGreaterThanOrEqual(3);
-    await waitFor(() =>
-      expect(balanceCalls(calls).length).toBeGreaterThanOrEqual(2),
-    );
   });
 
   it('returns the allocation cache to unknown on stale revoke versions', async () => {
@@ -6780,7 +6222,7 @@ describe('reporting zone entry defaults', () => {
   });
 
   it('preserves a user-edited entry date across a reporting zone change', async () => {
-    renderSection(
+    const { showPage } = renderSection(
       {
         settingsGet: () =>
           jsonResponse({ reportingTimeZone: 'Etc/UTC', version: 0 }),
@@ -6797,6 +6239,7 @@ describe('reporting zone entry defaults', () => {
     );
     await waitFor(() => expect(entryDate().value).toBe('2026-09-30'));
     fireEvent.change(entryDate(), { target: { value: '2026-08-15' } });
+    showPage('overview');
     // Change the zone through the owner settings form.
     const settings = await screen.findByTestId('reporting-settings-section');
     fireEvent.change(within(settings).getByLabelText('Reporting time zone'), {
@@ -6810,6 +6253,7 @@ describe('reporting zone entry defaults', () => {
         /Reporting time zone updated to Pacific\/Kiritimati/,
       ),
     ).toBeInTheDocument();
+    showPage('transactions');
     // The edited draft survives the zone change instead of being recomputed.
     expect(entryDate().value).toBe('2026-08-15');
   });
@@ -7467,8 +6911,6 @@ describe('explicit future-match learning', () => {
   const RULE_POST_SUFFIX = '/categorization-rule';
   const rulePostCalls = (calls: Call[]) =>
     calls.filter(({ url }) => url.endsWith(RULE_POST_SUFFIX));
-  const rulesGetCalls = (calls: Call[]) =>
-    calls.filter(({ url }) => url.includes('/categorization-rules?'));
 
   const idempotencyKeyOf = (call: Call | undefined): string | undefined =>
     (call?.init?.headers as Record<string, string> | undefined)?.[
@@ -7589,11 +7031,6 @@ describe('explicit future-match learning', () => {
       expectedTransactionVersion: 0,
     });
     expect(idempotencyKeyOf(posts[0])).toMatch(/^[0-9a-f-]{36}$/);
-    // The committed rule converges the private list, and the spent capability
-    // removes the offer instead of inviting a duplicate.
-    await waitFor(() =>
-      expect(rulesGetCalls(calls).length).toBeGreaterThanOrEqual(2),
-    );
     await waitFor(() =>
       expect(
         within(panel).queryByRole('button', { name: 'Use for future matches' }),
@@ -7662,7 +7099,7 @@ describe('explicit future-match learning', () => {
 
   it('explains an existing active rule for the merchant and clears the offer', async () => {
     let eligible = true;
-    const { calls } = renderSection({
+    const { calls, showPage } = renderSection({
       transactionsGet: () =>
         transactionPage([transaction({ category: 'GROCERIES' })]),
       transactionGet: () =>
@@ -7710,8 +7147,8 @@ describe('explicit future-match learning', () => {
         within(panel).queryByRole('button', { name: 'Use for future matches' }),
       ).toBeNull(),
     );
-    // The owner's own existing rule is where it is managed.
-    expect(screen.getByText('Corner Market')).toBeInTheDocument();
+    showPage('rules');
+    expect(await screen.findByText('Corner Market')).toBeInTheDocument();
   });
 
   it('refuses a stale learn attempt, closes the panel, and refreshes', async () => {
@@ -7796,8 +7233,6 @@ describe('explicit future-match learning', () => {
         ),
     });
     await screen.findByText('Groceries');
-    // The private rule list is loaded before the loss.
-    expect(await screen.findByText('Corner Market')).toBeInTheDocument();
     const { offer } = await openEligibleDetail();
     fireEvent.click(offer);
 
@@ -7808,12 +7243,6 @@ describe('explicit future-match learning', () => {
     expect(
       screen.queryByRole('group', { name: 'Details for Groceries' }),
     ).toBeNull();
-    await waitFor(() => expect(screen.queryByText('Corner Market')).toBeNull());
-    expect(
-      await screen.findByText(
-        'Your rules are not loaded. Refresh the household to load them again.',
-      ),
-    ).toBeInTheDocument();
   });
 
   it('never offers the action for another member’s shared entry', async () => {
@@ -7848,106 +7277,28 @@ describe('explicit future-match learning', () => {
 });
 
 describe('category review queue integration', () => {
-  const EDIT_CATEGORY = `#edit-transaction-category-${EXPENSE_ID}`;
   const NEW_DESCRIPTION = `#new-transaction-description-${HOUSEHOLD.id}`;
 
-  it('exposes the owner-private review count as one entry point without probing provenance per row', async () => {
-    const { calls } = renderSection({
-      accountsGet: () => accountPage([account()]),
+  it('fetches private suggestions only after opening the reviews destination', async () => {
+    const { calls, showPage } = renderSection({
       transactionsGet: () => transactionPage([transaction()]),
       reviewsGet: () => reviewPage([review()], 1),
     });
     await screen.findByText('Groceries');
-
+    expect(reviewCalls(calls)).toHaveLength(0);
+    showPage('reviews');
     expect(
       await screen.findByText('1 suggestion is waiting for your decision.'),
     ).toBeInTheDocument();
-    const entry = screen.getByRole('button', {
-      name: 'Review suggested categories (1 waiting)',
-    });
-    expect(entry).toHaveAttribute(
-      'aria-controls',
-      `finance-reviews-queue-${HOUSEHOLD.id}`,
-    );
-    // A visible feed row is never a review or provenance probe.
-    expect(categorizationCalls(calls)).toHaveLength(0);
-    expect(reviewCalls(calls)).toHaveLength(1);
-
-    fireEvent.click(entry);
     expect(
-      await screen.findByText(/Recorded: Uncategorized/),
-    ).toBeInTheDocument();
-    expect(categorizationCalls(calls)).toHaveLength(0);
-  });
-
-  it('refreshes the private review count after a committed category correction', async () => {
-    const { calls } = renderSection({
-      accountsGet: () => accountPage([account()]),
-      transactionsGet: () => transactionPage([transaction()]),
-      reviewsGet: () => reviewPage([review()], 1),
-      transactionsPatch: () =>
-        jsonResponse(transaction({ category: 'DINING', version: 1 })),
-    });
-    await screen.findByText('Groceries');
-    await waitFor(() => expect(reviewCalls(calls)).toHaveLength(1));
-
-    fireEvent.click(screen.getByRole('button', { name: 'Edit Groceries' }));
-    fireEvent.change(
-      await screen.findByLabelText('Category', { selector: EDIT_CATEGORY }),
-      { target: { value: 'DINING' } },
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Save correction' }));
-
-    expect(
-      await screen.findByText(/Transaction corrected/),
-    ).toBeInTheDocument();
-    await waitFor(() =>
-      expect(reviewCalls(calls).length).toBeGreaterThanOrEqual(2),
-    );
-  });
-
-  it('refreshes the private review count after a void', async () => {
-    const { calls } = renderSection({
-      accountsGet: () => accountPage([account()]),
-      transactionsGet: () => transactionPage([transaction()]),
-      reviewsGet: () => reviewPage([review()], 1),
-      transactionsPatch: () =>
-        jsonResponse(transaction({ status: 'VOIDED', version: 1 })),
-    });
-    await screen.findByText('Groceries');
-    await waitFor(() => expect(reviewCalls(calls)).toHaveLength(1));
-
-    fireEvent.click(screen.getByRole('button', { name: 'Void Groceries' }));
-    fireEvent.click(
-      await screen.findByRole('button', { name: 'Void transaction' }),
-    );
-
-    expect(await screen.findByText(/Transaction voided/)).toBeInTheDocument();
-    await waitFor(() =>
-      expect(reviewCalls(calls).length).toBeGreaterThanOrEqual(2),
-    );
-  });
-
-  it('refreshes the private review count when a sibling connected admission commits', async () => {
-    const { calls, rerenderWithLedgerSignal } = renderSection({
-      accountsGet: () => accountPage([account()]),
-      transactionsGet: () => transactionPage([transaction()]),
-      reviewsGet: () => reviewPage([review()], 1),
-    });
-    await screen.findByText('Groceries');
-    await waitFor(() => expect(reviewCalls(calls)).toHaveLength(1));
-
-    rerenderWithLedgerSignal(1);
-
-    await waitFor(() =>
-      expect(reviewCalls(calls).length).toBeGreaterThanOrEqual(2),
-    );
+      screen.queryByRole('button', { name: 'Edit Groceries' }),
+    ).not.toBeInTheDocument();
   });
 
   it('converges the feed, open detail, and provenance after a resolution while preserving the entry draft', async () => {
     let committedCategory: string | null = null;
     let committedVersion = 0;
-    const { calls } = renderSection({
+    const { calls, showPage } = renderSection({
       accountsGet: () => accountPage([account()]),
       transactionsGet: () =>
         transactionPage([
@@ -8008,8 +7359,11 @@ describe('category review queue integration', () => {
     });
     expect(within(panel).getByText('Uncategorized')).toBeInTheDocument();
 
+    showPage('reviews');
     fireEvent.click(
-      screen.getByRole('button', { name: /Review suggested categories/ }),
+      await screen.findByRole('button', {
+        name: /Review suggested categories/,
+      }),
     );
     fireEvent.click(
       await screen.findByRole('button', {
@@ -8019,8 +7373,14 @@ describe('category review queue integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save decision' }));
 
     expect(await screen.findByText(/Decision saved/)).toBeInTheDocument();
+    showPage('transactions');
+    const restoredPanel = await screen.findByRole('group', {
+      name: 'Details for Groceries',
+    });
     await waitFor(() =>
-      expect(within(panel).getByText('Food shopping')).toBeInTheDocument(),
+      expect(
+        within(restoredPanel).getByText('Food shopping'),
+      ).toBeInTheDocument(),
     );
     // The committed decision is re-read as owner-only provenance, and the
     // feed was reloaded from the server.

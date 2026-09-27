@@ -258,7 +258,7 @@ function renderSection(routes: Routes = {}) {
   const onHouseholdAccessChanged = vi.fn();
   const onAccountListCommitted = vi.fn();
   const onBankActivityChanged = vi.fn();
-  render(
+  const rendered = render(
     <FinancialConnectionsSection
       household={HOUSEHOLD}
       csrf={CSRF}
@@ -277,6 +277,20 @@ function renderSection(routes: Routes = {}) {
     onHouseholdAccessChanged,
     onAccountListCommitted,
     onBankActivityChanged,
+    rerenderActive: (active: boolean) =>
+      rendered.rerender(
+        <FinancialConnectionsSection
+          household={HOUSEHOLD}
+          active={active}
+          csrf={CSRF}
+          onCsrfRefreshed={onCsrfRefreshed}
+          onSessionExpired={onSessionExpired}
+          onHouseholdAccessChanged={onHouseholdAccessChanged}
+          authorityConfirmed
+          onAccountListCommitted={onAccountListCommitted}
+          onBankActivityChanged={onBankActivityChanged}
+        />,
+      ),
   };
 }
 
@@ -497,6 +511,45 @@ describe('new link flow', () => {
     expect(completeCalls[1]?.body).toEqual({
       publicToken: 'public-sandbox-1',
     });
+  });
+  it('retains completion key and memory-only token while navigating during POST', async () => {
+    const plaid = installFakePlaid();
+    let settle: ((response: Response) => void) | undefined;
+    let submissions = 0;
+    const { calls, rerenderActive } = renderSection({
+      connectionsGet: () =>
+        jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false }),
+      startPost: () => jsonResponse(attempt(), 201),
+      completePost: () =>
+        ++submissions === 1
+          ? new Promise<Response>((resolve) => {
+              settle = resolve;
+            })
+          : jsonResponse(operation({ state: 'SUCCEEDED' }), 202),
+    });
+    await screen.findByText(/No bank connections yet/);
+    fireEvent.click(screen.getByRole('button', { name: 'Link a bank' }));
+    await waitFor(() => expect(plaid.open).toHaveBeenCalledTimes(1));
+    plaid.succeed('public-sandbox-1');
+    const suffix = `/connection-link-attempts/${ATTEMPT_ID}/complete`;
+    await waitFor(() => expect(postsTo(calls, suffix)).toHaveLength(1));
+    rerenderActive(false);
+    settle?.(errorResponse('FINANCE_BUSY', 503));
+    rerenderActive(true);
+    expect(
+      screen.getByRole('button', { name: 'Resume bank step' }),
+    ).toBeDisabled();
+    plaid.succeed('different-public-token');
+    expect(postsTo(calls, suffix)).toHaveLength(1);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Retry completion' }),
+    );
+    await screen.findByText(/The bank connection is ready/);
+    const posts = postsTo(calls, suffix);
+    expect(posts).toHaveLength(2);
+    expect(posts[1]?.body).toEqual(posts[0]?.body);
+    expect(idempotencyKeyOf(posts[1])).toBe(idempotencyKeyOf(posts[0]));
+    expect(document.body.textContent).not.toContain('public-sandbox-1');
   });
 });
 
@@ -1076,6 +1129,48 @@ describe('durable reconnect requests', () => {
         ?.body,
     ).toEqual({});
   }, 15000);
+  it('retains the reconnect request when navigating during its POST', async () => {
+    const plaid = installFakePlaid();
+    let settle: ((response: Response) => void) | undefined;
+    let submissions = 0;
+    const { calls, rerenderActive } = renderSection({
+      connectionsGet: () =>
+        jsonResponse({
+          items: [connection()],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      reconnectPost: () =>
+        ++submissions === 1
+          ? new Promise<Response>((resolve) => {
+              settle = resolve;
+            })
+          : jsonResponse(
+              attempt({ flow: 'UPDATE', connectionId: CONNECTION_ID }),
+              201,
+            ),
+    });
+    await screen.findByText(/Active/);
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
+    await waitFor(() => expect(postsTo(calls, '/reconnect')).toHaveLength(1));
+    rerenderActive(false);
+    settle?.(errorResponse('FINANCE_BUSY', 503));
+    rerenderActive(true);
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Link a bank' })).toBeDisabled();
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Retry same reconnect request',
+      }),
+    );
+    await waitFor(() => expect(plaid.open).toHaveBeenCalledTimes(1));
+    const posts = postsTo(calls, '/reconnect');
+    expect(posts).toHaveLength(2);
+    expect(posts[1]?.body).toEqual(posts[0]?.body);
+    expect(idempotencyKeyOf(posts[1])).toBe(idempotencyKeyOf(posts[0]));
+  });
 });
 
 describe('durable disconnect requests', () => {
@@ -1198,12 +1293,58 @@ describe('durable disconnect requests', () => {
     );
     await screen.findAllByText(/Disconnecting/);
   }, 15000);
+  it('retains the disconnect request when navigating during its POST', async () => {
+    let settle: ((response: Response) => void) | undefined;
+    let submissions = 0;
+    const { calls, rerenderActive } = renderSection({
+      connectionsGet: () =>
+        jsonResponse({
+          items: [connection()],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      disconnectPost: () =>
+        ++submissions === 1
+          ? new Promise<Response>((resolve) => {
+              settle = resolve;
+            })
+          : jsonResponse(
+              operation({ operationType: 'DISCONNECT', state: 'SUCCEEDED' }),
+              202,
+            ),
+    });
+    await screen.findByText(/Active/);
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+    const confirm = await screen.findByRole('group', {
+      name: 'Confirm bank disconnection',
+    });
+    fireEvent.click(
+      within(confirm).getByRole('button', { name: 'Disconnect bank' }),
+    );
+    await waitFor(() => expect(postsTo(calls, '/disconnect')).toHaveLength(1));
+    rerenderActive(false);
+    settle?.(errorResponse('FINANCE_BUSY', 503));
+    rerenderActive(true);
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Link a bank' })).toBeDisabled();
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Retry same disconnect request',
+      }),
+    );
+    await waitFor(() => expect(postsTo(calls, '/disconnect')).toHaveLength(2));
+    const posts = postsTo(calls, '/disconnect');
+    expect(posts[1]?.body).toEqual(posts[0]?.body);
+    expect(idempotencyKeyOf(posts[1])).toBe(idempotencyKeyOf(posts[0]));
+  });
 });
 
 describe('selection replay', () => {
   it('replays the identical selection after an unknown outcome', async () => {
     let selects = 0;
-    const { calls } = renderSection({
+    const { calls, rerenderActive } = renderSection({
       connectionsGet: () =>
         jsonResponse({
           items: [connection()],
@@ -1248,6 +1389,14 @@ describe('selection replay', () => {
       screen.getByRole('button', { name: 'Save account selection' }),
     );
     await screen.findByText(/unknown outcome/);
+    rerenderActive(false);
+    expect(
+      screen.queryByRole('button', { name: 'Retry same selection' }),
+    ).not.toBeInTheDocument();
+    rerenderActive(true);
+    expect(
+      await screen.findByRole('button', { name: 'Retry same selection' }),
+    ).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole('button', { name: 'Retry same selection' }),
     );
@@ -1262,6 +1411,68 @@ describe('selection replay', () => {
     expect(idempotencyKeyOf(selectCalls[1])).toBe(
       idempotencyKeyOf(selectCalls[0]),
     );
+  });
+  it('replays the original selection key after navigating during its request', async () => {
+    let settle: ((response: Response) => void) | undefined;
+    let submissions = 0;
+    const { calls, rerenderActive } = renderSection({
+      connectionsGet: () =>
+        jsonResponse({
+          items: [connection()],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      accountsGet: () =>
+        jsonResponse({
+          items: [mapping()],
+          limit: 100,
+          offset: 0,
+          hasMore: false,
+        }),
+      selectPost: () => {
+        submissions += 1;
+        return submissions === 1
+          ? new Promise<Response>((resolve) => {
+              settle = resolve;
+            })
+          : jsonResponse({
+              connectionId: CONNECTION_ID,
+              version: 3,
+              accounts: [],
+            });
+      },
+    });
+    await screen.findByText(/Active/);
+    fireEvent.click(screen.getByRole('button', { name: 'Choose accounts' }));
+    await screen.findByText('Everyday Chequing');
+    fireEvent.click(screen.getByLabelText(/Everyday Chequing/));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Save account selection' }),
+    );
+    await waitFor(() =>
+      expect(postsTo(calls, '/account-selection')).toHaveLength(1),
+    );
+    rerenderActive(false);
+    settle?.(errorResponse('FINANCE_BUSY', 503));
+    rerenderActive(true);
+    expect(screen.getByLabelText(/Everyday Chequing/)).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Save account selection' }),
+    ).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeDisabled();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Save account selection' }),
+    );
+    expect(postsTo(calls, '/account-selection')).toHaveLength(1);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Retry same selection' }),
+    );
+    await screen.findByText(/Account admission paused/);
+    const posts = postsTo(calls, '/account-selection');
+    expect(posts).toHaveLength(2);
+    expect(posts[1]?.body).toEqual(posts[0]?.body);
+    expect(idempotencyKeyOf(posts[1])).toBe(idempotencyKeyOf(posts[0]));
   });
 });
 

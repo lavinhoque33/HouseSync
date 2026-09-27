@@ -82,20 +82,6 @@ p {
   stroke-linejoin: round;
 }
 
-.area-badge {
-  padding: 0.45rem 0.8rem;
-  border: 1px solid var(--color-line);
-  border-radius: 999px;
-  color: var(--color-muted);
-  font-size: 0.75rem;
-  font-weight: 650;
-}
-
-.intro {
-  padding-block: clamp(3.5rem, 9vw, 7rem);
-  max-width: 800px;
-}
-
 .eyebrow {
   color: var(--color-accent);
   font-size: 0.75rem;
@@ -114,27 +100,6 @@ h1 {
   overflow-wrap: break-word;
 }
 
-.intro-copy {
-  max-width: 570px;
-  margin-top: var(--space-3);
-  color: var(--color-muted);
-  font-size: 1.1rem;
-}
-
-.foundation {
-  display: grid;
-  gap: var(--space-4);
-  padding: var(--space-3);
-  background: var(--color-surface);
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius);
-}
-
-.foundation-copy {
-  align-self: center;
-  min-width: 0;
-}
-
 h2 {
   font-size: clamp(1.5rem, 3vw, 1.9rem);
   font-weight: 600;
@@ -144,71 +109,12 @@ h2 {
   overflow-wrap: break-word;
 }
 
-.foundation-copy > p:last-child {
-  max-width: 490px;
-  color: var(--color-muted);
-  overflow-wrap: break-word;
-}
-
-.health {
-  padding: var(--space-3);
-  background: var(--color-soft);
-  border-radius: 1rem;
-  min-width: 0;
-}
-
 h3 {
   font-size: 0.8rem;
   font-weight: 600;
   color: var(--color-muted);
   margin-bottom: var(--space-2);
   overflow-wrap: break-word;
-}
-
-.health > * {
-  min-width: 0;
-}
-
-.health-label {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-  font-weight: 700;
-  overflow-wrap: break-word;
-}
-
-.health-label > span:last-child {
-  min-width: 0;
-}
-
-.status-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--color-muted);
-}
-
-.status-dot--available {
-  background: var(--color-accent);
-}
-
-.status-dot--unavailable {
-  background: var(--color-warning);
-}
-
-.health-detail {
-  font-size: 0.875rem;
-  margin-top: var(--space-1);
-  overflow-wrap: break-word;
-}
-
-.health-note {
-  color: var(--color-muted);
-  font-size: 0.75rem;
-  margin-top: var(--space-3);
-  overflow-wrap: anywhere;
 }
 
 code {
@@ -1891,8 +1797,6 @@ code {
   }
 
   .shell,
-  .foundation,
-  .health,
   .auth,
   .auth-card,
   .household-card,
@@ -1999,11 +1903,6 @@ code {
 @media (min-width: 760px) {
   .shell {
     padding: var(--space-4);
-  }
-  .foundation {
-    grid-template-columns: 1.3fr 1fr;
-    padding: var(--space-4);
-    gap: var(--space-5);
   }
   .auth {
     padding: var(--space-4);
@@ -2269,6 +2168,15 @@ code {
   min-width: 0;
 }
 
+.bank-activity-controls {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 .bank-activity > * {
   min-width: 0;
   max-width: 100%;
@@ -2500,6 +2408,12 @@ code {
 
 .insights-summary-breakdown {
   min-width: 0;
+}
+
+.insights-summary .household-button {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .insights-summary .insights-scroll {
@@ -2866,4 +2780,165 @@ code {
     animation-duration: 0.01ms;
     transition-duration: 0.01ms;
   }
+}
+
+.site-header .identity {
+  color: inherit;
+  text-decoration: none;
+  min-height: 44px;
+}
+
+.page-intro {
+  padding-block: var(--space-3) var(--space-1);
+}
+
+.page-intro h1 {
+  font-size: clamp(1.8rem, 5vw, 3rem);
+}
+
+.page-intro p {
+  margin-top: var(--space-1);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.navigation-disclosure {
+  position: relative;
+  margin-left: auto;
+}
+
+.navigation-trigger {
+  display: grid;
+  place-items: center;
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid var(--color-line);
+  border-radius: 12px;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 1.1rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.navigation-panel {
+  position: absolute;
+  z-index: 20;
+  right: 0;
+  top: calc(100% + 0.5rem);
+  display: grid;
+  gap: 0.25rem;
+  width: min(20rem, calc(100vw - 3rem));
+  max-height: min(70vh, 34rem);
+  overflow: auto;
+  padding: 0.5rem;
+  border: 1px solid var(--color-line);
+  border-radius: 1rem;
+  background: var(--color-surface);
+  box-shadow: 0 12px 32px #203c3626;
+}
+
+.navigation-panel a,
+.home-actions a {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.6rem 0.8rem;
+  border-radius: 0.6rem;
+  color: var(--color-ink);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.navigation-panel a:hover,
+.navigation-panel a[aria-current='page'],
+.home-actions a:hover {
+  background: var(--color-soft);
+}
+
+.navigation-panel a:focus-visible,
+.home-actions a:focus-visible,
+.navigation-trigger:focus-visible,
+.site-header .identity:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.navigation-pages {
+  display: grid;
+  gap: 0.25rem;
+  border-top: 1px solid var(--color-line);
+  padding-top: 0.5rem;
+}
+
+.navigation-label {
+  padding: 0.25rem 0.8rem;
+  color: var(--color-muted);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.home-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.home-actions a {
+  border: 1px solid var(--color-line);
+}
+
+.household-page-navigation {
+  margin-block: var(--space-2);
+}
+
+.household-page-navigation summary,
+.household-page-link,
+.household-page-navigation a {
+  min-height: 44px;
+  padding: 0.65rem 0.8rem;
+  border-radius: 0.75rem;
+}
+
+.household-page-navigation summary {
+  cursor: pointer;
+  border: 1px solid var(--color-line);
+  font-weight: 700;
+}
+
+.household-page-navigation nav {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
+  gap: 0.25rem;
+  padding-block: 0.5rem;
+}
+
+.household-page-link,
+.household-page-navigation a {
+  display: inline-flex;
+  align-items: center;
+}
+
+.household-page-navigation a[aria-current='page'],
+.household-page-navigation a:hover {
+  background: var(--color-soft);
+}
+
+.household-page-navigation summary:focus-visible,
+.household-page-navigation a:focus-visible,
+.household-page-link:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
 }
