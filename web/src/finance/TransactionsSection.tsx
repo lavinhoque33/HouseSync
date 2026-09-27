@@ -41,6 +41,7 @@ import {
   type TransactionVisibility,
   type TransactionKind,
 } from '../auth/client';
+import { FilterBar } from '../ui/FilterBar';
 import {
   decodeMoneyAmount,
   encodeMoneyMagnitude,
@@ -524,7 +525,7 @@ export function TransactionsSection({
   const provenanceSeqRef = useRef(0);
   const ruleCreatingRef = useRef(false);
   const noticeRef = useRef<HTMLDivElement>(null);
-  const feedControlRef = useRef<HTMLInputElement>(null);
+  const feedFiltersRef = useRef<HTMLDivElement>(null);
   const topPagerRef = useRef<HTMLButtonElement>(null);
   const bottomPagerRef = useRef<HTMLButtonElement>(null);
   // A final page removes both pagers. Remember whether one held focus before
@@ -633,7 +634,9 @@ export function TransactionsSection({
     pendingPagerFocusRef.current = null;
     // A notice or a deliberate focus move must retain precedence.
     if (!notice && document.activeElement === document.body) {
-      feedControlRef.current?.focus();
+      feedFiltersRef.current
+        ?.querySelector<HTMLButtonElement>('.filter-trigger')
+        ?.focus();
     }
   });
 
@@ -1017,6 +1020,28 @@ export function TransactionsSection({
     // The new filter is passed explicitly because React has not rendered its
     // state update yet.
     reloadViews(['OWN'], categories === null, false, visibility);
+  }
+
+  function resetFeedFilters() {
+    if (
+      (activeView === 'OWN' && ownVisibility === null) ||
+      loading ||
+      creatingRef.current ||
+      updatingRef.current !== null ||
+      detailLoadingRef.current ||
+      pendingCreate !== null ||
+      pendingVoid !== null ||
+      pendingShare !== null ||
+      pendingRevoke !== null ||
+      !authorityConfirmed
+    )
+      return;
+    setActiveView('OWN');
+    setOwnVisibility(null);
+    setOwnTransactions(null);
+    setOwnHasMore(false);
+    setOwnNextOffset(0);
+    reloadViews(['OWN'], categories === null, false, null);
   }
 
   /**
@@ -3924,56 +3949,67 @@ export function TransactionsSection({
             and are never counted.
           </p>
 
-          <fieldset className="finance-feed-toggle">
-            <legend>Feed</legend>
-            <label className="finance-feed-option">
-              <input
-                type="radio"
-                ref={activeView === 'OWN' ? feedControlRef : undefined}
-                name={`transactions-feed-${household.id}`}
-                value="OWN"
-                checked={activeView === 'OWN'}
-                onChange={() => switchView('OWN')}
-                disabled={feedControlsDisabled}
-              />
-              <span>My transactions</span>
-            </label>
-            <label className="finance-feed-option">
-              <input
-                type="radio"
-                ref={activeView === 'HOUSEHOLD' ? feedControlRef : undefined}
-                name={`transactions-feed-${household.id}`}
-                value="HOUSEHOLD"
-                checked={activeView === 'HOUSEHOLD'}
-                onChange={() => switchView('HOUSEHOLD')}
-                disabled={feedControlsDisabled}
-              />
-              <span>Household feed</span>
-            </label>
-          </fieldset>
-          {activeView === 'OWN' && (
-            <fieldset className="finance-feed-toggle">
-              <legend>My transactions visibility</legend>
-              {(
-                [
-                  [null, 'All'],
-                  ['PRIVATE', 'Private'],
-                  ['HOUSEHOLD', 'Shared by me'],
-                ] as const
-              ).map(([visibility, label]) => (
-                <label className="finance-feed-option" key={label}>
+          <div ref={feedFiltersRef} className="finance-feed-filters">
+            <FilterBar
+              title="Transaction feed filters"
+              summary={`${activeView === 'OWN' ? 'My transactions' : 'Household feed'} · ${activeView === 'OWN' ? (ownVisibility === null ? 'All' : ownVisibility === 'PRIVATE' ? 'Private' : 'Shared by me') : 'Shared entries'}`}
+              activeCount={
+                (activeView === 'HOUSEHOLD' ? 1 : 0) +
+                (ownVisibility !== null ? 1 : 0)
+              }
+              disabled={feedControlsDisabled}
+              onReset={resetFeedFilters}
+            >
+              <fieldset className="finance-feed-toggle">
+                <legend>Feed</legend>
+                <label className="finance-feed-option">
                   <input
                     type="radio"
-                    name={`transactions-visibility-${household.id}`}
-                    checked={ownVisibility === visibility}
-                    onChange={() => switchVisibility(visibility)}
+                    name={`transactions-feed-${household.id}`}
+                    value="OWN"
+                    checked={activeView === 'OWN'}
+                    onChange={() => switchView('OWN')}
                     disabled={feedControlsDisabled}
                   />
-                  <span>{label}</span>
+                  <span>My transactions</span>
                 </label>
-              ))}
-            </fieldset>
-          )}
+                <label className="finance-feed-option">
+                  <input
+                    type="radio"
+                    name={`transactions-feed-${household.id}`}
+                    value="HOUSEHOLD"
+                    checked={activeView === 'HOUSEHOLD'}
+                    onChange={() => switchView('HOUSEHOLD')}
+                    disabled={feedControlsDisabled}
+                  />
+                  <span>Household feed</span>
+                </label>
+              </fieldset>
+              {activeView === 'OWN' && (
+                <fieldset className="finance-feed-toggle">
+                  <legend>My transactions visibility</legend>
+                  {(
+                    [
+                      [null, 'All'],
+                      ['PRIVATE', 'Private'],
+                      ['HOUSEHOLD', 'Shared by me'],
+                    ] as const
+                  ).map(([visibility, label]) => (
+                    <label className="finance-feed-option" key={label}>
+                      <input
+                        type="radio"
+                        name={`transactions-visibility-${household.id}`}
+                        checked={ownVisibility === visibility}
+                        onChange={() => switchVisibility(visibility)}
+                        disabled={feedControlsDisabled}
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </fieldset>
+              )}
+            </FilterBar>
+          </div>
 
           {!authorityConfirmed && (
             <p role="status" className="household-stale">

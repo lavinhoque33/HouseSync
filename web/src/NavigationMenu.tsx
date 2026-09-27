@@ -1,31 +1,54 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type MouseEvent,
-  type ReactNode,
-} from 'react';
+import { useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import {
   householdPath,
   navigate,
   type AppRoute,
   type HouseholdPage,
 } from './navigation';
+import { Icon, type IconName } from './ui/Icon';
+import { Overlay } from './ui/Overlay';
 
-const householdPages: ReadonlyArray<[HouseholdPage, string]> = [
-  ['overview', 'Overview'],
-  ['transactions', 'Transactions'],
-  ['accounts', 'Accounts'],
-  ['connections', 'Bank connections'],
-  ['bank-activity', 'Bank activity'],
-  ['members', 'Members'],
-  ['invitations', 'Invitations'],
-  ['reviews', 'Reviews'],
-  ['rules', 'Rules'],
-  ['balances', 'Balances'],
-  ['repayments', 'Repayments'],
-  ['contributions', 'Contributions'],
-  ['insights', 'Insights'],
+const groups: ReadonlyArray<{
+  label: string;
+  icon: IconName;
+  pages: ReadonlyArray<[HouseholdPage, string]>;
+}> = [
+  {
+    label: 'Finance',
+    icon: 'wallet',
+    pages: [
+      ['transactions', 'Transactions'],
+      ['accounts', 'Accounts'],
+      ['insights', 'Insights'],
+    ],
+  },
+  {
+    label: 'Banking',
+    icon: 'chart',
+    pages: [
+      ['connections', 'Bank connections'],
+      ['bank-activity', 'Bank activity'],
+    ],
+  },
+  {
+    label: 'Shared money',
+    icon: 'wallet',
+    pages: [
+      ['balances', 'Balances'],
+      ['repayments', 'Repayments'],
+      ['contributions', 'Contributions'],
+    ],
+  },
+  {
+    label: 'Management',
+    icon: 'users',
+    pages: [
+      ['members', 'Members'],
+      ['invitations', 'Invitations'],
+      ['reviews', 'Reviews'],
+      ['rules', 'Rules'],
+    ],
+  },
 ];
 
 export function AppLink({
@@ -34,12 +57,16 @@ export function AppLink({
   className,
   current,
   onNavigate,
+  'aria-label': ariaLabel,
+  title,
 }: {
   to: string;
   children: ReactNode;
   className?: string;
   current?: boolean;
   onNavigate?: () => void;
+  'aria-label'?: string;
+  title?: string;
 }) {
   function follow(event: MouseEvent<HTMLAnchorElement>) {
     if (
@@ -59,6 +86,8 @@ export function AppLink({
     <a
       href={to}
       className={className}
+      aria-label={ariaLabel}
+      title={title}
       aria-current={current ? 'page' : undefined}
       onClick={follow}
     >
@@ -70,79 +99,208 @@ export function AppLink({
 export function NavigationMenu({ route }: { route: AppRoute }) {
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
-  const region = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const closeOnOutside = (event: PointerEvent) => {
-      if (!region.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener('pointerdown', closeOnOutside);
-    return () => document.removeEventListener('pointerdown', closeOnOutside);
-  }, [open]);
-  const id = 'site-navigation';
+  const activeGroup =
+    route.kind === 'household'
+      ? groups.find((group) =>
+          group.pages.some(([page]) => route.page === page),
+        )?.label
+      : undefined;
+  const [householdsOpen, setHouseholdsOpen] = useState(
+    route.kind === 'household' ||
+      route.kind === 'directory' ||
+      route.kind === 'household-create',
+  );
+  const [householdOpen, setHouseholdOpen] = useState(
+    route.kind === 'household',
+  );
+  const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(
+    () => new Set(activeGroup ? [activeGroup] : []),
+  );
+  const routeKey =
+    route.kind === 'household'
+      ? householdPath(route.householdId, route.page)
+      : route.kind;
+  const [previousRouteKey, setPreviousRouteKey] = useState(routeKey);
+  if (previousRouteKey !== routeKey) {
+    setPreviousRouteKey(routeKey);
+    setHouseholdsOpen(
+      route.kind === 'household' ||
+        route.kind === 'directory' ||
+        route.kind === 'household-create',
+    );
+    setHouseholdOpen(route.kind === 'household');
+    setExpandedGroups(new Set(activeGroup ? [activeGroup] : []));
+  }
+  const close = () => setOpen(false);
   return (
-    <div
-      ref={region}
-      className="navigation-disclosure"
-      onKeyDown={(event) => {
-        if (event.key === 'Escape' && open) {
-          event.preventDefault();
-          setOpen(false);
-          trigger.current?.focus();
-        }
-      }}
-    >
+    <div className="navigation-disclosure">
       <button
         ref={trigger}
         type="button"
-        className="navigation-trigger"
+        className="navigation-trigger icon-button"
         aria-label="Open navigation menu"
         aria-expanded={open}
-        aria-controls={id}
-        onClick={() => setOpen((value) => !value)}
+        aria-controls="site-navigation"
+        onClick={() => {
+          if (
+            route.kind === 'household' ||
+            route.kind === 'directory' ||
+            route.kind === 'household-create'
+          )
+            setHouseholdsOpen(true);
+          if (route.kind === 'household') {
+            setHouseholdOpen(true);
+            if (activeGroup)
+              setExpandedGroups(
+                (current) => new Set([...current, activeGroup]),
+              );
+          }
+          setOpen(true);
+        }}
       >
-        <span aria-hidden="true">•••</span>
+        <Icon name="menu" />
       </button>
-      {open && (
-        <nav id={id} aria-label="Main navigation" className="navigation-panel">
+      <Overlay open={open} onClose={close} variant="drawer" title="Navigation">
+        <nav
+          id="site-navigation"
+          aria-label="Main navigation"
+          className="navigation-panel"
+        >
           <AppLink
+            className="navigation-link"
             to="/"
             current={route.kind === 'home'}
-            onNavigate={() => setOpen(false)}
+            onNavigate={close}
           >
-            Home
+            <Icon name="home" /> Home
           </AppLink>
-          <AppLink
-            to="/households"
-            current={route.kind === 'directory'}
-            onNavigate={() => setOpen(false)}
+          <button
+            type="button"
+            className="navigation-group"
+            aria-expanded={householdsOpen}
+            aria-controls="navigation-households"
+            data-active={
+              route.kind === 'directory' ||
+              route.kind === 'household-create' ||
+              route.kind === 'household'
+                ? 'true'
+                : undefined
+            }
+            onClick={() => setHouseholdsOpen((value) => !value)}
           >
-            Households
-          </AppLink>
-          <AppLink
-            to="/account/security"
-            current={route.kind === 'security'}
-            onNavigate={() => setOpen(false)}
-          >
-            Account security
-          </AppLink>
-          {route.kind === 'household' && (
-            <div className="navigation-pages">
-              <span className="navigation-label">Household pages</span>
-              {householdPages.map(([page, label]) => (
-                <AppLink
-                  key={page}
-                  to={householdPath(route.householdId, page)}
-                  current={route.page === page}
-                  onNavigate={() => setOpen(false)}
-                >
-                  {label}
-                </AppLink>
-              ))}
+            <Icon name="users" /> Households{' '}
+            <Icon name={householdsOpen ? 'chevron-down' : 'chevron-right'} />
+          </button>
+          {householdsOpen && (
+            <div id="navigation-households" className="navigation-children">
+              <AppLink
+                className="navigation-link"
+                to="/households"
+                current={route.kind === 'directory'}
+                onNavigate={close}
+              >
+                Directory
+              </AppLink>
+              <AppLink
+                className="navigation-link"
+                to="/households/new"
+                current={route.kind === 'household-create'}
+                onNavigate={close}
+              >
+                Create household
+              </AppLink>
+              {route.kind === 'household' && (
+                <>
+                  <button
+                    type="button"
+                    className="navigation-group"
+                    aria-expanded={householdOpen}
+                    aria-controls="navigation-current-household"
+                    data-active="true"
+                    onClick={() => setHouseholdOpen((value) => !value)}
+                  >
+                    Current household{' '}
+                    <Icon
+                      name={householdOpen ? 'chevron-down' : 'chevron-right'}
+                    />
+                  </button>
+                  {householdOpen && (
+                    <div
+                      id="navigation-current-household"
+                      className="navigation-children"
+                    >
+                      <AppLink
+                        className="navigation-link"
+                        to={householdPath(route.householdId, 'overview')}
+                        current={route.page === 'overview'}
+                        onNavigate={close}
+                      >
+                        Overview
+                      </AppLink>
+                      {groups.map(({ label, icon, pages }) => (
+                        <div key={label}>
+                          <button
+                            type="button"
+                            className="navigation-group"
+                            aria-expanded={expandedGroups.has(label)}
+                            aria-controls={`navigation-${label.toLowerCase().replace(' ', '-')}`}
+                            data-active={
+                              activeGroup === label ? 'true' : undefined
+                            }
+                            onClick={() =>
+                              setExpandedGroups((current) => {
+                                const next = new Set(current);
+                                if (next.has(label)) next.delete(label);
+                                else next.add(label);
+                                return next;
+                              })
+                            }
+                          >
+                            <Icon name={icon} /> {label}{' '}
+                            <Icon
+                              name={
+                                expandedGroups.has(label)
+                                  ? 'chevron-down'
+                                  : 'chevron-right'
+                              }
+                            />
+                          </button>
+                          {expandedGroups.has(label) && (
+                            <div
+                              id={`navigation-${label.toLowerCase().replace(' ', '-')}`}
+                              className="navigation-children"
+                            >
+                              {pages.map(([page, name]) => (
+                                <AppLink
+                                  key={page}
+                                  className="navigation-link"
+                                  to={householdPath(route.householdId, page)}
+                                  current={route.page === page}
+                                  onNavigate={close}
+                                >
+                                  {name}
+                                </AppLink>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
+          <AppLink
+            className="navigation-link"
+            to="/account/security"
+            current={route.kind === 'security'}
+            onNavigate={close}
+          >
+            <Icon name="settings" /> Profile Settings
+          </AppLink>
         </nav>
-      )}
+      </Overlay>
     </div>
   );
 }

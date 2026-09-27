@@ -223,6 +223,7 @@ describe('spending dashboard section', () => {
     const section = await screen.findByTestId('spending-dashboard-section');
     await within(section).findByText(/Showing 2026-09-01/);
     const settled = calls.length;
+    fireEvent.click(within(section).getByRole('button', { name: /^Filters/ }));
     fireEvent.change(within(section).getByLabelText('From date'), {
       target: { value: '2026-08-01' },
     });
@@ -266,6 +267,7 @@ describe('spending dashboard section', () => {
     });
     const section = await screen.findByTestId('spending-dashboard-section');
     await within(section).findByText(/Showing 2026-09-01/);
+    fireEvent.click(within(section).getByRole('button', { name: /^Filters/ }));
     fireEvent.change(within(section).getByLabelText('From date'), {
       target: { value: '2026-08-01' },
     });
@@ -333,6 +335,7 @@ describe('spending dashboard section', () => {
     );
     const section = await screen.findByTestId('spending-dashboard-section');
     await within(section).findByText(/Showing 2026-09-01/);
+    fireEvent.click(within(section).getByRole('button', { name: /^Filters/ }));
     fireEvent.change(within(section).getByLabelText('From date'), {
       target: { value: '2026-08-01' },
     });
@@ -472,6 +475,7 @@ describe('spending dashboard section', () => {
     const section = await screen.findByTestId('spending-dashboard-section');
     await within(section).findByText(/Showing 2026-09-01 to 2026-10-01/);
     // Type an intermediate draft without applying it.
+    fireEvent.click(within(section).getByRole('button', { name: /^Filters/ }));
     fireEvent.change(within(section).getByLabelText('From date'), {
       target: { value: '2026-08-01' },
     });

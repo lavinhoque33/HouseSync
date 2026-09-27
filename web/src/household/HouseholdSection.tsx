@@ -19,6 +19,9 @@ import { TransactionsSection } from '../finance/TransactionsSection';
 import { MembersSection } from './MembersSection';
 import { householdPath, type HouseholdPage } from '../navigation';
 import { AppLink } from '../NavigationMenu';
+import { HouseholdCard } from './HouseholdCard';
+import { Icon } from '../ui/Icon';
+import { HouseholdInbox } from './HouseholdInbox';
 
 interface HouseholdNotice {
   kind: 'info' | 'error' | 'warning';
@@ -52,19 +55,8 @@ interface HouseholdSectionProps {
   onHouseholdReconcile?: (() => void) | undefined;
   route?: { householdId: string; page: HouseholdPage } | null;
   active?: boolean;
-}
-
-function formatCreatedAt(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  try {
-    return parsed.toLocaleString(undefined, {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    });
-  } catch {
-    return value;
-  }
+  createMode?: boolean;
+  headerInboxTarget?: HTMLElement | null;
 }
 
 function sortHouseholds(values: Household[]): Household[] {
@@ -94,6 +86,8 @@ export function HouseholdSection({
   onHouseholdReconcile,
   route = null,
   active = true,
+  createMode = false,
+  headerInboxTarget = null,
 }: HouseholdSectionProps) {
   const [households, setHouseholds] = useState<Household[] | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -105,6 +99,7 @@ export function HouseholdSection({
     null,
   );
   const [creating, setCreating] = useState(false);
+  const [createdId, setCreatedId] = useState<string | null>(null);
   // Per-household sibling account-list signals: a committed account-list
   // mutation in FinancialAccountsSection (create, rename, archive,
   // reactivate) or an admitted account selection in
@@ -128,6 +123,15 @@ export function HouseholdSection({
   const [membershipSignals, setMembershipSignals] = useState<
     Record<string, number>
   >({});
+  const [inboxSignals, setInboxSignals] = useState<Record<string, number>>({});
+  // A scoped reader may disagree with the collection briefly. Recheck the
+  // collection once per denied scope, then wait for an explicit user retry;
+  // otherwise remounting the reader after every successful list response
+  // creates an unbounded read/reconcile loop.
+  const [unavailableScopes, setUnavailableScopes] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const deniedScopesRef = useRef<Set<string>>(new Set());
   const [navigationState, setNavigationState] = useState<{
     requestedId: string | null;
     householdId: string | null;
@@ -189,6 +193,18 @@ export function HouseholdSection({
     try {
       const result = await fetchHouseholds(signal);
       if (!isCurrent(generation) || signal.aborted) return;
+      const authorized = new Set(
+        result.map((household) => `${household.id}:${household.role}`),
+      );
+      deniedScopesRef.current = new Set(
+        [...deniedScopesRef.current].filter((scope) => authorized.has(scope)),
+      );
+      setUnavailableScopes((current) => {
+        const retained = new Set(
+          [...current].filter((scope) => authorized.has(scope)),
+        );
+        return retained.size === current.size ? current : retained;
+      });
       if (loaded) {
         setMembershipSignals((current) => {
           const next = { ...current };
@@ -327,6 +343,32 @@ export function HouseholdSection({
     if (loading || creating) return;
     startLoad(null);
   }
+  function handleScopedReadDenied(household: Household) {
+    const deniedScope = `${household.id}:${household.role}`;
+    if (deniedScopesRef.current.has(deniedScope)) return;
+    deniedScopesRef.current.add(deniedScope);
+    setUnavailableScopes((current) => new Set(current).add(deniedScope));
+    (onHouseholdReconcile ?? handleRefresh)();
+  }
+
+  function retryScopedAccess(household: Household) {
+    if (loading || creating) return;
+    const deniedScope = `${household.id}:${household.role}`;
+    deniedScopesRef.current.delete(deniedScope);
+    setUnavailableScopes((current) => {
+      const next = new Set(current);
+      next.delete(deniedScope);
+      return next;
+    });
+    startLoad(null);
+  }
+
+  function refreshInbox(householdId: string) {
+    setInboxSignals((current) => ({
+      ...current,
+      [householdId]: (current[householdId] ?? 0) + 1,
+    }));
+  }
 
   function handleAccountListCommitted(householdId: string) {
     setAccountSignals((current) => ({
@@ -340,6 +382,7 @@ export function HouseholdSection({
       ...current,
       [householdId]: (current[householdId] ?? 0) + 1,
     }));
+    refreshInbox(householdId);
   }
 
   function handleLedgerChanged(householdId: string) {
@@ -347,6 +390,7 @@ export function HouseholdSection({
       ...current,
       [householdId]: (current[householdId] ?? 0) + 1,
     }));
+    refreshInbox(householdId);
   }
 
   async function ensureCsrf(
@@ -383,6 +427,7 @@ export function HouseholdSection({
     track(controller);
     setCreating(true);
     setFieldError(undefined);
+    setCreatedId(null);
     setCreateNotice(null);
     try {
       const requestCsrf = await ensureCsrf(controller.signal, generation);
@@ -402,11 +447,12 @@ export function HouseholdSection({
       );
       if (!isCurrent(generation) || controller.signal.aborted) return;
       setHouseholds((current) => sortHouseholds([...(current ?? []), created]));
+      setCreatedId(created.id);
       setName('');
       setFieldError(undefined);
       setCreateNotice({
         kind: 'info',
-        text: `Household “${created.name}” created.`,
+        text: `Household “${created.name}” created. Open it from your households.`,
       });
     } catch (error) {
       if (!isCurrent(generation) || controller.signal.aborted) return;
@@ -492,7 +538,7 @@ export function HouseholdSection({
   // after a successful list response with no active list error. A failed
   // refresh keeps a previously loaded list visible but stale, with creation
   // unavailable until refresh succeeds.
-  const showForm = loaded && listError === null;
+  const showForm = createMode && loaded && listError === null;
   const stale =
     loaded &&
     listError !== null &&
@@ -548,9 +594,12 @@ export function HouseholdSection({
       {active && (
         <div className="household">
           <h3 id="household-title" className="household-title">
-            Households
+            {createMode
+              ? 'Create a household'
+              : route
+                ? 'Household'
+                : 'Your households'}
           </h3>
-
           {loading && households === null && !listError && (
             <div role="status" aria-live="polite" aria-atomic="true">
               <p>Loading your households…</p>
@@ -583,13 +632,14 @@ export function HouseholdSection({
 
           {households !== null &&
             route === null &&
+            !createMode &&
             !loading &&
             !listError &&
             households.length === 0 && (
               <div role="status" aria-live="polite" aria-atomic="true">
                 <p className="household-empty">
-                  You do not belong to a household yet. Create your first
-                  household below.
+                  You do not belong to a household yet. Use Create household in
+                  the menu to get started.
                 </p>
               </div>
             )}
@@ -601,28 +651,40 @@ export function HouseholdSection({
             </p>
           )}
 
-          {route === null && households !== null && households.length > 0 && (
-            <ul className="household-list" aria-label="Your households">
-              {households.map((household) => (
-                <li key={household.id} className="household-card">
-                  <p className="household-name">{household.name}</p>
-                  <p className="household-meta">Role: {household.role}</p>
-                  <p className="household-meta">
-                    Created:{' '}
-                    <time dateTime={household.createdAt}>
-                      {formatCreatedAt(household.createdAt)}
-                    </time>
-                  </p>
-                  <AppLink
-                    to={householdPath(household.id, 'overview')}
-                    className="household-page-link"
-                  >
-                    Open {household.name}
-                  </AppLink>
-                </li>
-              ))}
-            </ul>
-          )}
+          {!createMode &&
+            route === null &&
+            households !== null &&
+            households.length > 0 && (
+              <ul className="household-list" aria-label="Your households">
+                {households.map((household) => (
+                  <HouseholdCard
+                    key={`${household.id}:${household.role}`}
+                    household={household}
+                    currentUserId={currentUserId}
+                    enabled={
+                      !stale &&
+                      !loading &&
+                      listError === null &&
+                      !unavailableScopes.has(
+                        `${household.id}:${household.role}`,
+                      )
+                    }
+                    accessUnavailable={unavailableScopes.has(
+                      `${household.id}:${household.role}`,
+                    )}
+                    onRetryAccess={() => retryScopedAccess(household)}
+                    refreshSignal={
+                      (accountSignals[household.id] ?? 0) +
+                      (membershipSignals[household.id] ?? 0)
+                    }
+                    onSessionExpired={onSessionExpired}
+                    onHouseholdAccessChanged={() =>
+                      handleScopedReadDenied(household)
+                    }
+                  />
+                ))}
+              </ul>
+            )}
 
           {route !== null &&
             households !== null &&
@@ -642,59 +704,53 @@ export function HouseholdSection({
               </div>
             )}
 
-          {route !== null &&
+          {!createMode &&
+            route !== null &&
             households
               ?.filter((household) => household.id === route.householdId)
               .map((household) => (
-                <section key={household.id} aria-label={household.name}>
-                  <h4>{household.name}</h4>
-                  <p className="household-meta">Role: {household.role}</p>
-                  <details
-                    key={route.page}
-                    className="household-page-navigation"
-                  >
-                    <summary>Household pages</summary>
-                    <nav aria-label={`${household.name} pages`}>
-                      {(
-                        [
-                          ['overview', 'Overview'],
-                          ['transactions', 'Transactions'],
-                          ['accounts', 'Financial accounts'],
-                          ['connections', 'Bank connections'],
-                          ['bank-activity', 'Bank activity'],
-                          ['members', 'Members'],
-                          ...(household.role === 'OWNER'
-                            ? [['invitations', 'Invitations']]
-                            : []),
-                          ['reviews', 'Reviews'],
-                          ['rules', 'Rules'],
-                          ['balances', 'Balances'],
-                          ['repayments', 'Repayments'],
-                          ['contributions', 'Contributions'],
-                          ['insights', 'Insights'],
-                        ] as Array<[HouseholdPage, string]>
-                      ).map(([page, label]) => (
-                        <AppLink
-                          key={page}
-                          to={householdPath(household.id, page)}
-                          current={route.page === page}
-                          className="household-page-link"
-                        >
-                          {label}
-                        </AppLink>
-                      ))}
-                    </nav>
-                  </details>
-                </section>
+                <div key={household.id} className="household-context">
+                  <AppLink to="/households" className="household-context__back">
+                    Households
+                  </AppLink>
+                  <span aria-hidden="true">/</span>
+                  <strong>{household.name}</strong>
+                  <span className="household-context__role">
+                    {household.role.toLowerCase()}
+                  </span>
+                </div>
               ))}
 
-          {route === null && showForm && (
+          {!createMode &&
+            route &&
+            controllerHousehold &&
+            unavailableScopes.has(scope) &&
+            !loading &&
+            !listError && (
+              <div
+                role="status"
+                className="household-notice household-notice--warning"
+              >
+                <p>
+                  Private directory and inbox details are unavailable for this
+                  household. Refresh access to check again.
+                </p>
+                <button
+                  type="button"
+                  className="household-button household-button--secondary"
+                  onClick={() => retryScopedAccess(controllerHousehold)}
+                >
+                  Retry household access
+                </button>
+              </div>
+            )}
+          {showForm && (
             <form
               className="household-form"
               onSubmit={(event) => void handleCreate(event)}
               noValidate
             >
-              <h4 className="household-form-title">Create a household</h4>
+              <h4 className="household-form-title">Name your household</h4>
               <div className="household-field">
                 <label htmlFor="household-name">Household name</label>
                 <input
@@ -736,7 +792,7 @@ export function HouseholdSection({
             </form>
           )}
 
-          {route === null && createNotice && (
+          {createMode && createNotice && (
             <div
               ref={createNoticeRef}
               tabIndex={-1}
@@ -762,8 +818,47 @@ export function HouseholdSection({
               )}
             </div>
           )}
+          {createMode &&
+            createdId &&
+            households?.some((household) => household.id === createdId) && (
+              <AppLink
+                to={householdPath(createdId, 'overview')}
+                className="household-card__open"
+              >
+                Open your new household <Icon name="arrow-right" />
+              </AppLink>
+            )}
+          {createMode && households?.length ? (
+            <AppLink to="/households" className="household-page-link">
+              View your households
+            </AppLink>
+          ) : null}
         </div>
       )}
+      {headerInboxTarget &&
+        active &&
+        !createMode &&
+        currentPage &&
+        controllerHousehold &&
+        !loading &&
+        !unavailableScopes.has(scope) &&
+        !listError && (
+          <HouseholdInbox
+            key={scope}
+            target={headerInboxTarget}
+            household={controllerHousehold}
+            page={currentPage}
+            refreshSignal={
+              (inboxSignals[controllerHousehold.id] ?? 0) +
+              (bankActivitySignals[controllerHousehold.id] ?? 0) +
+              (ledgerSignals[controllerHousehold.id] ?? 0)
+            }
+            onSessionExpired={onSessionExpired}
+            onHouseholdAccessChanged={() =>
+              handleScopedReadDenied(controllerHousehold)
+            }
+          />
+        )}
       {controllerHousehold &&
         active &&
         route?.page === 'accounts' &&
@@ -832,6 +927,7 @@ export function HouseholdSection({
           authorityConfirmed={!stale && !loading && listError === null}
           refreshSignal={bankActivitySignals[controllerHousehold.id] ?? 0}
           onLedgerChanged={() => handleLedgerChanged(controllerHousehold.id)}
+          onInboxChanged={() => refreshInbox(controllerHousehold.id)}
         />
       )}
       {controllerHousehold &&

@@ -19,6 +19,7 @@ export type AppRoute =
   | { kind: 'home' }
   | { kind: 'security' }
   | { kind: 'directory' }
+  | { kind: 'household-create' }
   | { kind: 'household'; householdId: string; page: HouseholdPage }
   | { kind: 'link' }
   | { kind: 'not-found' };
@@ -45,6 +46,7 @@ export function readAppRoute(
   if (pathname === '/') return { kind: 'home' };
   if (pathname === '/account/security') return { kind: 'security' };
   if (pathname === '/households') return { kind: 'directory' };
+  if (pathname === '/households/new') return { kind: 'household-create' };
   if (
     pathname === '/enroll' ||
     pathname === '/recover' ||

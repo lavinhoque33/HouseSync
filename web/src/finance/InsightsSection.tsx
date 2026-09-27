@@ -15,6 +15,7 @@ import {
   type Household,
   type CsrfToken,
 } from '../auth/client';
+import { FilterBar } from '../ui/FilterBar';
 import { RecurringSection } from './RecurringSection';
 import { BudgetSection, type PendingBudgetCreate } from './BudgetSection';
 import { formatMoney, type FinancialAccountCurrency } from './money';
@@ -714,6 +715,15 @@ export function InsightsSection({
         setPaging(false);
     }
   }
+  function resetSelection() {
+    pendingDriver.current = null;
+    const choice = defaultChoice(reportingZone, nowProvider?.() ?? new Date());
+    setDraft(choice);
+    setApplied(choice);
+    setCustom(false);
+    setRevision((value) => value + 1);
+  }
+
   const stateLabel = (state: string) =>
     state === 'FUTURE'
       ? 'Future full month; posted future-dated facts can appear.'
@@ -741,95 +751,92 @@ export function InsightsSection({
           use Etc/UTC. Server reporting zone below is authoritative.
         </p>
       )}
-      <form
-        className="insights-controls"
-        aria-label="Insights selection"
-        onSubmit={apply}
+      <FilterBar
+        title="Insights filters"
+        summary={`${applied.month} vs ${applied.baseline} · ${applied.currency} · ${applied.dimension === 'CATEGORY' ? 'Categories' : 'Merchant groups'}`}
+        activeCount={custom ? 1 : 0}
+        onReset={resetSelection}
       >
-        <label>
-          Month{' '}
-          <input
-            ref={monthRef}
-            type="month"
-            min="1900-01"
-            max="9999-11"
-            value={draft.month}
-            onChange={(event) =>
-              setDraft({ ...draft, month: event.target.value })
-            }
-          />
-        </label>
-        <label>
-          Baseline month{' '}
-          <input
-            type="month"
-            min="1900-01"
-            max="9999-11"
-            value={draft.baseline}
-            onChange={(event) =>
-              setDraft({ ...draft, baseline: event.target.value })
-            }
-          />
-        </label>
-        <label>
-          Currency{' '}
-          <select
-            value={draft.currency}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                currency: event.target.value as FinancialAccountCurrency,
-              })
-            }
-          >
-            {currencies.map((currency) => (
-              <option key={currency}>{currency}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Breakdown{' '}
-          <select
-            value={draft.dimension}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                dimension: event.target.value as InsightDimension,
-              })
-            }
-          >
-            <option value="CATEGORY">Categories</option>
-            <option value="MERCHANT">Merchant / description groups</option>
-          </select>
-        </label>
-        <button className="household-button" type="submit">
-          Show insights
-        </button>
-        <button
-          className="household-button household-button--secondary"
-          type="button"
-          onClick={() => {
-            pendingDriver.current = null;
-            const choice = defaultChoice(
-              reportingZone,
-              nowProvider?.() ?? new Date(),
-            );
-            setDraft(choice);
-            setApplied(choice);
-            setCustom(false);
-            setRevision((value) => value + 1);
-          }}
+        <form
+          className="insights-controls"
+          aria-label="Insights selection"
+          onSubmit={apply}
         >
-          Current month
-        </button>
-        <button
-          className="household-button household-button--secondary"
-          type="button"
-          onClick={() => setRevision((value) => value + 1)}
-        >
-          Refresh current records
-        </button>
-      </form>
+          <label>
+            Month{' '}
+            <input
+              ref={monthRef}
+              type="month"
+              min="1900-01"
+              max="9999-11"
+              value={draft.month}
+              onChange={(event) =>
+                setDraft({ ...draft, month: event.target.value })
+              }
+            />
+          </label>
+          <label>
+            Baseline month{' '}
+            <input
+              type="month"
+              min="1900-01"
+              max="9999-11"
+              value={draft.baseline}
+              onChange={(event) =>
+                setDraft({ ...draft, baseline: event.target.value })
+              }
+            />
+          </label>
+          <label>
+            Currency{' '}
+            <select
+              value={draft.currency}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  currency: event.target.value as FinancialAccountCurrency,
+                })
+              }
+            >
+              {currencies.map((currency) => (
+                <option key={currency}>{currency}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Breakdown{' '}
+            <select
+              value={draft.dimension}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  dimension: event.target.value as InsightDimension,
+                })
+              }
+            >
+              <option value="CATEGORY">Categories</option>
+              <option value="MERCHANT">Merchant / description groups</option>
+            </select>
+          </label>
+          <button className="household-button" type="submit">
+            Show insights
+          </button>
+          <button
+            className="household-button household-button--secondary"
+            type="button"
+            onClick={resetSelection}
+          >
+            Current month
+          </button>
+        </form>
+      </FilterBar>
+      <button
+        className="household-button household-button--secondary"
+        type="button"
+        onClick={() => setRevision((value) => value + 1)}
+      >
+        Refresh current records
+      </button>
       {(validation || error || detailError) && (
         <div
           role="alert"

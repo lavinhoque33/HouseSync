@@ -240,6 +240,7 @@ describe('private future-match rule management', () => {
           : rulePage([rule()]),
     });
     await screen.findByText('Corner Market');
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     fireEvent.change(screen.getByLabelText('Show'), {
       target: { value: 'INACTIVE' },
     });
@@ -256,6 +257,13 @@ describe('private future-match rule management', () => {
     await waitFor(() =>
       expect(ruleGetCalls(calls)[2]?.url).toBe(
         `${RULES_BASE}?limit=50&offset=0`,
+      ),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    await waitFor(() =>
+      expect(ruleGetCalls(calls)[3]?.url).toBe(
+        `${RULES_BASE}?limit=50&offset=0&status=ACTIVE`,
       ),
     );
   });

@@ -183,9 +183,11 @@ describe('recurring household review and retained plans', () => {
     ).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss for me' }));
     await waitFor(() => expect(review).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     fireEvent.change(screen.getByLabelText('Review filter'), {
       target: { value: 'DISMISSED' },
     });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await screen.findByRole('button', { name: 'Restore for me' });
     fireEvent.click(screen.getByRole('button', { name: 'Restore for me' }));
     await waitFor(() => expect(review).toHaveBeenCalledTimes(2));

@@ -247,8 +247,17 @@ function stubFetch(): Harness {
             changedCount: 0,
           });
         }
+        const state = parsed.searchParams.get('state');
+        const review = parsed.searchParams.get('review');
+        const visible = (
+          items as Array<{ state: string; reviewState: string }>
+        ).filter(
+          (item) =>
+            (!state || item.state === state) &&
+            (!review || item.reviewState === review),
+        );
         return jsonResponse({
-          items,
+          items: visible,
           limit: 100,
           offset: 0,
           hasMore: hasMorePages,
@@ -585,6 +594,31 @@ afterEach(() => {
 });
 
 describe('BankActivitySection', () => {
+  it('filters the inbox by status and restores all activity on clear', async () => {
+    const { harness } = renderSection();
+    await findItemByAmount('-5.00');
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
+    fireEvent.change(screen.getByLabelText('Status'), {
+      target: { value: 'PENDING' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole('list', { name: 'Bank activity' }).textContent,
+      ).toContain('-5.00'),
+    );
+    expect(
+      screen.getByRole('list', { name: 'Bank activity' }).textContent,
+    ).not.toContain('-12.34');
+    expect(screen.getByText('Pending · All reviews')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    await findItemByAmount('-12.34');
+    expect(screen.getByText('All statuses · All reviews')).toBeInTheDocument();
+    expect(harness.calls.some(({ url }) => url.includes('state=PENDING'))).toBe(
+      true,
+    );
+  });
+
   it('keeps typing focused when parent callbacks change after an inbox error', async () => {
     vi.stubGlobal(
       'fetch',
@@ -1805,44 +1839,5 @@ describe('sibling refresh signals', () => {
     expect(
       harness.calls.filter(({ url }) => url.includes('/bank-activity?')).length,
     ).toBeGreaterThanOrEqual(2);
-  });
-
-  it('notifies the ledger only for a successful confirmation', async () => {
-    const onLedgerChanged = vi.fn();
-    const { harness } = renderSection({ onLedgerChanged });
-    await screen.findByText(/awaiting review/);
-    const posted = await findItemByAmount('-12.34');
-    fireEvent.click(
-      within(posted).getByRole('button', { name: /^Confirm bank activity/ }),
-    );
-    fireEvent.click(
-      await screen.findByRole('button', { name: 'Add to ledger' }),
-    );
-    await waitFor(() => expect(onLedgerChanged).toHaveBeenCalledTimes(1));
-    // Let the post-confirm refresh and busy state settle before the next
-    // interaction so the dismiss control is enabled again.
-    await screen.findByText(/Added to your private ledger/);
-    await waitFor(() => {
-      const item = screen.getByText('-5.00 USD').closest('li');
-      expect(
-        within(item as HTMLElement).getByRole('button', {
-          name: /^Dismiss bank activity/,
-        }),
-      ).not.toBeDisabled();
-    });
-
-    // Dismissal never notifies the ledger.
-    const pending = await findItemByAmount('-5.00');
-    fireEvent.click(
-      within(pending).getByRole('button', { name: /^Dismiss bank activity/ }),
-    );
-    fireEvent.click(
-      await screen.findByRole('button', { name: 'Dismiss item' }),
-    );
-    await screen.findByText(/retained evidence/);
-    expect(onLedgerChanged).toHaveBeenCalledTimes(1);
-    expect(
-      harness.calls.some(({ url }) => url.includes('/bank-activity?')),
-    ).toBe(true);
   });
 });

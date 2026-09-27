@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { NavigationMenu } from './NavigationMenu';
 
 beforeEach(() => {
   vi.stubGlobal('scrollTo', vi.fn());
@@ -213,6 +214,8 @@ describe('page navigation', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
     const password = await screen.findByLabelText('New password');
+    const signedInStatus = await screen.findByRole('status');
+    await waitFor(() => expect(document.activeElement).toBe(signedInStatus));
     password.focus();
     fireEvent.change(password, { target: { value: 'first' } });
     fireEvent.change(password, { target: { value: 'first second' } });
@@ -221,10 +224,14 @@ describe('page navigation', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'Open navigation menu' }),
     );
-    const directory = screen.getByRole('link', { name: 'Households' });
+    fireEvent.click(screen.getByRole('button', { name: 'Households' }));
+    const directory = screen.getByRole('link', { name: 'Directory' });
     expect(directory).toHaveAttribute('href', '/households');
     fireEvent.click(directory);
     expect(window.location.pathname).toBe('/households');
+    expect(document.activeElement).toBe(
+      screen.getByRole('heading', { name: 'Households', level: 1 }),
+    );
     expect(window.scrollTo).toHaveBeenCalledWith({
       top: 0,
       left: 0,
@@ -235,7 +242,10 @@ describe('page navigation', () => {
     ).toBeInTheDocument();
     expect(screen.queryByLabelText('New password')).not.toBeInTheDocument();
     window.history.replaceState(null, '', '/account/security');
-    window.dispatchEvent(new PopStateEvent('popstate'));
+    fireEvent(window, new PopStateEvent('popstate'));
+    expect(document.activeElement).toBe(
+      screen.getByRole('heading', { name: 'Profile Settings', level: 1 }),
+    );
     expect(await screen.findByLabelText('New password')).toHaveValue('');
   });
 
@@ -246,16 +256,15 @@ describe('page navigation', () => {
     const trigger = screen.getByRole('button', {
       name: 'Open navigation menu',
     });
+    trigger.focus();
     fireEvent.click(trigger);
-    const menu = screen.getByRole('navigation', { name: 'Main navigation' });
     expect(screen.getByRole('link', { name: 'Home' })).toHaveAttribute(
       'aria-current',
       'page',
     );
-    fireEvent.keyDown(menu, { key: 'Escape' });
-    expect(
-      screen.queryByRole('navigation', { name: 'Main navigation' }),
-    ).not.toBeInTheDocument();
+    const dialog = screen.getByRole('dialog', { name: 'Navigation' });
+    fireEvent(dialog, new Event('cancel', { cancelable: true }));
+    expect(dialog).not.toHaveAttribute('open');
     expect(document.activeElement).toBe(trigger);
   });
 
@@ -271,5 +280,104 @@ describe('page navigation', () => {
       '/',
     );
     expect(screen.queryByLabelText('New password')).not.toBeInTheDocument();
+  });
+
+  it('exposes all household destinations through nested disclosures and keeps the exact page active', () => {
+    const householdId = '22222222-3333-4444-8555-666666666666';
+    const route = {
+      kind: 'household' as const,
+      householdId,
+      page: 'repayments' as const,
+    };
+    const view = render(<NavigationMenu route={route} />);
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Open navigation menu' }),
+    );
+    expect(screen.getByRole('button', { name: 'Households' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+    expect(
+      screen.getByRole('button', { name: 'Current household' }),
+    ).toHaveAttribute('aria-expanded', 'true');
+    expect(
+      screen.getByRole('button', { name: 'Shared money' }),
+    ).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('link', { name: 'Repayments' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(
+      screen
+        .getAllByRole('link')
+        .filter((link) => link.getAttribute('aria-current') === 'page'),
+    ).toHaveLength(1);
+    for (const group of ['Finance', 'Banking', 'Management']) {
+      fireEvent.click(screen.getByRole('button', { name: group }));
+      expect(screen.getByRole('button', { name: group })).toHaveAttribute(
+        'aria-expanded',
+        'true',
+      );
+    }
+    const destinations = [
+      'overview',
+      'transactions',
+      'accounts',
+      'connections',
+      'bank-activity',
+      'members',
+      'invitations',
+      'reviews',
+      'rules',
+      'balances',
+      'repayments',
+      'contributions',
+      'insights',
+    ];
+    for (const page of destinations) {
+      expect(
+        document.querySelector(`a[href="/households/${householdId}/${page}"]`),
+      ).toBeInTheDocument();
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Current household' }));
+    expect(
+      screen.queryByRole('link', { name: 'Repayments' }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Close navigation' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Open navigation menu' }),
+    );
+    expect(screen.getByRole('link', { name: 'Repayments' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    view.unmount();
+  });
+
+  it('shows the creation route and clears authenticated profile identity on logout', async () => {
+    stubApp({ current: true });
+    go('/households/new');
+    render(<App />);
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Create household',
+        level: 1,
+      }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Open profile menu' }),
+    );
+    expect(screen.getByText(USER.email)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Account information'));
+    expect(screen.getByText(`Account ID: ${USER.id}`)).toBeInTheDocument();
+    expect(
+      screen.getByRole('link', { name: /Profile Settings/ }),
+    ).toHaveAttribute('href', '/account/security');
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByText('Signed out.')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Open profile menu' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(USER.email)).not.toBeInTheDocument();
   });
 });

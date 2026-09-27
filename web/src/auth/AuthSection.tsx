@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import {
   useCallback,
   useEffect,
@@ -32,6 +33,7 @@ import type { PendingInvite } from '../invitation/route';
 import type { AccountLinkRoute } from './route';
 import { AppLink } from '../NavigationMenu';
 import type { AppRoute } from '../navigation';
+import { ProfileMenu } from './ProfileMenu';
 
 type Phase = 'booting' | 'ready' | 'failed';
 type ForegroundKind =
@@ -117,6 +119,8 @@ export interface AuthSectionProps {
   accountLink?: AccountLinkRoute | null | undefined;
   onLeaveAccountLink?: (() => void) | undefined;
   route?: AppRoute | undefined;
+  headerProfileTarget?: HTMLElement | null;
+  headerInboxTarget?: HTMLElement | null;
 }
 
 export function AuthSection({
@@ -128,6 +132,8 @@ export function AuthSection({
   accountLink = null,
   onLeaveAccountLink = () => {},
   route = { kind: 'security' },
+  headerProfileTarget = null,
+  headerInboxTarget = null,
 }: AuthSectionProps = {}) {
   const [phase, setPhase] = useState<Phase>('booting');
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
@@ -1114,10 +1120,23 @@ export function AuthSection({
 
   if (user !== null) {
     return (
-      <section className="auth" aria-labelledby="auth-title">
+      <section
+        className="auth auth--authenticated"
+        aria-labelledby="auth-title"
+      >
         <h2 id="auth-title" className="visually-hidden">
           Account
         </h2>
+        {headerProfileTarget &&
+          createPortal(
+            <ProfileMenu
+              user={user}
+              onLogout={() => void handleLogout()}
+              disabled={loggingOut || submitting !== null}
+              loggingOut={loggingOut}
+            />,
+            headerProfileTarget,
+          )}
         {joinFlow()}
         {accountLink && (
           <div className="auth-card">
@@ -1154,7 +1173,7 @@ export function AuthSection({
         {route.kind === 'home' && (
           <div className="home-actions">
             <AppLink to="/households">Browse households</AppLink>
-            <AppLink to="/account/security">Account security</AppLink>
+            <AppLink to="/account/security">Profile Settings</AppLink>
           </div>
         )}
         {(route.kind === 'security' || route.kind === 'link') && (
@@ -1277,15 +1296,11 @@ export function AuthSection({
             </button>
           </div>
         )}
-        <div
-          className={
-            route.kind === 'directory' || route.kind === 'household'
-              ? 'auth-card'
-              : undefined
-          }
-        >
+        <div className="auth-household-content">
           <HouseholdSection
             key={user.id}
+            headerInboxTarget={headerInboxTarget}
+            createMode={route.kind === 'household-create'}
             csrf={csrf}
             onCsrfRefreshed={setCsrf}
             onSessionExpired={handleHouseholdSessionExpired}
@@ -1298,7 +1313,11 @@ export function AuthSection({
                 ? { householdId: route.householdId, page: route.page }
                 : null
             }
-            active={route.kind === 'directory' || route.kind === 'household'}
+            active={
+              route.kind === 'directory' ||
+              route.kind === 'household' ||
+              route.kind === 'household-create'
+            }
           />
         </div>
       </section>

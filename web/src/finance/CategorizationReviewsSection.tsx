@@ -26,6 +26,7 @@ import {
   type Transaction,
   type TransactionCategory,
 } from '../auth/client';
+import { FilterBar } from '../ui/FilterBar';
 import { categoryLabel } from './categories';
 import { formatMoney } from './money';
 
@@ -1719,30 +1720,44 @@ export function CategorizationReviewsSection({
       <div id={queueId}>
         {queueOpen && (
           <>
+            <FilterBar
+              title="Suggestion filters"
+              summary={
+                view === 'OPEN' ? 'Waiting for review' : 'Resolved suggestions'
+              }
+              activeCount={view === 'OPEN' ? 0 : 1}
+              disabled={busy || !queueOpen}
+              onReset={() => {
+                setView('OPEN');
+                showReview(null);
+                setDraftCategory('');
+                setDraftError(undefined);
+              }}
+            >
+              <div className="household-field">
+                <label htmlFor={`reviews-view-${household.id}`}>Show</label>
+                <select
+                  id={`reviews-view-${household.id}`}
+                  value={view}
+                  onChange={(event) => {
+                    const next = event.target.value as CategorizationReviewView;
+                    setView(next);
+                    showReview(null);
+                    setDraftCategory('');
+                    setDraftError(undefined);
+                  }}
+                  disabled={busy || !queueOpen}
+                >
+                  <option value="OPEN">Waiting for review</option>
+                  <option value="HISTORY">Resolved suggestions</option>
+                </select>
+              </div>
+            </FilterBar>
             {!authorityConfirmed && (
               <p role="status" className="household-stale">
                 Refresh the household before deciding on suggestions.
               </p>
             )}
-
-            <div className="household-field">
-              <label htmlFor={`reviews-view-${household.id}`}>Show</label>
-              <select
-                id={`reviews-view-${household.id}`}
-                value={view}
-                onChange={(event) => {
-                  const next = event.target.value as CategorizationReviewView;
-                  setView(next);
-                  showReview(null);
-                  setDraftCategory('');
-                  setDraftError(undefined);
-                }}
-                disabled={busy}
-              >
-                <option value="OPEN">Waiting for review</option>
-                <option value="HISTORY">Resolved suggestions</option>
-              </select>
-            </div>
 
             {page === null && loading && (
               <p role="status" aria-live="polite">

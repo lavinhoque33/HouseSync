@@ -718,8 +718,13 @@ describe('stale requests and focus expiry', () => {
 
   it('shows session-ended when focus recheck finds an expired session', async () => {
     stubFetch({ csrf: csrfOk, me: meAuthenticated });
-    render(<AuthSection />);
-    expect(await screen.findByText(USER.email)).toBeInTheDocument();
+    render(<AuthSection headerProfileTarget={document.body} />);
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Open profile menu' }),
+    );
+    expect(screen.getByRole('dialog', { name: 'Profile' })).toHaveAttribute(
+      'open',
+    );
     vi.mocked(fetch).mockImplementation(
       async (input: string | URL | Request) => {
         const url = typeof input === 'string' ? input : input.toString();
@@ -735,6 +740,10 @@ describe('stale requests and focus expiry', () => {
     expect(
       screen.getByRole('heading', { name: 'Sign in' }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Open profile menu' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(USER.email)).not.toBeInTheDocument();
   });
 
   it('keeps the session when a focus recheck fails with a network error', async () => {

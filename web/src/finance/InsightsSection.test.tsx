@@ -142,6 +142,7 @@ describe('household insights interactions', () => {
     fetchSeries.mockImplementation(async () => series());
     const view = mount();
     await screen.findByText(/Percent unavailable: zero baseline/);
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     fireEvent.change(screen.getByLabelText('Month'), {
       target: { value: '2026-07' },
     });
@@ -313,6 +314,7 @@ describe('household insights interactions', () => {
     );
     fetchSeries.mockImplementation(async () => series());
     mount();
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     fireEvent.change(screen.getByLabelText('Breakdown'), {
       target: { value: 'MERCHANT' },
     });
@@ -598,6 +600,7 @@ describe('household insights interactions', () => {
     expect(
       await screen.findByText('Shared groceries refund'),
     ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     fireEvent.change(screen.getByLabelText('Month'), {
       target: { value: '2026-07' },
     });

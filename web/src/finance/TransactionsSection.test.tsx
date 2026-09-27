@@ -20,6 +20,16 @@ import type {
 import { TransactionsSection } from './TransactionsSection';
 import type { HouseholdPage } from '../navigation';
 
+function chooseFeedRadio(name: string) {
+  fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
+  fireEvent.click(
+    within(
+      screen.getByRole('dialog', { name: 'Transaction feed filters' }),
+    ).getByRole('radio', { name }),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+}
+
 const CSRF = { token: 'csrf-token-1', headerName: 'X-CSRF-TOKEN' };
 const HOUSEHOLD: Household = {
   id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
@@ -865,7 +875,7 @@ describe('sibling account-list refresh', () => {
     // ...while a feed reload bumps the shared transaction generation. The
     // metadata fetch is decoupled from that generation, so its response
     // still publishes.
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
 
     await act(async () => {
       resolveMetadata?.(
@@ -2883,7 +2893,7 @@ describe('feeds', () => {
           : transactionPage([]),
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     expect(await screen.findByText('Shared internet bill')).toBeInTheDocument();
     const row = screen
       .getByText('Shared internet bill')
@@ -2897,7 +2907,7 @@ describe('feeds', () => {
         .map((button) => button.textContent),
     ).toEqual(['Details']);
     // The own feed stays empty and labelled distinctly.
-    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    chooseFeedRadio('My transactions');
     expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
     expect(screen.queryByText('Shared internet bill')).toBeNull();
   });
@@ -2912,7 +2922,7 @@ describe('feeds', () => {
       transactionGet: () => jsonResponse(sharedByOther()),
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     const row = (await screen.findByText('Shared internet bill')).closest(
       'li',
     ) as HTMLLIElement;
@@ -2972,7 +2982,7 @@ describe('feeds', () => {
           : transactionPage([]),
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     const row = (await screen.findByText('Groceries')).closest(
       'li',
     ) as HTMLLIElement;
@@ -3005,7 +3015,7 @@ describe('feeds', () => {
         ),
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     await screen.findByText('Shared internet bill');
     fireEvent.click(
       screen.getByRole('button', { name: 'Details for Shared internet bill' }),
@@ -3023,11 +3033,14 @@ describe('feeds', () => {
       transactionsGet: () => transactionPage([]),
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     expect(
       await screen.findByText('No shared transactions yet.'),
     ).toBeInTheDocument();
     expect(screen.queryByText('No transactions yet.')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
+    expect(screen.getByText('My transactions · All')).toBeInTheDocument();
   });
 
   it('reconciles session loss from the household feed with cleared scoped data', async () => {
@@ -3041,7 +3054,7 @@ describe('feeds', () => {
           : transactionPage([]),
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
   });
   it('filters on the server, pages past 100 with dedupe, and preserves a draft', async () => {
@@ -3089,7 +3102,7 @@ describe('feeds', () => {
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Keep my draft' },
     });
-    fireEvent.click(screen.getByRole('radio', { name: 'Shared by me' }));
+    chooseFeedRadio('Shared by me');
     expect(await screen.findByText('Shared entry 99')).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole('button', { name: 'Load more transactions' }),
@@ -3111,6 +3124,16 @@ describe('feeds', () => {
     expect(
       screen.queryByRole('button', { name: 'Load more transactions' }),
     ).toBeNull();
+    expect(
+      screen.getByText('My transactions · Shared by me'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
+    expect(screen.getByText('My transactions · All')).toBeInTheDocument();
+    expect(screen.getByLabelText('Description')).toHaveValue('Keep my draft');
+    expect(calls.some(({ url }) => url.endsWith('view=OWN&status=ALL'))).toBe(
+      true,
+    );
     // Rendering a full 100-row page beside the older match is the behavior
     // under test; it needs headroom under a loaded parallel run.
   }, 15000);
@@ -3145,7 +3168,7 @@ describe('feeds', () => {
       },
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     await screen.findByText('Shared internet bill');
     fireEvent.click(
       screen.getByRole('button', { name: 'Load more transactions' }),
@@ -3380,12 +3403,12 @@ describe('feeds', () => {
       },
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Private' }));
+    chooseFeedRadio('Private');
     await screen.findByText('Private first page');
     fireEvent.click(
       screen.getByRole('button', { name: 'Load more transactions' }),
     );
-    fireEvent.click(screen.getByRole('radio', { name: 'Shared by me' }));
+    chooseFeedRadio('Shared by me');
     await screen.findByText('Shared first page');
     await act(async () => {
       failOldPage(
@@ -3418,7 +3441,7 @@ describe('feeds', () => {
       screen.getByRole('button', { name: 'Details for Groceries' }),
     );
     await screen.findByRole('group', { name: 'Details for Groceries' });
-    fireEvent.click(screen.getByRole('radio', { name: 'Shared by me' }));
+    chooseFeedRadio('Shared by me');
     await screen.findByText('No transactions yet.');
     expect(
       screen.getByRole('group', { name: 'Details for Groceries' }),
@@ -3465,6 +3488,7 @@ describe('feeds', () => {
           : transactionPage([]),
     });
     await screen.findByText('No transactions yet.');
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     const privateRadio = screen.getByRole('radio', { name: 'Private' });
     privateRadio.focus();
     expect(privateRadio).toHaveFocus();
@@ -3530,6 +3554,7 @@ describe('feeds', () => {
           : transactionPage([]),
     });
     await screen.findByText('No transactions yet.');
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     const householdRadio = screen.getByRole('radio', {
       name: 'Household feed',
     });
@@ -3740,9 +3765,7 @@ describe('feeds', () => {
     expect(
       screen.queryByRole('button', { name: 'Load more transactions' }),
     ).toBeNull();
-    expect(
-      screen.getByRole('radio', { name: 'My transactions' }),
-    ).toHaveFocus();
+    expect(screen.getByRole('button', { name: /^Filters/ })).toHaveFocus();
   });
 
   it('does not move focus after a deferred final page when the user left the pager', async () => {
@@ -3857,9 +3880,9 @@ describe('sharing', () => {
         jsonResponse(transaction({ visibility: 'HOUSEHOLD', version: 1 })),
     });
     await screen.findByText('Groceries');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     await screen.findByText('Shared internet bill');
-    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    chooseFeedRadio('My transactions');
     // The own feed restarts at page one on the view change, so the row's
     // Share action returns only after that reload settles.
     fireEvent.click(
@@ -4233,12 +4256,14 @@ describe('allocations', () => {
     });
     await within(panel).findByText(/Cumulative posted refunds: 0.00 USD/);
     expenseVersion = 2;
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     await waitFor(() =>
       expect(
         screen.getByRole('radio', { name: 'Household feed' }),
       ).toBeEnabled(),
     );
     fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(finishRefresh).toBeDefined());
     expect(
       within(panel).queryByText(/Cumulative posted refunds: 0.00 USD/),
@@ -4280,7 +4305,7 @@ describe('allocations', () => {
       within(panel).getByText(/Cumulative posted refunds: 2.00 USD/),
     ).toBeInTheDocument();
     expenseVersion = 1;
-    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    chooseFeedRadio('My transactions');
     await waitFor(() =>
       expect(
         calls.filter(({ url }) => url.includes('view=OWN&status=ALL')),
@@ -4346,7 +4371,7 @@ describe('allocations', () => {
     });
     expect(reads).toBe(1);
     version = 2;
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     await waitFor(() => expect(releaseOld).toBeDefined());
     expect(
       within(sourcePanel).queryByRole('region', {
@@ -4354,7 +4379,7 @@ describe('allocations', () => {
       }),
     ).toBeNull();
     version = 3;
-    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    chooseFeedRadio('My transactions');
     await waitFor(() => expect(reads).toBe(3));
     await act(async () => {
       releaseOld!(jsonResponse(activeAllocation({ transactionVersion: 2 })));
@@ -4370,12 +4395,12 @@ describe('allocations', () => {
     expect(
       calls.filter(({ url }) => url.endsWith(`${EXPENSE_ID}/allocation`)),
     ).toHaveLength(3);
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     // The next scope switch is intentionally ignored while the prior feed is
     // loading. Wait for the visible page, not just for its request to start.
     await screen.findByRole('list', { name: 'Household transactions' });
     version = 4;
-    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    chooseFeedRadio('My transactions');
     await within(sourcePanel).findByRole('region', {
       name: 'Current refund impact',
     });
@@ -4407,7 +4432,7 @@ describe('allocations', () => {
       { code: 'NETWORK_ERROR', message: 'Could not check allocation.' },
       503,
     );
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     await waitFor(() => expect(reads).toBe(2));
     expect(
       screen.queryByRole('region', { name: 'Current refund impact' }),
@@ -4415,7 +4440,7 @@ describe('allocations', () => {
     expect(screen.getByText('2', { selector: 'dd' })).toBeInTheDocument();
     version = 3;
     response = allocationNotFound();
-    fireEvent.click(screen.getByRole('radio', { name: 'My transactions' }));
+    chooseFeedRadio('My transactions');
     await waitFor(() => expect(reads).toBe(3));
     expect(
       screen.queryByRole('region', { name: 'Current refund impact' }),
@@ -4443,7 +4468,7 @@ describe('allocations', () => {
     await screen.findByText('Groceries');
     await waitFor(() => expect(releaseOld).toBeDefined());
     version = 2;
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     await waitFor(() => expect(read).toBe(2));
     await act(async () => {
       releaseOld!(jsonResponse(activeAllocation({ transactionVersion: 1 })));
@@ -4491,7 +4516,7 @@ describe('allocations', () => {
     });
     await within(panel).findByText(/Cumulative posted refunds: 0.00 USD/);
     version = 2;
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1));
     await act(async () => {
       releaseOld!(jsonResponse(activeAllocation()));
@@ -5362,7 +5387,7 @@ describe('allocations', () => {
         ),
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     const row = (await screen.findByText('Shared internet bill')).closest(
       'li',
     ) as HTMLLIElement;
@@ -6421,7 +6446,7 @@ describe('categorization provenance', () => {
       },
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     const row = (await screen.findByText('Shared internet bill')).closest(
       'li',
     ) as HTMLLIElement;
@@ -7257,7 +7282,7 @@ describe('explicit future-match learning', () => {
       },
     });
     await screen.findByText('No transactions yet.');
-    fireEvent.click(screen.getByRole('radio', { name: 'Household feed' }));
+    chooseFeedRadio('Household feed');
     const row = (await screen.findByText('Shared internet bill')).closest(
       'li',
     ) as HTMLLIElement;

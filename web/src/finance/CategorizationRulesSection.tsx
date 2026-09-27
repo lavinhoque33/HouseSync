@@ -17,6 +17,7 @@ import {
   type Household,
   type TransactionCategory,
 } from '../auth/client';
+import { FilterBar } from '../ui/FilterBar';
 import { categoryLabel } from './categories';
 
 interface Notice {
@@ -700,24 +701,43 @@ export function CategorizationRulesSection({
         your rules.
       </p>
 
-      <div className="household-field">
-        <label htmlFor={`rules-filter-${household.id}`}>Show</label>
-        <select
-          id={`rules-filter-${household.id}`}
-          value={filter}
-          onChange={(event) => {
-            setFilter(event.target.value as RuleFilter);
-            setEditingId(null);
-            setEditError(undefined);
-            setPendingDeactivate(null);
-          }}
-          disabled={busy}
-        >
-          <option value="ACTIVE">Active rules</option>
-          <option value="INACTIVE">Deactivated rules</option>
-          <option value="ALL">All rules</option>
-        </select>
-      </div>
+      <FilterBar
+        title="Rule filters"
+        summary={
+          filter === 'ACTIVE'
+            ? 'Active rules'
+            : filter === 'INACTIVE'
+              ? 'Deactivated rules'
+              : 'All rules'
+        }
+        activeCount={filter === 'ACTIVE' ? 0 : 1}
+        disabled={busy}
+        onReset={() => {
+          setFilter('ACTIVE');
+          setEditingId(null);
+          setEditError(undefined);
+          setPendingDeactivate(null);
+        }}
+      >
+        <div className="household-field">
+          <label htmlFor={`rules-filter-${household.id}`}>Show</label>
+          <select
+            id={`rules-filter-${household.id}`}
+            value={filter}
+            onChange={(event) => {
+              setFilter(event.target.value as RuleFilter);
+              setEditingId(null);
+              setEditError(undefined);
+              setPendingDeactivate(null);
+            }}
+            disabled={busy}
+          >
+            <option value="ACTIVE">Active rules</option>
+            <option value="INACTIVE">Deactivated rules</option>
+            <option value="ALL">All rules</option>
+          </select>
+        </div>
+      </FilterBar>
 
       {!authorityConfirmed && (
         <p role="status" className="household-stale">

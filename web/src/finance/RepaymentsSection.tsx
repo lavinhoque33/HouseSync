@@ -17,6 +17,7 @@ import {
   type RepaymentEvent,
   type RepaymentMoney,
 } from '../auth/client';
+import { FilterBar } from '../ui/FilterBar';
 import {
   encodeMoneyMagnitude,
   formatMoney,
@@ -119,7 +120,7 @@ export function RepaymentsSection({
   const [reviewFetched, setReviewFetched] = useState(false);
   const detailHeading = useRef<HTMLHeadingElement>(null);
   const sectionHeading = useRef<HTMLHeadingElement>(null);
-  const filterControl = useRef<HTMLSelectElement>(null);
+  const filterTrigger = useRef<HTMLDivElement>(null);
   const createInFlight = useRef(false);
   const createIntent = useRef<PendingCreate | null>(pendingCreate);
   const currentDetailId = useRef<string | null>(null);
@@ -598,6 +599,23 @@ export function RepaymentsSection({
     setNotice(null);
     void loadList(false, next);
   }
+  function resetFilters() {
+    setFilterStatus('ALL');
+    setFilterCurrency('');
+    setFrom('');
+    setTo('');
+    const defaults = {
+      status: 'ALL' as const,
+      currency: '' as const,
+      from: '',
+      to: '',
+    };
+    setApplied(defaults);
+    setItems([]);
+    setNotice(null);
+    void loadList(false, defaults);
+  }
+
   const possible = detail?.allowedActions ?? [];
   return (
     <section
@@ -620,6 +638,79 @@ export function RepaymentsSection({
         change; other members may infer payment activity from those aggregates.
         Avoid recording one real transfer twice.
       </p>
+      <div ref={filterTrigger} className="repayment-list-filters">
+        <FilterBar
+          title="Repayment activity filters"
+          summary={`${applied.status === 'ALL' ? 'All statuses' : applied.status} · ${applied.currency || 'All currencies'}${applied.from ? ` · ${applied.from}–${applied.to}` : ''}`}
+          activeCount={
+            Number(applied.status !== 'ALL') +
+            Number(applied.currency !== '') +
+            Number(applied.from !== '')
+          }
+          disabled={busy}
+          onReset={resetFilters}
+        >
+          <form
+            onSubmit={applyFilters}
+            className="finance-filter-form"
+            noValidate
+          >
+            <h5>Filter your party activity</h5>
+            <label htmlFor={`repayment-status-${household.id}`}>Status</label>
+            <select
+              id={`repayment-status-${household.id}`}
+              value={filterStatus}
+              onChange={(e) =>
+                setFilterStatus(e.target.value as typeof filterStatus)
+              }
+            >
+              {STATUSES.map((s) => (
+                <option key={s}>{s}</option>
+              ))}
+            </select>
+            <label htmlFor={`repayment-filter-currency-${household.id}`}>
+              Currency
+            </label>
+            <select
+              id={`repayment-filter-currency-${household.id}`}
+              value={filterCurrency}
+              onChange={(e) =>
+                setFilterCurrency(e.target.value as typeof filterCurrency)
+              }
+            >
+              <option value="">All currencies</option>
+              {CURRENCIES.map((code) => (
+                <option key={code}>{code}</option>
+              ))}
+            </select>
+            <label htmlFor={`repayment-from-${household.id}`}>
+              From (inclusive)
+            </label>
+            <input
+              id={`repayment-from-${household.id}`}
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+            />
+            <label htmlFor={`repayment-to-${household.id}`}>
+              To (exclusive)
+            </label>
+            <input
+              id={`repayment-to-${household.id}`}
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+            />
+            <button
+              type="submit"
+              className="household-button household-button--secondary"
+              disabled={busy}
+            >
+              Apply filters
+            </button>
+          </form>
+        </FilterBar>
+      </div>
       <form onSubmit={create} className="finance-filter-form" noValidate>
         <h5>Assert a completed payment you sent</h5>
         <label htmlFor={`repayment-recipient-${household.id}`}>
@@ -693,60 +784,6 @@ export function RepaymentsSection({
             until same-key retry succeeds or conflicts.
           </p>
         )}
-      </form>
-      <form onSubmit={applyFilters} className="finance-filter-form" noValidate>
-        <h5>Filter your party activity</h5>
-        <label htmlFor={`repayment-status-${household.id}`}>Status</label>
-        <select
-          ref={filterControl}
-          id={`repayment-status-${household.id}`}
-          value={filterStatus}
-          onChange={(e) =>
-            setFilterStatus(e.target.value as typeof filterStatus)
-          }
-        >
-          {STATUSES.map((s) => (
-            <option key={s}>{s}</option>
-          ))}
-        </select>
-        <label htmlFor={`repayment-filter-currency-${household.id}`}>
-          Currency
-        </label>
-        <select
-          id={`repayment-filter-currency-${household.id}`}
-          value={filterCurrency}
-          onChange={(e) =>
-            setFilterCurrency(e.target.value as typeof filterCurrency)
-          }
-        >
-          <option value="">All currencies</option>
-          {CURRENCIES.map((code) => (
-            <option key={code}>{code}</option>
-          ))}
-        </select>
-        <label htmlFor={`repayment-from-${household.id}`}>
-          From (inclusive)
-        </label>
-        <input
-          id={`repayment-from-${household.id}`}
-          type="date"
-          value={from}
-          onChange={(e) => setFrom(e.target.value)}
-        />
-        <label htmlFor={`repayment-to-${household.id}`}>To (exclusive)</label>
-        <input
-          id={`repayment-to-${household.id}`}
-          type="date"
-          value={to}
-          onChange={(e) => setTo(e.target.value)}
-        />
-        <button
-          type="submit"
-          className="household-button household-button--secondary"
-          disabled={busy}
-        >
-          Apply filters
-        </button>
       </form>
       {busy && <p role="status">Updating your repayment activity…</p>}
       {notice && (
@@ -1090,7 +1127,12 @@ export function RepaymentsSection({
               setEvents([]);
               const trigger = detailTrigger.current;
               if (trigger?.isConnected) trigger.focus();
-              else (filterControl.current ?? sectionHeading.current)?.focus();
+              else
+                (
+                  filterTrigger.current?.querySelector<HTMLButtonElement>(
+                    '.filter-trigger',
+                  ) ?? sectionHeading.current
+                )?.focus();
             }}
           >
             Close private detail

@@ -1051,9 +1051,11 @@ describe('categorization review queue', () => {
     });
     await openReviewDetail();
 
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     fireEvent.change(screen.getByLabelText('Show'), {
       target: { value: 'HISTORY' },
     });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
 
     expect(
       await screen.findByRole('button', {
@@ -1078,6 +1080,12 @@ describe('categorization review queue', () => {
       within(detail).queryByRole('button', { name: 'Save decision' }),
     ).not.toBeInTheDocument();
     expect(within(detail).queryAllByRole('radio')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    expect(
+      await screen.findByRole('button', {
+        name: 'Review the suggestion for Corner Market',
+      }),
+    ).toBeInTheDocument();
   });
 
   it('converges the count on a parent refresh signal without discarding a chosen category draft', async () => {
@@ -1279,9 +1287,11 @@ describe('owner-visible AI work status', () => {
     fireEvent.click(
       screen.getByRole('button', { name: /Review suggested categories/ }),
     );
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     fireEvent.change(screen.getByLabelText('Show'), {
       target: { value: 'HISTORY' },
     });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     rerender({ refreshSignal: 1 });
     expect(statusCalls).toBe(2);
 
@@ -1326,9 +1336,13 @@ describe('owner-visible AI work status', () => {
     fireEvent.click(
       screen.getByRole('button', { name: /Review suggested categories/ }),
     );
+    const filters = screen.getByRole('button', { name: /^Filters/ });
+    await waitFor(() => expect(filters).not.toBeDisabled());
+    fireEvent.click(filters);
     fireEvent.change(screen.getByLabelText('Show'), {
       target: { value: 'HISTORY' },
     });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
 
     // The read still publishes, so the owner sees the pending backlog instead
     // of a panel whose progress was silently discarded by the reload.

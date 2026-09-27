@@ -5,6 +5,7 @@ import {
   type Household,
   type SpendingSummary,
 } from '../auth/client';
+import { FilterBar } from '../ui/FilterBar';
 import { formatMoney } from './money';
 import {
   currentMonthIntervalInZone,
@@ -363,76 +364,92 @@ export function SpendingDashboardSection({
         </p>
       )}
 
-      <form
-        className="spending-controls"
-        onSubmit={handleApply}
-        noValidate
-        aria-label="Spending period"
+      <FilterBar
+        title="Spending period filters"
+        summary={
+          appliedFrom && appliedTo
+            ? `${appliedFrom}–${appliedTo}`
+            : 'Current month'
+        }
+        activeCount={customized ? 1 : 0}
+        disabled={loading}
+        onReset={handleCurrentMonth}
       >
-        <div className="household-field">
-          <label htmlFor={`spending-from-${household.id}`}>From date</label>
-          <input
-            id={`spending-from-${household.id}`}
-            ref={fromInputRef}
-            name="spending-from"
-            type="date"
-            required
-            min="1900-01-01"
-            max="9999-12-31"
-            value={draftFrom}
-            onChange={(event) => setDraftFrom(event.target.value)}
-            aria-invalid={Boolean(intervalError)}
-            aria-describedby={
-              intervalError
-                ? `spending-interval-error-${household.id}`
-                : undefined
-            }
-            disabled={loading}
-          />
-        </div>
-        <div className="household-field">
-          <label htmlFor={`spending-to-${household.id}`}>To date</label>
-          <input
-            id={`spending-to-${household.id}`}
-            name="spending-to"
-            type="date"
-            required
-            min="1900-01-01"
-            max="9999-12-31"
-            value={draftTo}
-            onChange={(event) => setDraftTo(event.target.value)}
-            aria-invalid={Boolean(intervalError)}
-            aria-describedby={
-              intervalError
-                ? `spending-interval-error-${household.id}`
-                : undefined
-            }
-            disabled={loading}
-          />
-        </div>
-        {intervalError && (
-          <p
-            id={`spending-interval-error-${household.id}`}
-            role="alert"
-            className="household-error"
-          >
-            {intervalError}
-          </p>
-        )}
-        <div className="spending-actions">
-          <button type="submit" className="household-button" disabled={loading}>
-            Show period
-          </button>
-          <button
-            type="button"
-            className="household-button household-button--secondary"
-            onClick={handleCurrentMonth}
-            disabled={loading}
-          >
-            Current month
-          </button>
-        </div>
-      </form>
+        <form
+          className="spending-controls"
+          onSubmit={handleApply}
+          noValidate
+          aria-label="Spending period"
+        >
+          <div className="household-field">
+            <label htmlFor={`spending-from-${household.id}`}>From date</label>
+            <input
+              id={`spending-from-${household.id}`}
+              ref={fromInputRef}
+              name="spending-from"
+              type="date"
+              required
+              min="1900-01-01"
+              max="9999-12-31"
+              value={draftFrom}
+              onChange={(event) => setDraftFrom(event.target.value)}
+              aria-invalid={Boolean(intervalError)}
+              aria-describedby={
+                intervalError
+                  ? `spending-interval-error-${household.id}`
+                  : undefined
+              }
+              disabled={loading}
+            />
+          </div>
+          <div className="household-field">
+            <label htmlFor={`spending-to-${household.id}`}>To date</label>
+            <input
+              id={`spending-to-${household.id}`}
+              name="spending-to"
+              type="date"
+              required
+              min="1900-01-01"
+              max="9999-12-31"
+              value={draftTo}
+              onChange={(event) => setDraftTo(event.target.value)}
+              aria-invalid={Boolean(intervalError)}
+              aria-describedby={
+                intervalError
+                  ? `spending-interval-error-${household.id}`
+                  : undefined
+              }
+              disabled={loading}
+            />
+          </div>
+          {intervalError && (
+            <p
+              id={`spending-interval-error-${household.id}`}
+              role="alert"
+              className="household-error"
+            >
+              {intervalError}
+            </p>
+          )}
+          <div className="spending-actions">
+            <button
+              type="submit"
+              className="household-button"
+              disabled={loading}
+            >
+              Show period
+            </button>
+            <button
+              type="button"
+              className="household-button household-button--secondary"
+              onClick={handleCurrentMonth}
+              disabled={loading}
+            >
+              Current month
+            </button>
+          </div>
+        </form>
+      </FilterBar>
 
       {notice && (
         <div

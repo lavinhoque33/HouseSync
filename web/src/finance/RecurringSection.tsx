@@ -13,6 +13,7 @@ import {
   type CsrfToken,
   type Household,
 } from '../auth/client';
+import { FilterBar } from '../ui/FilterBar';
 import {
   encodeMoneyMagnitude,
   formatMoney,
@@ -840,18 +841,25 @@ export function RecurringSection({
         the spending comparison above, not recurrence observations. Refresh
         after ledger or disclosure changes.
       </p>
-      <label>
-        Review filter{' '}
-        <select
-          value={review}
-          onChange={(event) =>
-            setReview(event.target.value as 'OPEN' | 'DISMISSED')
-          }
-        >
-          <option value="OPEN">Open</option>
-          <option value="DISMISSED">Dismissed</option>
-        </select>
-      </label>
+      <FilterBar
+        title="Recurring expense filters"
+        summary={`${review === 'OPEN' ? 'Open' : 'Dismissed'} reviews`}
+        activeCount={review === 'OPEN' ? 0 : 1}
+        onReset={() => setReview('OPEN')}
+      >
+        <label>
+          Review filter{' '}
+          <select
+            value={review}
+            onChange={(event) =>
+              setReview(event.target.value as 'OPEN' | 'DISMISSED')
+            }
+          >
+            <option value="OPEN">Open</option>
+            <option value="DISMISSED">Dismissed</option>
+          </select>
+        </label>
+      </FilterBar>
       <p>
         Your dismissals are private review preferences, not shared plans. A
         previously shared suggestion disappearing means current shared evidence

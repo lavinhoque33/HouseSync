@@ -678,10 +678,12 @@ describe('external repayment activity', () => {
     await waitFor(() => expect(trigger).toHaveFocus());
     fireEvent.click(trigger);
     await screen.findByText(/Party record · version 0/);
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     fireEvent.change(screen.getByLabelText('Status'), {
       target: { value: 'CONFIRMED' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() =>
       expect(
         screen.queryByRole('button', { name: 'Review party-only record' }),
@@ -690,7 +692,9 @@ describe('external repayment activity', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'Close private detail' }),
     );
-    await waitFor(() => expect(screen.getByLabelText('Status')).toHaveFocus());
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^Filters/ })).toHaveFocus(),
+    );
   });
   it('invalidates derived money on an external confirmation found by filtered list refresh', async () => {
     let remote = false;
@@ -726,6 +730,7 @@ describe('external repayment activity', () => {
     await screen.findByText(/You received 3.00 USD/);
     expect(changed).not.toHaveBeenCalled();
     remote = true;
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
     await screen.findByText(/You received 3.00 USD.*CONFIRMED/);
     expect(changed).toHaveBeenCalledTimes(1);
@@ -733,8 +738,14 @@ describe('external repayment activity', () => {
       target: { value: 'PENDING' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await screen.findByText(/No party-only repayments match these filters/);
     expect(changed).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+    await screen.findByText(/You received 3.00 USD.*CONFIRMED/);
+    expect(
+      screen.getByText('All statuses · All currencies'),
+    ).toBeInTheDocument();
   });
   it('refreshes derived money after a failed local list read and a later filtered external change', async () => {
     const local = {
@@ -796,10 +807,12 @@ describe('external repayment activity', () => {
     fireEvent.click(screen.getByRole('button', { name: /Record assertion/ }));
     await screen.findByText(/Could not refresh party activity/);
     expect(changed).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: /^Filters/ }));
     fireEvent.change(screen.getByLabelText('Status'), {
       target: { value: 'PENDING' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Apply filters' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     await waitFor(() => expect(listReads).toBe(3));
     expect(changed).toHaveBeenCalledTimes(2);
   });

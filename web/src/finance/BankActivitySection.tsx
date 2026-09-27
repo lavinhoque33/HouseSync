@@ -36,6 +36,7 @@ import {
   type TransactionAllocation,
   type TransactionCategory,
 } from '../auth/client';
+import { FilterBar } from '../ui/FilterBar';
 import {
   confirmEvidenceOf,
   draftFor,
@@ -101,6 +102,8 @@ interface BankActivitySectionProps {
    * form drafts. Dismissal never calls it.
    */
   onLedgerChanged?: (() => void) | undefined;
+  /** Signals every committed review decision to refresh the scoped inbox badge. */
+  onInboxChanged?: (() => void) | undefined;
 }
 
 const STATE_FILTERS: ReadonlyArray<'ALL' | BankActivityState> = [
@@ -626,6 +629,7 @@ export function BankActivitySection({
   authorityConfirmed,
   refreshSignal = 0,
   onLedgerChanged,
+  onInboxChanged,
 }: BankActivitySectionProps) {
   const [page, setPage] = useState<BankActivityPage | null>(null);
   const [connections, setConnections] = useState<FinancialConnection[] | null>(
@@ -1294,6 +1298,7 @@ export function BankActivitySection({
         ),
       };
     });
+    onInboxChanged?.();
   }
 
   /**
@@ -2066,44 +2071,57 @@ export function BankActivitySection({
         </div>
       )}
 
+      <FilterBar
+        title="Bank activity filters"
+        summary={`${stateFilter === 'ALL' ? 'All statuses' : stateLabel(stateFilter)} · ${reviewFilter === 'ALL' ? 'All reviews' : reviewLabel(reviewFilter)}`}
+        activeCount={
+          Number(stateFilter !== 'ALL') + Number(reviewFilter !== 'ALL')
+        }
+        disabled={pendingDecision !== null || pendingDismiss !== null}
+        onReset={() => {
+          setStateFilter('ALL');
+          setReviewFilter('ALL');
+        }}
+      >
+        <label>
+          Status
+          <select
+            value={stateFilter}
+            onChange={(event) =>
+              setStateFilter(event.target.value as 'ALL' | BankActivityState)
+            }
+          >
+            {STATE_FILTERS.map((state) => (
+              <option key={state} value={state}>
+                {state === 'ALL' ? 'All statuses' : stateLabel(state)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Review
+          <select
+            value={reviewFilter}
+            onChange={(event) =>
+              setReviewFilter(
+                event.target.value as 'ALL' | BankActivityReviewState,
+              )
+            }
+          >
+            {REVIEW_FILTERS.map((review) => (
+              <option key={review} value={review}>
+                {review === 'ALL' ? 'All reviews' : reviewLabel(review)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </FilterBar>
       <fieldset
         className="bank-activity-controls"
         aria-label="Bank activity controls"
         disabled={pendingDecision !== null || pendingDismiss !== null}
       >
         <div className="bank-activity-toolbar">
-          <label>
-            Status
-            <select
-              value={stateFilter}
-              onChange={(event) =>
-                setStateFilter(event.target.value as 'ALL' | BankActivityState)
-              }
-            >
-              {STATE_FILTERS.map((state) => (
-                <option key={state} value={state}>
-                  {state === 'ALL' ? 'All statuses' : stateLabel(state)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Review
-            <select
-              value={reviewFilter}
-              onChange={(event) =>
-                setReviewFilter(
-                  event.target.value as 'ALL' | BankActivityReviewState,
-                )
-              }
-            >
-              {REVIEW_FILTERS.map((review) => (
-                <option key={review} value={review}>
-                  {review === 'ALL' ? 'All reviews' : reviewLabel(review)}
-                </option>
-              ))}
-            </select>
-          </label>
           <button
             type="button"
             className="household-button household-button--secondary"

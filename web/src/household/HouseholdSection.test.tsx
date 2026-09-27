@@ -11,7 +11,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthSection } from '../auth/AuthSection';
 import { HouseholdSection } from './HouseholdSection';
 import { validateHouseholdName } from '../auth/validation';
-import { NAVIGATION_EVENT, readAppRoute } from '../navigation';
+import {
+  NAVIGATION_EVENT,
+  navigate,
+  readAppRoute,
+  householdPath,
+} from '../navigation';
 beforeEach(() => window.history.replaceState(null, '', '/households'));
 afterEach(() => window.history.replaceState(null, '', '/'));
 
@@ -392,10 +397,10 @@ describe('transaction section integration', () => {
     ).toBeInTheDocument();
     expect(screen.queryByText('No transactions yet.')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('link', { name: 'Open Elm Street home' }));
-    fireEvent.click(screen.getByText('Household pages'));
-    fireEvent.click(screen.getByRole('link', { name: 'Transactions' }));
+    act(() => navigate(householdPath(HOUSEHOLD_1.id, 'transactions')));
     expect(await screen.findByText('No transactions yet.')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Transactions' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
     expect(
       screen.getByRole('radio', { name: 'My transactions' }),
     ).toBeEnabled();
@@ -719,7 +724,7 @@ describe('household bootstrap', () => {
     expect(
       await screen.findByText(/You do not belong to a household yet/),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText('Household name')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Household name')).not.toBeInTheDocument();
   });
 
   it('renders multiple authorized households with safe fields only', async () => {
@@ -731,10 +736,7 @@ describe('household bootstrap', () => {
     render(<AuthSection route={{ kind: 'directory' }} />);
     expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
     expect(screen.getByText('Lake cabin')).toBeInTheDocument();
-    expect(screen.getByText('Role: OWNER')).toBeInTheDocument();
-    expect(screen.getByText('Role: MEMBER')).toBeInTheDocument();
-    const times = screen.getAllByText('Created:');
-    expect(times).toHaveLength(2);
+    expect(document.querySelectorAll('.household-meta')).toHaveLength(2);
     const rendered = document.querySelectorAll('time');
     expect(rendered).toHaveLength(2);
     expect(rendered[0]?.getAttribute('dateTime')).toBe(HOUSEHOLD_1.createdAt);
@@ -750,13 +752,13 @@ describe('household creation', () => {
       householdsGet: () => householdsOk([]),
       householdsPost: () => jsonResponse(HOUSEHOLD_1, 201),
     });
-    render(<AuthSection route={{ kind: 'directory' }} />);
-    expect(
-      await screen.findByText(/You do not belong to a household yet/),
-    ).toBeInTheDocument();
+    render(<AuthSection route={{ kind: 'household-create' }} />);
+    expect(await screen.findByLabelText('Household name')).toBeInTheDocument();
     typeInto('Household name', '  Elm Street home  ');
     clickLastButton('Create household');
-    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Household “Elm Street home” created/),
+    ).toBeInTheDocument();
     const post = householdCalls(calls, 'POST');
     expect(post).toHaveLength(1);
     expect(post[0]?.init?.credentials).toBe('include');
@@ -778,7 +780,7 @@ describe('household creation', () => {
       me: meAuthenticated,
       householdsGet: () => householdsOk([]),
     });
-    render(<AuthSection route={{ kind: 'directory' }} />);
+    render(<AuthSection route={{ kind: 'household-create' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', '   ');
     clickLastButton('Create household');
@@ -799,7 +801,7 @@ describe('household creation', () => {
       me: meAuthenticated,
       householdsGet: () => householdsOk([]),
     });
-    render(<AuthSection route={{ kind: 'directory' }} />);
+    render(<AuthSection route={{ kind: 'household-create' }} />);
     await screen.findByLabelText('Household name');
     const longName = 'a'.repeat(101);
     typeInto('Household name', longName);
@@ -819,7 +821,7 @@ describe('household creation', () => {
       me: meAuthenticated,
       householdsGet: () => householdsOk([]),
     });
-    render(<AuthSection route={{ kind: 'directory' }} />);
+    render(<AuthSection route={{ kind: 'household-create' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', `Home${String.fromCharCode(7)}bell`);
     clickLastButton('Create household');
@@ -847,7 +849,7 @@ describe('household creation', () => {
           400,
         ),
     });
-    render(<AuthSection route={{ kind: 'directory' }} />);
+    render(<AuthSection route={{ kind: 'household-create' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', 'Elm Street home');
     clickLastButton('Create household');
@@ -871,7 +873,7 @@ describe('household creation', () => {
       householdsGet: () => householdsOk([]),
       householdsPost: () => gate,
     });
-    render(<AuthSection route={{ kind: 'directory' }} />);
+    render(<AuthSection route={{ kind: 'household-create' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', 'Elm Street home');
     const button = screen.getByRole('button', { name: 'Create household' });
@@ -882,7 +884,9 @@ describe('household creation', () => {
     );
     expect(householdCalls(calls, 'POST')).toHaveLength(1);
     resolvePost(jsonResponse(HOUSEHOLD_1, 201));
-    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Household “Elm Street home” created/),
+    ).toBeInTheDocument();
   });
 });
 
@@ -933,7 +937,7 @@ describe('household recovery', () => {
         return jsonResponse(HOUSEHOLD_1, 201);
       },
     });
-    render(<AuthSection route={{ kind: 'directory' }} />);
+    render(<AuthSection route={{ kind: 'household-create' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', 'Elm Street home');
     clickLastButton('Create household');
@@ -946,7 +950,9 @@ describe('household recovery', () => {
       'Elm Street home',
     );
     clickLastButton('Create household');
-    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Household “Elm Street home” created/),
+    ).toBeInTheDocument();
     expect(postCalls).toBe(2);
     const posts = householdCalls(calls, 'POST');
     expect(posts[1]?.init?.headers).toMatchObject({
@@ -1007,7 +1013,7 @@ describe('household recovery', () => {
       },
     );
     vi.stubGlobal('fetch', fetchMock);
-    render(<AuthSection route={{ kind: 'directory' }} />);
+    render(<AuthSection route={{ kind: 'household-create' }} />);
     await screen.findByLabelText('Household name');
     typeInto('Household name', 'Elm Street home');
     vi.useFakeTimers();
@@ -1037,7 +1043,9 @@ describe('household recovery', () => {
     await waitFor(() =>
       expect(screen.queryByText(/outcome is unknown/i)).not.toBeInTheDocument(),
     );
-    expect(screen.getByText('Elm Street home')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'Create a household' }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText('Household name')).toHaveValue(
       'Elm Street home',
     );
@@ -1086,7 +1094,9 @@ describe('household logout and lifecycle', () => {
     expect(householdCalls(calls)).toHaveLength(0);
     await signIn();
     expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
-    expect(screen.getByText('Role: OWNER')).toBeInTheDocument();
+    expect(document.querySelector('.household-meta')).toHaveTextContent(
+      'owner',
+    );
     expect(householdCalls(calls, 'GET').length).toBeGreaterThanOrEqual(1);
   });
 
@@ -1119,15 +1129,15 @@ describe('household logout and lifecycle', () => {
     vi.stubGlobal('fetch', fetchMock);
     render(
       <StrictMode>
-        <AuthSection route={{ kind: 'directory' }} />
+        <AuthSection route={{ kind: 'household-create' }} />
       </StrictMode>,
     );
-    expect(
-      await screen.findByText(/You do not belong to a household yet/),
-    ).toBeInTheDocument();
+    await screen.findByLabelText('Household name');
     typeInto('Household name', 'Elm Street home');
     clickLastButton('Create household');
-    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Household “Elm Street home” created/),
+    ).toBeInTheDocument();
   });
 
   it('applies no household updates after a true unmount', async () => {
@@ -1143,7 +1153,9 @@ describe('household logout and lifecycle', () => {
         householdsGet: () => householdsOk([]),
         householdsPost: () => gate,
       });
-      const { unmount } = render(<AuthSection route={{ kind: 'directory' }} />);
+      const { unmount } = render(
+        <AuthSection route={{ kind: 'household-create' }} />,
+      );
       await screen.findByLabelText('Household name');
       typeInto('Household name', 'Elm Street home');
       clickLastButton('Create household');
@@ -1183,7 +1195,7 @@ describe('household list gating', () => {
         return householdsOk([]);
       },
     });
-    render(<AuthSection route={{ kind: 'directory' }} />);
+    render(<AuthSection route={{ kind: 'household-create' }} />);
     expect(
       await screen.findByText('Something went wrong. Retry.'),
     ).toBeInTheDocument();
@@ -1193,7 +1205,7 @@ describe('household list gating', () => {
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Refresh list' }));
     expect(
-      await screen.findByText(/You do not belong to a household yet/),
+      await screen.findByRole('heading', { name: 'Create a household' }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText('Household name')).toBeInTheDocument();
   });
@@ -1236,8 +1248,8 @@ describe('household list gating', () => {
       },
     );
     vi.stubGlobal('fetch', fetchMock);
-    render(<AuthSection route={{ kind: 'directory' }} />);
-    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    render(<AuthSection route={{ kind: 'household-create' }} />);
+    await screen.findByLabelText('Household name');
     typeInto('Household name', 'Lake cabin');
     vi.useFakeTimers();
     fireEvent.click(screen.getByRole('button', { name: 'Create household' }));
@@ -1254,9 +1266,10 @@ describe('household list gating', () => {
     expect(
       await screen.findByText('Something went wrong. Retry.'),
     ).toBeInTheDocument();
-    // The previously loaded household stays visible but stale, and creation
-    // is unavailable until the list recovers.
-    expect(screen.getByText('Elm Street home')).toBeInTheDocument();
+    // The failed collection refresh blocks creation until access is confirmed.
+    expect(
+      screen.getByRole('heading', { name: 'Create a household' }),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(
         /previously loaded households, which may be out of date/,
@@ -1274,7 +1287,9 @@ describe('household list gating', () => {
     ).not.toBeInTheDocument();
     typeInto('Household name', 'Lake cabin');
     clickLastButton('Create household');
-    expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Household “Lake cabin” created/),
+    ).toBeInTheDocument();
   });
 
   it('submits a 100-emoji name unchanged with no input length cap', async () => {
@@ -1286,12 +1301,12 @@ describe('household list gating', () => {
       householdsGet: () => householdsOk([]),
       householdsPost: () => jsonResponse(created, 201),
     });
-    render(<AuthSection route={{ kind: 'directory' }} />);
+    render(<AuthSection route={{ kind: 'household-create' }} />);
     const input = await screen.findByLabelText('Household name');
     expect(input).not.toHaveAttribute('maxlength');
     typeInto('Household name', emojiName);
     clickLastButton('Create household');
-    expect(await screen.findByText(emojiName)).toBeInTheDocument();
+    expect(await screen.findByText(/Household “/)).toBeInTheDocument();
     const posts = householdCalls(calls, 'POST');
     expect(posts).toHaveLength(1);
     expect(JSON.parse(String(posts[0]?.init?.body))).toEqual({
@@ -1394,6 +1409,7 @@ describe('refresh signal queuing', () => {
         refreshSignal={refreshSignal}
         onRefreshSettled={onRefreshSettled}
         currentUserId={USER.id}
+        createMode
       />,
     );
     const householdGets = () =>
@@ -1473,6 +1489,7 @@ describe('refresh signal queuing', () => {
         refreshSignal={signal}
         onRefreshSettled={settled}
         currentUserId={USER.id}
+        createMode
       />
     );
     const { rerender, householdGets } = renderSection(
@@ -1488,7 +1505,7 @@ describe('refresh signal queuing', () => {
       0,
       settled,
     );
-    await screen.findByText('Elm Street home');
+    await screen.findByLabelText('Household name');
     fireEvent.change(screen.getByLabelText('Household name'), {
       target: { value: 'Lake cabin' },
     });
@@ -1504,7 +1521,9 @@ describe('refresh signal queuing', () => {
     // Creation settles, then the queued signal triggers the reload.
     await waitFor(() => expect(householdGets()).toHaveLength(2));
     resolveReload(householdsOk([HOUSEHOLD_1, HOUSEHOLD_2]));
-    expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Household “Lake cabin” created/),
+    ).toBeInTheDocument();
     await waitFor(() => expect(settled).toHaveBeenCalledWith(1));
   });
 });
@@ -1553,7 +1572,9 @@ describe('invitation access recovery', () => {
     // The refreshed membership is MEMBER: stale owner controls disappear
     // instead of lingering with a denied role.
     await waitFor(() =>
-      expect(screen.getByText('Role: MEMBER')).toBeInTheDocument(),
+      expect(
+        document.querySelector('.household-context__role'),
+      ).toHaveTextContent('member'),
     );
     await waitFor(() =>
       expect(
@@ -1644,6 +1665,7 @@ describe('membership reconciliation wiring', () => {
           onRefreshSettled={settled}
           currentUserId={USER.id}
           route={page ? { householdId: HOUSEHOLD_1.id, page } : null}
+          createMode={page === null}
           onHouseholdReconcile={() => setSignal((version) => version + 1)}
         />
       </>
@@ -1744,7 +1766,9 @@ describe('membership reconciliation wiring', () => {
     expect(settledSignals).toHaveLength(0);
     resolveCreate(jsonResponse(HOUSEHOLD_2, 201));
     fireEvent.click(screen.getByRole('button', { name: 'Show directory' }));
-    expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Household “Lake cabin” created/),
+    ).toBeInTheDocument();
     // The queued signal drains into a second collection fetch that settles.
     await waitFor(() => expect(settledSignals).toEqual([1]));
     expect(householdCalls(calls, 'GET')).toHaveLength(2);
@@ -1806,7 +1830,9 @@ describe('membership reconciliation wiring', () => {
     expect(householdCalls(calls, 'GET')).toHaveLength(1);
     resolveCreate(jsonResponse(HOUSEHOLD_2, 201));
     fireEvent.click(screen.getByRole('button', { name: 'Show directory' }));
-    expect(await screen.findByText('Lake cabin')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Household “Lake cabin” created/),
+    ).toBeInTheDocument();
     await waitFor(() => expect(householdCalls(calls, 'GET')).toHaveLength(2));
   });
 });
@@ -1974,6 +2000,7 @@ describe('bank activity to ledger propagation', () => {
   function householdSection(
     signal: number,
     page: 'transactions' | 'bank-activity',
+    headerInboxTarget: HTMLElement | null = null,
   ) {
     return (
       <HouseholdSection
@@ -1982,6 +2009,7 @@ describe('bank activity to ledger propagation', () => {
         onSessionExpired={() => {}}
         refreshSignal={signal}
         currentUserId={USER.id}
+        headerInboxTarget={headerInboxTarget}
         route={{ householdId: HOUSEHOLD_1.id, page }}
       />
     );
@@ -2176,10 +2204,16 @@ describe('bank activity to ledger propagation', () => {
         });
       },
     });
-    const { rerender } = render(householdSection(0, 'transactions'));
+    const { rerender } = render(
+      householdSection(0, 'transactions', document.body),
+    );
 
     await screen.findByText('No transactions yet.');
-    rerender(householdSection(0, 'bank-activity'));
+    rerender(householdSection(0, 'bank-activity', document.body));
+    const inbox = await screen.findByRole('link', {
+      name: /^Bank activity inbox for/,
+    });
+    await waitFor(() => expect(within(inbox).getByText('1')).toBeVisible());
     await screen.findByText(/Pending charge/);
     // Wait for the initial sibling loads to settle so the dismiss control is
     // enabled, re-querying the row each time (the list can re-render).
@@ -2205,6 +2239,11 @@ describe('bank activity to ledger propagation', () => {
       expect(calls.some(({ url }) => url.endsWith('/dismiss'))).toBe(true);
     });
     expect(await screen.findByText(/retained evidence/)).toBeInTheDocument();
+    expect(
+      await screen.findByRole('link', {
+        name: /0 bank activity items need attention/,
+      }),
+    ).toBeInTheDocument();
     // A dismissal is a private inbox decision: the ledger feed is untouched.
     expect(
       calls.filter(({ url }) => url.includes('/transactions?')).length,
@@ -2330,5 +2369,423 @@ describe('confirmed household leave privacy', () => {
     expect(screen.queryByText(HOUSEHOLD_2.name)).not.toBeInTheDocument();
     rerender(<HouseholdSection {...sectionProps} />);
     expect(screen.getByText(HOUSEHOLD_1.name)).toBeInTheDocument();
+  });
+});
+
+describe('directory summaries and contextual inbox', () => {
+  const ownAccount = {
+    id: '22222222-2222-4222-8222-222222222222',
+    householdId: HOUSEHOLD_1.id,
+    ownerUserId: USER.id,
+    name: 'Personal checking',
+    kind: 'CHECKING',
+    currency: 'USD',
+    source: 'MANUAL',
+    visibility: 'PRIVATE',
+    status: 'ACTIVE',
+    version: 0,
+    createdAt: HOUSEHOLD_1.createdAt,
+    updatedAt: HOUSEHOLD_1.createdAt,
+  };
+
+  it('counts only the viewer accounts on a bounded page and never presents a partial page as an exact total', async () => {
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+      membersGet: () => jsonResponse({ members: [USER_MEMBER, OTHER_MEMBER] }),
+      financialAccountsGet: () =>
+        jsonResponse({
+          items: [
+            ownAccount,
+            {
+              ...ownAccount,
+              id: '33333333-3333-4333-8333-333333333333',
+              ownerUserId: OTHER_MEMBER.userId,
+            },
+          ],
+          limit: 100,
+          offset: 0,
+          hasMore: true,
+        }),
+    });
+    render(<AuthSection route={{ kind: 'directory' }} />);
+    expect(await screen.findByText('2 members')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        '1 of your private accounts in this page; more accounts may exist',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('img', {
+        name: /1 of your private accounts in this page/,
+      }),
+    ).toHaveAttribute('aria-label', expect.stringContaining('1 Checking'));
+    expect(screen.queryByLabelText('Household name')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('link', { name: `Open ${HOUSEHOLD_1.name}` }),
+    ).toHaveAttribute('href', householdPath(HOUSEHOLD_1.id, 'overview'));
+  });
+
+  it('does not invent a zero on summary failure and offers a real retry', async () => {
+    let requests = 0;
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([HOUSEHOLD_1]),
+      financialAccountsGet: () => {
+        requests++;
+        return requests === 1
+          ? jsonResponse(
+              { code: 'NETWORK_ERROR', message: 'Unavailable.' },
+              503,
+            )
+          : jsonResponse({
+              items: [ownAccount],
+              limit: 100,
+              offset: 0,
+              hasMore: false,
+            });
+      },
+    });
+    render(<AuthSection route={{ kind: 'directory' }} />);
+    expect(
+      await screen.findByText('Private accounts unavailable.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText('0 of your private accounts'),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry summary' }));
+    expect(
+      await screen.findByText('1 of your private accounts'),
+    ).toBeInTheDocument();
+    expect(requests).toBe(2);
+  });
+
+  it('shows actor-private attention for a member, refreshes when page changes, and removes the portal on security', async () => {
+    let requests = 0;
+    stubFetch({
+      csrf: csrfOk,
+      householdsGet: () => householdsOk([HOUSEHOLD_2]),
+      bankActivityGet: () => {
+        requests++;
+        return jsonResponse({
+          items: [],
+          limit: 1,
+          offset: 0,
+          hasMore: false,
+          unreviewedCount: requests === 1 ? 2 : 0,
+          changedCount: requests === 1 ? 3 : 0,
+        });
+      },
+    });
+    const target = document.createElement('div');
+    document.body.append(target);
+    const props = {
+      csrf: CSRF,
+      onCsrfRefreshed: () => {},
+      onSessionExpired: () => {},
+      currentUserId: USER.id,
+      headerInboxTarget: target,
+    };
+    try {
+      const { rerender } = render(
+        <HouseholdSection
+          {...props}
+          route={{ householdId: HOUSEHOLD_2.id, page: 'members' }}
+        />,
+      );
+      await waitFor(() =>
+        expect(
+          target.querySelector('.household-inbox__badge'),
+        ).toHaveTextContent('5'),
+      );
+      expect(
+        screen.getByRole('link', {
+          name: /5 bank activity items need attention/,
+        }),
+      ).toHaveAttribute('href', householdPath(HOUSEHOLD_2.id, 'bank-activity'));
+      rerender(
+        <HouseholdSection
+          {...props}
+          route={{ householdId: HOUSEHOLD_2.id, page: 'invitations' }}
+        />,
+      );
+      await waitFor(() =>
+        expect(target.querySelector('.household-inbox__badge')).toBeNull(),
+      );
+      expect(
+        screen.getByRole('link', {
+          name: /0 bank activity items need attention/,
+        }),
+      ).toBeInTheDocument();
+      expect(requests).toBe(2);
+      rerender(<HouseholdSection {...props} active={false} route={null} />);
+      expect(target.children).toHaveLength(0);
+      await act(async () => {});
+      expect(requests).toBe(2);
+    } finally {
+      target.remove();
+    }
+  });
+  it('distinguishes unavailable inbox counts from zero without retaining an old badge', async () => {
+    let requests = 0;
+    stubFetch({
+      csrf: csrfOk,
+      householdsGet: () => householdsOk([HOUSEHOLD_2]),
+      bankActivityGet: () => {
+        requests++;
+        return requests === 1
+          ? jsonResponse({
+              items: [],
+              limit: 1,
+              offset: 0,
+              hasMore: false,
+              unreviewedCount: 4,
+              changedCount: 0,
+            })
+          : jsonResponse(
+              { code: 'NETWORK_ERROR', message: 'Unavailable.' },
+              503,
+            );
+      },
+    });
+    const target = document.createElement('div');
+    document.body.append(target);
+    const props = {
+      csrf: CSRF,
+      onCsrfRefreshed: () => {},
+      onSessionExpired: () => {},
+      currentUserId: USER.id,
+      headerInboxTarget: target,
+    };
+    try {
+      const { rerender } = render(
+        <HouseholdSection
+          {...props}
+          route={{ householdId: HOUSEHOLD_2.id, page: 'members' }}
+        />,
+      );
+      await waitFor(() =>
+        expect(
+          target.querySelector('.household-inbox__badge'),
+        ).toHaveTextContent('4'),
+      );
+      rerender(
+        <HouseholdSection
+          {...props}
+          route={{ householdId: HOUSEHOLD_2.id, page: 'invitations' }}
+        />,
+      );
+      expect(
+        await screen.findByRole('link', { name: /count unavailable/ }),
+      ).toBeInTheDocument();
+      expect(target.querySelector('.household-inbox__badge')).toBeNull();
+    } finally {
+      target.remove();
+    }
+  });
+
+  it.each(['directory', 'inbox'] as const)(
+    'reconciles hidden membership loss from the %s without retaining household context',
+    async (surface) => {
+      let lists = 0;
+      const revoked = () =>
+        jsonResponse(
+          { code: 'HOUSEHOLD_NOT_FOUND', message: 'Household not found.' },
+          404,
+        );
+      const { calls } = stubFetch({
+        householdsGet: () => householdsOk(++lists === 1 ? [HOUSEHOLD_2] : []),
+        membersGet: revoked,
+        financialAccountsGet: revoked,
+        bankActivityGet: revoked,
+      });
+      render(
+        <HouseholdSection
+          csrf={CSRF}
+          onCsrfRefreshed={() => {}}
+          onSessionExpired={() => {}}
+          currentUserId={USER.id}
+          headerInboxTarget={document.body}
+          route={
+            surface === 'inbox'
+              ? { householdId: HOUSEHOLD_2.id, page: 'invitations' }
+              : null
+          }
+        />,
+      );
+      expect(
+        await screen.findByText(
+          surface === 'directory'
+            ? /You do not belong to a household yet/
+            : /This household is not available to your account/,
+        ),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(HOUSEHOLD_2.name)).not.toBeInTheDocument();
+      expect(document.querySelector('.household-inbox')).toBeNull();
+      expect(calls.filter(({ url }) => url === '/api/households')).toHaveLength(
+        2,
+      );
+    },
+  );
+
+  it('bounds directory denial reconciliation while a denied household remains listed until explicit retry', async () => {
+    let lists = 0;
+    let memberReads = 0;
+    let accountReads = 0;
+    let allowAccess = false;
+    stubFetch({
+      householdsGet: () => {
+        lists++;
+        return householdsOk([HOUSEHOLD_2]);
+      },
+      membersGet: () => {
+        memberReads++;
+        return allowAccess
+          ? jsonResponse({ members: [USER_MEMBER] })
+          : jsonResponse(
+              { code: 'HOUSEHOLD_NOT_FOUND', message: 'Household not found.' },
+              404,
+            );
+      },
+      financialAccountsGet: () => {
+        accountReads++;
+        return allowAccess
+          ? jsonResponse({ items: [], limit: 100, offset: 0, hasMore: false })
+          : jsonResponse(
+              { code: 'HOUSEHOLD_NOT_FOUND', message: 'Household not found.' },
+              404,
+            );
+      },
+    });
+    const props = {
+      csrf: CSRF,
+      onCsrfRefreshed: () => {},
+      onSessionExpired: () => {},
+      currentUserId: USER.id,
+    };
+    const { rerender } = render(<HouseholdSection {...props} />);
+    await screen.findByRole('button', { name: 'Retry household access' });
+    expect(lists).toBe(2);
+    expect(memberReads).toBe(1);
+    expect(accountReads).toBe(1);
+    expect(screen.getByText('Member count unavailable')).toBeInTheDocument();
+    expect(
+      screen.queryByText('0 of your private accounts'),
+    ).not.toBeInTheDocument();
+    rerender(<HouseholdSection {...props} active={false} />);
+    rerender(<HouseholdSection {...props} />);
+    expect(
+      screen.getByRole('button', { name: 'Retry household access' }),
+    ).toBeInTheDocument();
+    expect(lists).toBe(2);
+    expect(memberReads).toBe(1);
+    allowAccess = true;
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Retry household access' }),
+    );
+    expect(await screen.findByText('1 member')).toBeInTheDocument();
+    expect(lists).toBe(3);
+    expect(memberReads).toBe(2);
+    expect(accountReads).toBe(2);
+  });
+
+  it('bounds denied inbox reconciliation across security navigation and restores a one-item count on manual retry', async () => {
+    let lists = 0;
+    let inboxReads = 0;
+    let allowAccess = false;
+    stubFetch({
+      householdsGet: () => {
+        lists++;
+        return householdsOk([HOUSEHOLD_2]);
+      },
+      bankActivityGet: () => {
+        inboxReads++;
+        return allowAccess
+          ? jsonResponse({
+              items: [],
+              limit: 1,
+              offset: 0,
+              hasMore: false,
+              unreviewedCount: 1,
+              changedCount: 0,
+            })
+          : jsonResponse({ code: 'FORBIDDEN', message: 'Access denied.' }, 403);
+      },
+    });
+    const target = document.createElement('div');
+    document.body.append(target);
+    const props = {
+      csrf: CSRF,
+      onCsrfRefreshed: () => {},
+      onSessionExpired: () => {},
+      currentUserId: USER.id,
+      headerInboxTarget: target,
+    };
+    try {
+      const { rerender } = render(
+        <HouseholdSection
+          {...props}
+          route={{ householdId: HOUSEHOLD_2.id, page: 'invitations' }}
+        />,
+      );
+      await screen.findByRole('button', { name: 'Retry household access' });
+      expect(lists).toBe(2);
+      expect(inboxReads).toBe(1);
+      expect(target.children).toHaveLength(0);
+      rerender(<HouseholdSection {...props} active={false} route={null} />);
+      rerender(
+        <HouseholdSection
+          {...props}
+          route={{ householdId: HOUSEHOLD_2.id, page: 'invitations' }}
+        />,
+      );
+      expect(inboxReads).toBe(1);
+      allowAccess = true;
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Retry household access' }),
+      );
+      expect(
+        await screen.findByRole('link', {
+          name: /1 bank activity item needs attention/,
+        }),
+      ).toBeInTheDocument();
+      expect(lists).toBe(3);
+      expect(inboxReads).toBe(2);
+    } finally {
+      target.remove();
+    }
+  });
+
+  it('keeps the creation draft and error when switching to the directory and back', async () => {
+    stubFetch({
+      csrf: csrfOk,
+      me: meAuthenticated,
+      householdsGet: () => householdsOk([]),
+      householdsPost: () =>
+        jsonResponse(
+          { code: 'NETWORK_ERROR', message: 'Could not reach the server.' },
+          503,
+        ),
+    });
+    const { rerender } = render(
+      <AuthSection route={{ kind: 'household-create' }} />,
+    );
+    fireEvent.change(await screen.findByLabelText('Household name'), {
+      target: { value: 'Lake cabin' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Create household' }));
+    expect(
+      await screen.findByText('Could not reach the server.'),
+    ).toBeInTheDocument();
+    rerender(<AuthSection route={{ kind: 'directory' }} />);
+    expect(screen.queryByLabelText('Household name')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Could not reach the server.'),
+    ).not.toBeInTheDocument();
+    rerender(<AuthSection route={{ kind: 'household-create' }} />);
+    expect(screen.getByLabelText('Household name')).toHaveValue('Lake cabin');
+    expect(screen.getByText('Could not reach the server.')).toBeInTheDocument();
   });
 });
