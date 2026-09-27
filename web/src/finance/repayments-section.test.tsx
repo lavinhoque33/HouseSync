@@ -546,7 +546,7 @@ describe('external repayment activity', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'Close private detail' }),
     );
-    expect(trigger).toHaveFocus();
+    await waitFor(() => expect(trigger).toHaveFocus());
     fireEvent.click(trigger);
     await screen.findByText(/Party record · version 0/);
     fireEvent.change(screen.getByLabelText('Status'), {
@@ -561,7 +561,7 @@ describe('external repayment activity', () => {
     fireEvent.click(
       screen.getByRole('button', { name: 'Close private detail' }),
     );
-    expect(screen.getByLabelText('Status')).toHaveFocus();
+    await waitFor(() => expect(screen.getByLabelText('Status')).toHaveFocus());
   });
   it('invalidates derived money on an external confirmation found by filtered list refresh', async () => {
     let remote = false;
