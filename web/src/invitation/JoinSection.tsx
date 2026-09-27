@@ -114,15 +114,20 @@ export function JoinSection({
   const flowContextKey =
     inviteKey && userId ? `${inviteKey}:${userId}` : inviteKey;
   const previousFlowContextRef = useRef(flowContextKey);
+  const previousUserIdRef = useRef(userId);
 
-  // A history navigation can replace a completed or terminal invitation
-  // without unmounting this component. Reset local outcome state before paint
-  // for the new capability/user, while preserving success when the parent only
-  // discards the just-consumed secret.
+  // A history navigation or identity change can replace a completed or
+  // terminal invitation without unmounting this component. Reset account-
+  // scoped outcome state before paint, but preserve success when the parent
+  // only discards the consumed secret for the same signed-in person.
   useLayoutEffect(() => {
+    const identityChanged = previousUserIdRef.current !== userId;
+    const completedFlowForPreviousUser =
+      identityChanged && accepted !== null && invite === null;
     if (
-      flowContextKey !== null &&
-      previousFlowContextRef.current !== flowContextKey
+      identityChanged ||
+      (flowContextKey !== null &&
+        previousFlowContextRef.current !== flowContextKey)
     ) {
       genRef.current += 1;
       for (const tracked of ownedRef.current) tracked.abort();
@@ -137,7 +142,11 @@ export function JoinSection({
       setTerminal(false);
     }
     previousFlowContextRef.current = flowContextKey;
-  }, [flowContextKey]);
+    previousUserIdRef.current = userId;
+    // A consumed link cannot be resumed after the accepting user's session
+    // ends; leave its route instead of showing an unrelated missing-link warning.
+    if (completedFlowForPreviousUser) onLeaveJoin();
+  }, [flowContextKey, userId, accepted, invite, onLeaveJoin]);
 
   function track(controller: AbortController) {
     ownedRef.current.add(controller);
@@ -443,7 +452,7 @@ export function JoinSection({
     );
   }
 
-  if (accepted) {
+  if (accepted && user) {
     return (
       <section className="join" aria-labelledby="join-title">
         <h2 id="join-title">Household invitation</h2>

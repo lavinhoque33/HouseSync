@@ -140,6 +140,29 @@ describe('preview', () => {
     expect(previews[0]?.init?.cache).toBe('no-store');
   });
 
+  it('hides a previous preview and rechecks the capability after sign-in', async () => {
+    const calls = stubJoin({});
+    const rendered = renderJoin({});
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+
+    rendered.rerender(<JoinSection {...rendered.props} user={null} />);
+    expect(screen.queryByText('Elm Street home')).not.toBeInTheDocument();
+    expect(screen.getByText(/Sign in in this tab/i)).toBeInTheDocument();
+    expect(invitationCalls(calls, '/api/invitations/preview')).toHaveLength(1);
+
+    rendered.rerender(
+      <JoinSection
+        {...rendered.props}
+        user={{
+          id: '33333333-4444-4555-8666-777777777777',
+          email: 'other@example.test',
+        }}
+      />,
+    );
+    expect(await screen.findByText('Elm Street home')).toBeInTheDocument();
+    expect(invitationCalls(calls, '/api/invitations/preview')).toHaveLength(2);
+  });
+
   it('shows a generic terminal state and clears the secret on 404', async () => {
     const calls = stubJoin({ preview: () => terminalResponse() });
     const { props } = renderJoin({});
@@ -267,6 +290,39 @@ describe('accept', () => {
     expect(
       screen.queryByText(/Reopen the original invitation link/i),
     ).not.toBeInTheDocument();
+    expect(rendered.props.onLeaveJoin).not.toHaveBeenCalled();
+  });
+
+  it('removes joined household details when a revoked session becomes signed out', async () => {
+    stubJoin({});
+    const rendered = renderJoin({});
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Join household' }),
+    );
+    expect(
+      await screen.findByText(/You joined “Elm Street home” as MEMBER/i),
+    ).toBeInTheDocument();
+
+    // Acceptance discarded the link, but the flow is still mounted when a
+    // different browser revokes this session.
+    rendered.rerender(
+      <JoinSection {...rendered.props} invite={null} user={null} />,
+    );
+    expect(screen.queryByText(/Elm Street home/i)).not.toBeInTheDocument();
+    expect(rendered.props.onLeaveJoin).toHaveBeenCalledTimes(1);
+
+    rendered.rerender(
+      <JoinSection
+        {...rendered.props}
+        invite={null}
+        user={{
+          id: '33333333-4444-4555-8666-777777777777',
+          email: 'other@example.test',
+        }}
+      />,
+    );
+    expect(screen.queryByText(/Elm Street home/i)).not.toBeInTheDocument();
+    expect(rendered.props.onLeaveJoin).toHaveBeenCalledTimes(1);
   });
 
   it('resets a prior success when a different invitation arrives', async () => {
