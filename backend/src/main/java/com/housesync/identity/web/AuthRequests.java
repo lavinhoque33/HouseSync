@@ -9,7 +9,11 @@ public final class AuthRequests {
 
   private AuthRequests() {}
 
-  public record RegisterRequest(String email, String password) {}
+  public record RegisterRequest(String email, String password, String enrollmentCode) {}
 
   public record LoginRequest(String email, String password) {}
+
+  public record RecoveryRequest(String email, String recoveryCode, String newPassword) {}
+
+  public record PasswordRequest(String currentPassword, String newPassword) {}
 }

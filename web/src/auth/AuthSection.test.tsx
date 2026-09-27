@@ -46,6 +46,9 @@ interface RouteHandlers {
   csrf?: () => Response | Promise<Response>;
   me?: () => Response | Promise<Response>;
   register?: (body?: unknown) => Response | Promise<Response>;
+  recover?: (body?: unknown) => Response | Promise<Response>;
+  password?: (body?: unknown) => Response | Promise<Response>;
+  revoke?: () => Response | Promise<Response>;
   login?: (body?: unknown) => Response | Promise<Response>;
   logout?: () => Response | Promise<Response>;
   householdsGet?: () => Response | Promise<Response>;
@@ -63,6 +66,18 @@ function stubFetch(routes: RouteHandlers) {
         const body = init?.body ? JSON.parse(String(init.body)) : undefined;
         return (routes.register?.(body) ?? jsonResponse(USER, 201)) as Response;
       }
+      if (url === '/api/auth/recover')
+        return (
+          routes.recover?.(JSON.parse(String(init?.body))) ??
+          new Response(null, { status: 204 })
+        );
+      if (url === '/api/auth/password')
+        return (
+          routes.password?.(JSON.parse(String(init?.body))) ??
+          new Response(null, { status: 204 })
+        );
+      if (url === '/api/auth/sessions/revoke')
+        return routes.revoke?.() ?? new Response(null, { status: 204 });
       if (url === '/api/auth/login') {
         const body = init?.body ? JSON.parse(String(init.body)) : undefined;
         return (routes.login?.(body) ?? jsonResponse(USER)) as Response;
@@ -210,80 +225,290 @@ describe('auth bootstrap', () => {
   });
 });
 
-describe('registration', () => {
-  it('creates an account then shows sign-in with the email retained', async () => {
-    await bootAnon({ register: () => jsonResponse(USER, 201) });
-    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
+describe('operator account links', () => {
+  const code = 'a'.repeat(43);
+  it('requires an operator link and sends a recipient-bound enrollment code', async () => {
+    const { calls } = stubFetch({
+      me: meAnonymous,
+      register: () => jsonResponse(USER, 201),
+    });
+    render(
+      <AuthSection
+        accountLink={{ kind: 'enroll', code, invalid: false }}
+        onLeaveAccountLink={() => {}}
+      />,
+    );
+    await screen.findByRole('heading', { name: 'Enroll account' });
     typeInto('Email', USER.email);
     typeInto('Password', LONG_PASSWORD);
     typeInto('Confirm password', LONG_PASSWORD);
-    submitForm('Create account');
+    submitForm('Enroll account');
+    await screen.findByText('Account created. Sign in with your new password.');
+    expect(
+      JSON.parse(
+        String(
+          calls.find(({ url }) => url === '/api/auth/register')?.init?.body,
+        ),
+      ),
+    ).toEqual({
+      email: USER.email,
+      password: LONG_PASSWORD,
+      enrollmentCode: code,
+    });
+  });
+
+  it('rejects a spent enrollment link with operator guidance', async () => {
+    stubFetch({
+      me: meAnonymous,
+      register: () =>
+        jsonResponse(
+          { code: 'ENROLLMENT_INVALID', message: 'Invalid enrollment' },
+          403,
+        ),
+    });
+    render(
+      <AuthSection accountLink={{ kind: 'enroll', code, invalid: false }} />,
+    );
+    await screen.findByRole('heading', { name: 'Enroll account' });
+    typeInto('Email', USER.email);
+    typeInto('Password', LONG_PASSWORD);
+    typeInto('Confirm password', LONG_PASSWORD);
+    submitForm('Enroll account');
+    expect(
+      await screen.findByText(/Ask the operator for a new link/),
+    ).toBeInTheDocument();
+  });
+
+  it('replaces a spent-link error when a different malformed link is opened', async () => {
+    stubFetch({
+      me: meAnonymous,
+      register: () =>
+        jsonResponse(
+          { code: 'ENROLLMENT_INVALID', message: 'Invalid enrollment' },
+          403,
+        ),
+    });
+    const { rerender } = render(
+      <AuthSection accountLink={{ kind: 'enroll', code, invalid: false }} />,
+    );
+    await screen.findByRole('heading', { name: 'Enroll account' });
+    typeInto('Email', USER.email);
+    typeInto('Password', LONG_PASSWORD);
+    typeInto('Confirm password', LONG_PASSWORD);
+    submitForm('Enroll account');
     expect(
       await screen.findByText(
-        'Account created. Sign in with your new password.',
+        /enrollment link is invalid, expired, or already used/,
       ),
     ).toBeInTheDocument();
+
+    rerender(
+      <AuthSection
+        accountLink={{ kind: 'enroll', code: null, invalid: true }}
+      />,
+    );
+    await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1));
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'This enrollment link cannot be used.',
+    );
+    expect(
+      screen.queryByText(
+        /enrollment link is invalid, expired, or already used/,
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it('ignores a spent-link response that arrives after opening a different link', async () => {
+    let reply!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      reply = resolve;
+    });
+    const { calls } = stubFetch({ me: meAnonymous, register: () => pending });
+    const { rerender } = render(
+      <AuthSection accountLink={{ kind: 'enroll', code, invalid: false }} />,
+    );
+    await screen.findByRole('heading', { name: 'Enroll account' });
+    typeInto('Email', USER.email);
+    typeInto('Password', LONG_PASSWORD);
+    typeInto('Confirm password', LONG_PASSWORD);
+    submitForm('Enroll account');
+    await waitFor(() =>
+      expect(calls.some(({ url }) => url === '/api/auth/register')).toBe(true),
+    );
+
+    rerender(
+      <AuthSection
+        accountLink={{ kind: 'enroll', code: null, invalid: true }}
+      />,
+    );
+    await act(async () => {
+      reply(
+        jsonResponse(
+          { code: 'ENROLLMENT_INVALID', message: 'Invalid enrollment' },
+          403,
+        ),
+      );
+    });
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'This enrollment link cannot be used.',
+    );
+    expect(
+      screen.queryByText(
+        /enrollment link is invalid, expired, or already used/,
+      ),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+  });
+
+  it('recovers with a single-use link and gives actionable guidance when rejected', async () => {
+    const { calls } = stubFetch({
+      me: meAnonymous,
+      recover: () =>
+        jsonResponse(
+          { code: 'RECOVERY_INVALID', message: 'Invalid recovery' },
+          403,
+        ),
+    });
+    render(
+      <AuthSection accountLink={{ kind: 'recover', code, invalid: false }} />,
+    );
+    await screen.findByRole('heading', { name: 'Recover account' });
+    typeInto('Email', USER.email);
+    typeInto('New password', LONG_PASSWORD);
+    typeInto('Confirm new password', LONG_PASSWORD);
+    submitForm('Update password');
+    expect(
+      await screen.findByText(
+        /recovery link is invalid, expired, or already used/,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      JSON.parse(
+        String(
+          calls.find(({ url }) => url === '/api/auth/recover')?.init?.body,
+        ),
+      ),
+    ).toEqual({
+      email: USER.email,
+      recoveryCode: code,
+      newPassword: LONG_PASSWORD,
+    });
+    expect(screen.getByLabelText('New password')).toHaveValue('');
+  });
+  it('refreshes a rejected recovery CSRF token without replaying or discarding inputs', async () => {
+    const { calls } = stubFetch({
+      me: meAnonymous,
+      recover: () =>
+        jsonResponse(
+          { code: 'CSRF_INVALID', message: 'Invalid CSRF token.' },
+          403,
+        ),
+    });
+    render(
+      <AuthSection accountLink={{ kind: 'recover', code, invalid: false }} />,
+    );
+    await screen.findByRole('heading', { name: 'Recover account' });
+    typeInto('Email', USER.email);
+    typeInto('New password', LONG_PASSWORD);
+    typeInto('Confirm new password', LONG_PASSWORD);
+    submitForm('Update password');
+    expect(
+      await screen.findByText(
+        /security token was refreshed.*try recovery again/i,
+      ),
+    ).toBeInTheDocument();
+    expect(calls.filter(({ url }) => url === '/api/auth/recover')).toHaveLength(
+      1,
+    );
     expect(screen.getByLabelText('Email')).toHaveValue(USER.email);
-    expect(screen.getByLabelText('Password')).toHaveValue('');
+    expect(screen.getByLabelText('New password')).toHaveValue(LONG_PASSWORD);
   });
 
-  it('validates confirmation and bounds before sending a request', async () => {
-    const { mock } = stubFetch({ me: meAnonymous, csrf: csrfOk });
+  it('completes recovery and moves to sign-in without retaining the secret', async () => {
+    const leave = vi.fn();
+    stubFetch({ me: meAnonymous });
+    render(
+      <AuthSection
+        accountLink={{ kind: 'recover', code, invalid: false }}
+        onLeaveAccountLink={leave}
+      />,
+    );
+    await screen.findByRole('heading', { name: 'Recover account' });
+    typeInto('Email', USER.email);
+    typeInto('New password', LONG_PASSWORD);
+    typeInto('Confirm new password', LONG_PASSWORD);
+    submitForm('Update password');
+    await screen.findByText(
+      'Password updated. Sign in with your new password.',
+    );
+    expect(leave).toHaveBeenCalledOnce();
+    expect(screen.getByLabelText('New password')).toHaveValue('');
+  });
+});
+
+describe('session-wide account controls', () => {
+  it('changes password using CSRF and signs out after confirmed session revocation', async () => {
+    const { calls } = stubFetch({ me: meAuthenticated });
     render(<AuthSection />);
+    await screen.findByRole('heading', { name: 'Change password' });
+    typeInto('Current password', LONG_PASSWORD);
+    typeInto('New password', 'new correct horse battery staple');
+    typeInto('Confirm new password', 'new correct horse battery staple');
+    submitForm('Change password and sign out everywhere');
     expect(
-      await screen.findByRole('heading', { name: 'Sign in' }),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
-    typeInto('Email', USER.email);
-    typeInto('Password', 'short');
-    typeInto('Confirm password', 'different');
-    submitForm('Create account');
-    expect(
-      await screen.findByText('Check the highlighted fields.'),
+      await screen.findByText(/Password changed. All sessions ended/),
     ).toBeInTheDocument();
     expect(
-      mock.mock.calls.filter(([url]) => String(url).includes('/register')),
-    ).toHaveLength(0);
+      screen.getByRole('heading', { name: 'Sign in' }),
+    ).toBeInTheDocument();
+    const request = calls.find(({ url }) => url === '/api/auth/password')?.init;
+    expect(request?.headers).toMatchObject({ 'X-CSRF-TOKEN': CSRF.token });
+    expect(JSON.parse(String(request?.body))).toEqual({
+      currentPassword: LONG_PASSWORD,
+      newPassword: 'new correct horse battery staple',
+    });
   });
 
-  it('shows a generic conflict for duplicate emails', async () => {
-    await bootAnon({
-      register: () =>
+  it('rejects incorrect current password without signing out', async () => {
+    stubFetch({
+      me: meAuthenticated,
+      password: () =>
         jsonResponse(
-          {
-            code: 'REGISTRATION_CONFLICT',
-            message: 'An account with that email already exists.',
-          },
-          409,
+          { code: 'INVALID_CREDENTIALS', message: 'Incorrect password.' },
+          401,
         ),
     });
-    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
-    typeInto('Email', USER.email);
-    typeInto('Password', LONG_PASSWORD);
-    typeInto('Confirm password', LONG_PASSWORD);
-    submitForm('Create account');
+    render(<AuthSection />);
+    await screen.findByRole('heading', { name: 'Change password' });
+    typeInto('Current password', LONG_PASSWORD);
+    typeInto('New password', 'new correct horse battery staple');
+    typeInto('Confirm new password', 'new correct horse battery staple');
+    submitForm('Change password and sign out everywhere');
     expect(
-      await screen.findByText('An account with that email already exists.'),
+      await screen.findByText('Current password is incorrect.'),
     ).toBeInTheDocument();
+    expect(screen.getByText(USER.email)).toBeInTheDocument();
+    expect(screen.getByLabelText('Current password')).toHaveValue('');
   });
 
-  it('surfaces rate limiting with the Retry-After hint', async () => {
-    await bootAnon({
-      register: () =>
-        jsonResponse(
-          { code: 'RATE_LIMITED', message: 'Too many attempts.' },
-          429,
-          { 'Retry-After': '45' },
-        ),
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
-    typeInto('Email', USER.email);
-    typeInto('Password', LONG_PASSWORD);
-    typeInto('Confirm password', LONG_PASSWORD);
-    submitForm('Create account');
+  it('revokes all sessions including the current session', async () => {
+    const { calls } = stubFetch({ me: meAuthenticated });
+    render(<AuthSection />);
+    await screen.findByRole('button', { name: 'Sign out everywhere' });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Sign out everywhere' }),
+    );
     expect(
-      await screen.findByText(/Try again in 45 seconds/),
+      await screen.findByText('All sessions ended. Sign in again.'),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'Sign in' }),
+    ).toBeInTheDocument();
+    expect(
+      calls.find(({ url }) => url === '/api/auth/sessions/revoke')?.init
+        ?.headers,
+    ).toMatchObject({ 'X-CSRF-TOKEN': CSRF.token });
   });
 });
 
@@ -688,36 +913,6 @@ describe('expired-session token rotation', () => {
 });
 
 describe('csrf rejection without replay', () => {
-  it('does not replay a rejected registration', async () => {
-    let registerCalls = 0;
-    stubFetch({
-      me: meAnonymous,
-      csrf: csrfOk,
-      register: () => {
-        registerCalls += 1;
-        return jsonResponse(
-          { code: 'CSRF_INVALID', message: 'Invalid CSRF token.' },
-          403,
-        );
-      },
-    });
-    render(<AuthSection />);
-    expect(
-      await screen.findByRole('heading', { name: 'Sign in' }),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
-    typeInto('Email', USER.email);
-    typeInto('Password', LONG_PASSWORD);
-    typeInto('Confirm password', LONG_PASSWORD);
-    submitForm('Create account');
-    expect(
-      await screen.findByText(/security token was refreshed/i),
-    ).toBeInTheDocument();
-    expect(registerCalls).toBe(1);
-    // Inputs are preserved for the explicit retry.
-    expect(screen.getByLabelText('Email')).toHaveValue(USER.email);
-  });
-
   it('does not replay a rejected logout and stays signed in', async () => {
     let logoutCalls = 0;
     stubFetch({
@@ -914,33 +1109,5 @@ describe('busy controls', () => {
         screen.getByRole('button', { name: 'Sign out' }),
       ).not.toBeDisabled(),
     );
-  });
-
-  it('disables mode tabs while a registration is pending', async () => {
-    let resolveRegister!: (response: Response) => void;
-    const registerGate = new Promise<Response>((resolve) => {
-      resolveRegister = resolve;
-    });
-    stubFetch({
-      me: meAnonymous,
-      csrf: csrfOk,
-      register: () => registerGate,
-    });
-    render(<AuthSection />);
-    expect(
-      await screen.findByRole('heading', { name: 'Sign in' }),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
-    typeInto('Email', USER.email);
-    typeInto('Password', LONG_PASSWORD);
-    typeInto('Confirm password', LONG_PASSWORD);
-    submitForm('Create account');
-    expect(screen.getByRole('button', { name: 'Sign in' })).toBeDisabled();
-    resolveRegister(jsonResponse(USER, 201));
-    expect(
-      await screen.findByText(
-        'Account created. Sign in with your new password.',
-      ),
-    ).toBeInTheDocument();
   });
 });

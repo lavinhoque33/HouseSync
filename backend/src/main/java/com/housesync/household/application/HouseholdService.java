@@ -75,6 +75,7 @@ public class HouseholdService {
             message -> {
               throw new IdentityExceptions.ValidationFailedException(Map.of("name", message));
             });
+    requireEnabledForMembership(actorId);
     String name = HouseholdNamePolicy.normalize(rawName);
     UUID id = UUID.randomUUID();
     Instant createdAt = Instant.now(clock).truncatedTo(ChronoUnit.MICROS);
@@ -133,6 +134,9 @@ public class HouseholdService {
     HouseholdMemberEntity target = requireMembership(householdId, targetUserId);
     if (target.getRole() == requestedRole) {
       return memberResponse(householdId, targetUserId);
+    }
+    if (requestedRole == MemberRole.OWNER) {
+      requireEnabledForMembership(targetUserId);
     }
     if (target.getRole() == MemberRole.OWNER
         && requestedRole == MemberRole.MEMBER
@@ -239,6 +243,18 @@ public class HouseholdService {
   public static HouseholdResponse toResponse(HouseholdMembershipView view) {
     return new HouseholdResponse(
         view.householdId(), view.name(), view.role().name(), view.createdAt());
+  }
+
+  private void requireEnabledForMembership(UUID userId) {
+    // This shared row lock serializes membership creation and promotion with operator disable.
+    var enabled =
+        entityManager
+            .createNativeQuery("SELECT NOT access_disabled FROM users WHERE id = :userId FOR SHARE")
+            .setParameter("userId", userId)
+            .getResultList();
+    if (enabled.size() != 1 || !Boolean.TRUE.equals(enabled.getFirst())) {
+      throw new MembershipForbiddenException();
+    }
   }
 
   private HouseholdMemberEntity lockAndRequireMembership(UUID householdId, UUID actorId) {

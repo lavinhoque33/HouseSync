@@ -52,6 +52,7 @@ class SettlementHttpIT {
   }
 
   @Autowired JdbcTemplate jdbc;
+  @Autowired com.housesync.identity.application.IdentityGrants grants;
   @LocalServerPort int port;
   @Autowired PlatformTransactionManager transactionManager;
   final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
@@ -106,11 +107,17 @@ class SettlementHttpIT {
   Agent register() throws Exception {
     Agent agent = new Agent();
     agent.csrf = agent.get("/api/auth/csrf").json().path("token").asText();
+    String email = "s" + UUID.randomUUID().toString().substring(0, 12) + "@example.test";
     String identity =
-        "{\"email\":\"s"
-            + UUID.randomUUID().toString().substring(0, 12)
-            + "@example.test\",\"password\":\"correct horse battery staple 123!\"}";
-    assertThat(agent.post("/api/auth/register", identity).status()).isEqualTo(201);
+        "{\"email\":\"" + email + "\",\"password\":\"correct horse battery staple 123!\"}";
+    String enrollmentCode = grants.issue("ENROLLMENT", email).code();
+    String registration =
+        "{\"email\":\""
+            + email
+            + "\",\"password\":\"correct horse battery staple 123!\",\"enrollmentCode\":\""
+            + enrollmentCode
+            + "\"}";
+    assertThat(agent.post("/api/auth/register", registration).status()).isEqualTo(201);
     assertThat(agent.post("/api/auth/login", identity).status()).isEqualTo(200);
     agent.csrf = agent.get("/api/auth/csrf").json().path("token").asText();
     return agent;

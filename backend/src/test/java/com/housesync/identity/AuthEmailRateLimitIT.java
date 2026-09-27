@@ -2,6 +2,7 @@ package com.housesync.identity;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.housesync.identity.application.IdentityGrants;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -9,6 +10,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.annotation.DirtiesContext;
@@ -53,6 +55,7 @@ class AuthEmailRateLimitIT {
     registry.add("DB_PASSWORD", POSTGRES::getPassword);
   }
 
+  @Autowired private IdentityGrants grants;
   @LocalServerPort private int port;
 
   private final HttpClient client =
@@ -66,7 +69,8 @@ class AuthEmailRateLimitIT {
             + UUID.randomUUID().toString().replace("-", "").substring(0, 12)
             + "@example.test";
     Agent agent = new Agent();
-    assertThat(agent.post("/api/auth/register", json(email, PASSWORD)).status).isEqualTo(201);
+    assertThat(agent.post("/api/auth/register", enrollmentJson(email, PASSWORD)).status)
+        .isEqualTo(201);
 
     for (int i = 0; i < 3; i++) {
       Agent attempt = new Agent();
@@ -94,6 +98,16 @@ class AuthEmailRateLimitIT {
 
   private static String json(String email, String password) {
     return "{\"email\":\"" + email + "\",\"password\":\"" + password + "\"}";
+  }
+
+  private String enrollmentJson(String email, String password) {
+    return "{\"email\":\""
+        + email
+        + "\",\"password\":\""
+        + password
+        + "\",\"enrollmentCode\":\""
+        + grants.issue("ENROLLMENT", email).code()
+        + "\"}";
   }
 
   record FullResp(int status, String body, String retryAfter) {}

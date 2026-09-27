@@ -61,6 +61,26 @@ function go(path: string) {
   window.history.pushState(null, '', path);
 }
 
+describe('operator link lifetime', () => {
+  it('strips enrollment and recovery secrets before showing their forms', async () => {
+    for (const [path, heading] of [
+      ['enroll', 'Enroll account'],
+      ['recover', 'Recover account'],
+    ] as const) {
+      stubApp({ current: false });
+      go(`/${path}#code=${SECRET}`);
+      const view = render(<App />);
+      expect(window.location.hash).toBe('');
+      expect(
+        await screen.findByRole('heading', { name: heading }),
+      ).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain(SECRET);
+      view.unmount();
+    }
+    go('/');
+  });
+});
+
 describe('join route lifetime', () => {
   it('strips the fragment immediately while keeping the capability in memory', async () => {
     stubApp({ current: false });
@@ -70,9 +90,7 @@ describe('join route lifetime', () => {
     // capability still drives the generic signed-out prompt.
     expect(window.location.hash).toBe('');
     expect(window.location.pathname).toBe(`/join/${INVITATION_ID}`);
-    expect(
-      await screen.findByText(/Sign in or create an account in this tab/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Sign in in this tab/i)).toBeInTheDocument();
     expect(document.body.textContent).not.toContain(SECRET);
     expect(window.location.href).not.toContain(SECRET);
     go('/');
@@ -131,14 +149,10 @@ describe('join route lifetime', () => {
     stubApp({ current: false });
     go(`/join/${INVITATION_ID}#invite=${SECRET}`);
     render(<App />);
-    expect(
-      await screen.findByText(/Sign in or create an account in this tab/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Sign in in this tab/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss invitation' }));
     expect(window.location.pathname).toBe('/');
-    expect(
-      screen.queryByText(/Sign in or create an account in this tab/i),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Sign in in this tab/i)).not.toBeInTheDocument();
   });
 
   it('activates a join link arriving through history navigation', async () => {
@@ -150,9 +164,7 @@ describe('join route lifetime', () => {
     ).toBeInTheDocument();
     go(`/join/${INVITATION_ID}#invite=${SECRET}`);
     window.dispatchEvent(new PopStateEvent('popstate'));
-    expect(
-      await screen.findByText(/Sign in or create an account in this tab/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Sign in in this tab/i)).toBeInTheDocument();
     // History arrival strips the fragment exactly like the initial load.
     expect(window.location.hash).toBe('');
     expect(document.body.textContent).not.toContain(SECRET);
@@ -163,9 +175,7 @@ describe('join route lifetime', () => {
     stubApp({ current: false });
     go(`/join/${INVITATION_ID}#invite=${SECRET}`);
     render(<App />);
-    expect(
-      await screen.findByText(/Sign in or create an account in this tab/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Sign in in this tab/i)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Email'), {
       target: { value: USER.email },
     });

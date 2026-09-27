@@ -58,6 +58,7 @@ class FinancialAllocationBalanceHttpIT {
     registry.add("DB_PASSWORD", POSTGRES::getPassword);
   }
 
+  @Autowired private com.housesync.identity.application.IdentityGrants grants;
   @Autowired private JdbcTemplate jdbc;
   @LocalServerPort private int port;
 
@@ -748,7 +749,9 @@ class FinancialAllocationBalanceHttpIT {
     Agent agent = new Agent();
     String email =
         tag + UUID.randomUUID().toString().replace("-", "").substring(0, 12) + "@example.test";
-    assertThat(agent.post("/api/auth/register", identityJson(email), agent.csrfToken()).status)
+    String enrollmentCode = grants.issue("ENROLLMENT", email).code();
+    String registration = registrationJson(email, enrollmentCode);
+    assertThat(agent.post("/api/auth/register", registration, agent.csrfToken()).status)
         .isEqualTo(201);
     assertThat(agent.post("/api/auth/login", identityJson(email), agent.csrfToken()).status)
         .isEqualTo(200);
@@ -786,6 +789,17 @@ class FinancialAllocationBalanceHttpIT {
   private static String created(Resp response) throws Exception {
     assertThat(response.status).as(response.body).isEqualTo(201);
     return response.json().path("id").asText();
+  }
+
+  /** Registration payload: the enrollment code is recipient-bound and single-use. */
+  private static String registrationJson(String email, String enrollmentCode) {
+    return "{\"email\":\""
+        + email
+        + "\",\"password\":\""
+        + PASSWORD
+        + "\",\"enrollmentCode\":\""
+        + enrollmentCode
+        + "\"}";
   }
 
   private static String identityJson(String email) {

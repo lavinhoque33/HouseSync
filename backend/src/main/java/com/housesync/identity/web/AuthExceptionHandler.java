@@ -53,6 +53,28 @@ public class AuthExceptionHandler {
         failure);
   }
 
+  @ExceptionHandler(IdentityExceptions.EnrollmentInvalidException.class)
+  public ResponseEntity<ApiError> invalidEnrollment(
+      IdentityExceptions.EnrollmentInvalidException failure) {
+    return error(
+        HttpStatus.FORBIDDEN,
+        ErrorCodes.ENROLLMENT_INVALID,
+        "Enrollment link is invalid or expired.",
+        null,
+        null);
+  }
+
+  @ExceptionHandler(IdentityExceptions.RecoveryInvalidException.class)
+  public ResponseEntity<ApiError> invalidRecovery(
+      IdentityExceptions.RecoveryInvalidException failure) {
+    return error(
+        HttpStatus.FORBIDDEN,
+        ErrorCodes.RECOVERY_INVALID,
+        "Recovery link is invalid or expired.",
+        null,
+        null);
+  }
+
   @ExceptionHandler(IdentityExceptions.RegistrationConflictException.class)
   public ResponseEntity<ApiError> conflict(
       IdentityExceptions.RegistrationConflictException failure) {

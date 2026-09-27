@@ -48,6 +48,7 @@ class RepaymentHttpIT {
   }
 
   @Autowired JdbcTemplate jdbc;
+  @Autowired com.housesync.identity.application.IdentityGrants grants;
   @LocalServerPort int port;
   final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
   final ObjectMapper mapper = new ObjectMapper();
@@ -107,12 +108,17 @@ class RepaymentHttpIT {
   Agent register(String tag) throws Exception {
     Agent a = new Agent();
     a.csrf();
+    String email = tag + UUID.randomUUID().toString().substring(0, 8) + "@example.test";
     String identity =
+        "{\"email\":\"" + email + "\",\"password\":\"correct horse battery staple 123!\"}";
+    String enrollmentCode = grants.issue("ENROLLMENT", email).code();
+    String registration =
         "{\"email\":\""
-            + tag
-            + UUID.randomUUID().toString().substring(0, 8)
-            + "@example.test\",\"password\":\"correct horse battery staple 123!\"}";
-    assertThat(a.post("/api/auth/register", identity, null).status()).isEqualTo(201);
+            + email
+            + "\",\"password\":\"correct horse battery staple 123!\",\"enrollmentCode\":\""
+            + enrollmentCode
+            + "\"}";
+    assertThat(a.post("/api/auth/register", registration, null).status()).isEqualTo(201);
     assertThat(a.post("/api/auth/login", identity, null).status()).isEqualTo(200);
     a.csrf();
     return a;

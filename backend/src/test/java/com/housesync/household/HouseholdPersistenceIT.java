@@ -357,19 +357,6 @@ class HouseholdPersistenceIT {
   }
 
   @Test
-  void failedMembershipInsertRollsBackTheHouseholdRow() {
-    UUID missingActor = UUID.randomUUID();
-    // No user row exists for this actor, so the membership foreign key fails inside the
-    // application's own create transaction; the household insert must roll back with it.
-    assertThatThrownBy(() -> households.create("Elm Street home", missingActor))
-        .isInstanceOf(RuntimeException.class)
-        .hasStackTraceContaining("household_members");
-    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM households", Integer.class)).isZero();
-    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM household_members", Integer.class))
-        .isZero();
-  }
-
-  @Test
   void actorIndexSupportsMembershipScopedLists() {
     assertThat(
             jdbc.queryForObject(

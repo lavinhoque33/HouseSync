@@ -6,6 +6,8 @@ import com.housesync.identity.domain.EmailPolicy;
 import com.housesync.identity.domain.PasswordPolicy;
 import com.housesync.identity.ratelimit.AuthRateLimiter;
 import com.housesync.identity.web.AuthRequests.LoginRequest;
+import com.housesync.identity.web.AuthRequests.PasswordRequest;
+import com.housesync.identity.web.AuthRequests.RecoveryRequest;
 import com.housesync.identity.web.AuthRequests.RegisterRequest;
 import com.housesync.identity.web.IdentityExceptions.InvalidCredentialsException;
 import com.housesync.identity.web.IdentityExceptions.RateLimitedException;
@@ -90,9 +92,42 @@ public class AuthController {
       @RequestBody(required = false) RegisterRequest body, HttpServletRequest request) {
     checkSourceAddress(request);
     if (body == null) {
-      throw new ValidationFailedException(Map.of("email", "Check the supplied details."));
+      throw new IdentityExceptions.EnrollmentInvalidException();
     }
-    return noCache(HttpStatus.CREATED, identities.register(body.email(), body.password()));
+    return noCache(
+        HttpStatus.CREATED,
+        identities.register(body.email(), body.password(), body.enrollmentCode()));
+  }
+
+  @PostMapping(value = "/recover", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public ResponseEntity<Void> recover(
+      @RequestBody(required = false) RecoveryRequest body, HttpServletRequest request) {
+    checkSourceAddress(request);
+    if (body == null) throw new IdentityExceptions.RecoveryInvalidException();
+    identities.recover(body.email(), body.recoveryCode(), body.newPassword());
+    return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build();
+  }
+
+  @PostMapping(value = "/password", consumes = MediaType.APPLICATION_JSON_VALUE)
+  public ResponseEntity<Void> password(
+      @RequestBody(required = false) PasswordRequest body,
+      Authentication authentication,
+      HttpServletRequest request,
+      HttpServletResponse response) {
+    if (body == null)
+      throw new ValidationFailedException(Map.of("newPassword", "Check the supplied details."));
+    identities.changePassword(
+        principal(authentication).getId(), body.currentPassword(), body.newPassword());
+    logoutHandlers.logout(request, response, authentication);
+    return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build();
+  }
+
+  @PostMapping("/sessions/revoke")
+  public ResponseEntity<Void> revoke(
+      Authentication authentication, HttpServletRequest request, HttpServletResponse response) {
+    identities.revokeSessions(principal(authentication).getId());
+    logoutHandlers.logout(request, response, authentication);
+    return ResponseEntity.noContent().cacheControl(CacheControl.noStore()).build();
   }
 
   /**

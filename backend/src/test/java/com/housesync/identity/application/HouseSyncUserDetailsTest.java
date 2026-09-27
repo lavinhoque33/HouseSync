@@ -19,13 +19,14 @@ class HouseSyncUserDetailsTest {
   void eraseCredentialsRemovesHashAndSerializesCleanly() throws Exception {
     UUID id = UUID.randomUUID();
     HouseSyncUserDetails principal =
-        new HouseSyncUserDetails(id, "person@example.test", HASH_MARKER);
+        new HouseSyncUserDetails(id, "person@example.test", HASH_MARKER, 7);
     assertThat(principal.getPassword()).isEqualTo(HASH_MARKER);
 
     principal.eraseCredentials();
     assertThat(principal.getPassword()).isNull();
     assertThat(principal.getId()).isEqualTo(id);
     assertThat(principal.getEmail()).isEqualTo("person@example.test");
+    assertThat(principal.getSessionGeneration()).isEqualTo(7);
 
     byte[] serialized = serialize(principal);
     assertThat(new String(serialized, StandardCharsets.ISO_8859_1)).doesNotContain(HASH_MARKER);
@@ -33,6 +34,7 @@ class HouseSyncUserDetailsTest {
     assertThat(restored.getId()).isEqualTo(id);
     assertThat(restored.getEmail()).isEqualTo("person@example.test");
     assertThat(restored.getPassword()).isNull();
+    assertThat(restored.getSessionGeneration()).isEqualTo(7);
   }
 
   private static byte[] serialize(HouseSyncUserDetails principal) throws Exception {

@@ -59,6 +59,7 @@ class InvitationHttpIT {
     registry.add("DB_PASSWORD", POSTGRES::getPassword);
   }
 
+  @Autowired private com.housesync.identity.application.IdentityGrants grants;
   @Autowired private JdbcTemplate jdbc;
   @LocalServerPort private int port;
 
@@ -669,10 +670,23 @@ class InvitationHttpIT {
     String cleanTag = tag.replace(" ", "-");
     String email =
         cleanTag + UUID.randomUUID().toString().replace("-", "").substring(0, 12) + "@example.test";
-    assertThat(agent.post("/api/auth/register", json(email), agent.csrf()).status).isEqualTo(201);
+    String enrollmentCode = grants.issue("ENROLLMENT", email).code();
+    String registration = registrationJson(email, enrollmentCode);
+    assertThat(agent.post("/api/auth/register", registration, agent.csrf()).status).isEqualTo(201);
     assertThat(agent.post("/api/auth/login", json(email), agent.csrf()).status).isEqualTo(200);
     agent.csrf();
     return agent;
+  }
+
+  /** Registration payload: the enrollment code is recipient-bound and single-use. */
+  private static String registrationJson(String email, String enrollmentCode) {
+    return "{\"email\":\""
+        + email
+        + "\",\"password\":\""
+        + PASSWORD
+        + "\",\"enrollmentCode\":\""
+        + enrollmentCode
+        + "\"}";
   }
 
   private static String json(String email) {

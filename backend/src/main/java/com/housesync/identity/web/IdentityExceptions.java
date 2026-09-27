@@ -34,6 +34,10 @@ public final class IdentityExceptions {
     }
   }
 
+  public static final class EnrollmentInvalidException extends RuntimeException {}
+
+  public static final class RecoveryInvalidException extends RuntimeException {}
+
   public static final class InvalidCredentialsException extends RuntimeException {
     public InvalidCredentialsException() {
       super("Invalid credentials.");

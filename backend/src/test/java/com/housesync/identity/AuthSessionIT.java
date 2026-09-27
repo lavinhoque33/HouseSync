@@ -1,11 +1,15 @@
 package com.housesync.identity;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.classic.spi.IThrowableProxy;
 import ch.qos.logback.core.read.ListAppender;
+import com.housesync.identity.application.IdentityGrants;
+import com.housesync.identity.application.IdentityService;
+import com.housesync.identity.domain.EmailPolicy;
 import com.housesync.identity.persistence.UserRepository;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -18,6 +22,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -75,6 +80,9 @@ class AuthSessionIT {
   @Autowired private JdbcTemplate jdbc;
   @Autowired private UserRepository users;
   @Autowired private PasswordEncoder passwordEncoder;
+  @Autowired private IdentityGrants grants;
+  private final ConcurrentHashMap<String, String> enrollmentCodes = new ConcurrentHashMap<>();
+  @Autowired private IdentityService identities;
   @LocalServerPort private int port;
 
   private final HttpClient client =
@@ -109,8 +117,8 @@ class AuthSessionIT {
     assertThat(created.json().path("email").asText()).isEqualTo(email);
 
     Resp conflict = agent.post("/api/auth/register", json(email, PASSWORD), agent.csrf());
-    assertThat(conflict.status).isEqualTo(409);
-    assertThat(conflict.json().path("code").asText()).isEqualTo("REGISTRATION_CONFLICT");
+    assertThat(conflict.status).isEqualTo(403);
+    assertThat(conflict.json().path("code").asText()).isEqualTo("ENROLLMENT_INVALID");
     assertThat(conflict.json().path("correlationId").asText()).isNotBlank();
     assertThat(conflict.body).doesNotContain(PASSWORD).doesNotContain(email.split("@")[0] + "x");
   }
@@ -147,7 +155,7 @@ class AuthSessionIT {
             over.post(
                     "/api/auth/register", json("l".repeat(248) + "@b.test", PASSWORD), over.csrf())
                 .status)
-        .isEqualTo(400);
+        .isEqualTo(403);
   }
 
   @Test
@@ -176,7 +184,7 @@ class AuthSessionIT {
         statuses.add(future.get(60, TimeUnit.SECONDS));
       }
       assertThat(statuses).filteredOn(status -> status == 201).hasSize(1);
-      assertThat(statuses).filteredOn(status -> status == 409).hasSize(racers - 1);
+      assertThat(statuses).filteredOn(status -> status == 403).hasSize(racers - 1);
     } finally {
       pool.shutdownNow();
       detachLogs(logs);
@@ -529,6 +537,392 @@ class AuthSessionIT {
     assertThat(media.body()).contains("correlationId").doesNotContain("at com.housesync");
   }
 
+  @Test
+  void enrollmentIsRecipientBoundExpiringSingleUseAndCsrfProtected() throws Exception {
+    Agent agent = new Agent();
+    String email = uniqueEmail("grant");
+    String other = uniqueEmail("other");
+    String code = grants.issue("ENROLLMENT", email).code();
+    String recipient = json(email, PASSWORD).replace("}", ",\"enrollmentCode\":\"" + code + "\"}");
+    String mismatch = json(other, PASSWORD).replace("}", ",\"enrollmentCode\":\"" + code + "\"}");
+    String csrf = agent.csrf();
+    assertThat(agent.postRaw("/api/auth/register", recipient, null).json().path("code").asText())
+        .isEqualTo("CSRF_INVALID");
+    assertThat(agent.postRaw("/api/auth/register", mismatch, csrf).json().path("code").asText())
+        .isEqualTo("ENROLLMENT_INVALID");
+    assertThat(agent.postRaw("/api/auth/register", recipient, csrf).status).isEqualTo(201);
+    Resp replay = agent.postRaw("/api/auth/register", recipient, csrf);
+    assertThat(replay.status).isEqualTo(403);
+    assertThat(replay.json().path("code").asText()).isEqualTo("ENROLLMENT_INVALID");
+    String expired = grants.issue("ENROLLMENT", other).code();
+    jdbc.update(
+        "UPDATE identity_grants SET issued_at = now() - interval '2 days',"
+            + " expires_at = now() - interval '1 day' WHERE recipient_email = ?",
+        other);
+    Resp expiry =
+        agent.postRaw(
+            "/api/auth/register",
+            json(other, PASSWORD).replace("}", ",\"enrollmentCode\":\"" + expired + "\"}"),
+            csrf);
+    assertThat(expiry.status).isEqualTo(403);
+    assertThat(expiry.json().path("code").asText()).isEqualTo("ENROLLMENT_INVALID");
+    String revokedEmail = uniqueEmail("revoked");
+    IdentityGrants.Issued revokedGrant = grants.issue("ENROLLMENT", revokedEmail);
+    assertThat(grants.revoke(revokedGrant.id())).isTrue();
+    assertThat(
+            agent
+                .postRaw(
+                    "/api/auth/register",
+                    json(revokedEmail, PASSWORD)
+                        .replace("}", ",\"enrollmentCode\":\"" + revokedGrant.code() + "\"}"),
+                    csrf)
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("ENROLLMENT_INVALID");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT octet_length(token_digest) FROM identity_grants WHERE id = ?",
+                Integer.class,
+                revokedGrant.id()))
+        .isEqualTo(32);
+    assertThat(
+            jdbc.queryForList(
+                "SELECT action FROM identity_grant_audit WHERE grant_id = ?",
+                String.class,
+                revokedGrant.id()))
+        .containsExactlyInAnyOrder("ISSUED", "REVOKED");
+  }
+
+  @Test
+  void recoveryResetsPasswordRevokesEverySessionAndErrorsStayGeneric() throws Exception {
+    String email = uniqueEmail("recover");
+    Agent first = new Agent();
+    assertThat(first.post("/api/auth/register", json(email, PASSWORD), first.csrf()).status)
+        .isEqualTo(201);
+    assertThat(first.post("/api/auth/login", json(email, PASSWORD), first.csrf()).status)
+        .isEqualTo(200);
+    Agent second = new Agent();
+    assertThat(second.post("/api/auth/login", json(email, PASSWORD), second.csrf()).status)
+        .isEqualTo(200);
+    String code = grants.issue("RECOVERY", email).code();
+    String nextPassword = "replacement password long 123";
+    String body =
+        "{\"email\":\""
+            + email
+            + "\",\"recoveryCode\":\""
+            + code
+            + "\",\"newPassword\":\""
+            + nextPassword
+            + "\"}";
+    Agent recovery = new Agent();
+    String csrf = recovery.csrf();
+    assertThat(recovery.postRaw("/api/auth/recover", body, null).json().path("code").asText())
+        .isEqualTo("CSRF_INVALID");
+    Resp mismatch =
+        recovery.postRaw("/api/auth/recover", body.replace(email, uniqueEmail("wrong")), csrf);
+    assertThat(mismatch.status).isEqualTo(403);
+    assertThat(mismatch.json().path("code").asText()).isEqualTo("RECOVERY_INVALID");
+    assertThat(recovery.postRaw("/api/auth/recover", body, csrf).status).isEqualTo(204);
+    assertThat(first.get("/api/auth/me").status).isEqualTo(401);
+    assertThat(second.get("/api/auth/me").status).isEqualTo(401);
+    Resp replay = recovery.postRaw("/api/auth/recover", body, csrf);
+    assertThat(replay.status).isEqualTo(403);
+    assertThat(replay.json().path("code").asText())
+        .isEqualTo(mismatch.json().path("code").asText());
+    IdentityGrants.Issued expired = grants.issue("RECOVERY", email);
+    jdbc.update(
+        "UPDATE identity_grants SET issued_at = now() - interval '2 days',"
+            + " expires_at = now() - interval '1 day' WHERE id = ?",
+        expired.id());
+    Resp expiredAttempt =
+        recovery.postRaw("/api/auth/recover", body.replace(code, expired.code()), csrf);
+    assertThat(expiredAttempt.status).isEqualTo(403);
+    assertThat(expiredAttempt.json().path("code").asText())
+        .isEqualTo(mismatch.json().path("code").asText());
+    Resp absent =
+        recovery.postRaw(
+            "/api/auth/recover",
+            "{\"email\":\"" + email + "\",\"newPassword\":\"" + nextPassword + "\"}",
+            csrf);
+    assertThat(absent.status).isEqualTo(403);
+    assertThat(absent.json().path("code").asText())
+        .isEqualTo(mismatch.json().path("code").asText());
+    Agent signIn = new Agent();
+    assertThat(signIn.post("/api/auth/login", json(email, PASSWORD), signIn.csrf()).status)
+        .isEqualTo(401);
+    assertThat(signIn.post("/api/auth/login", json(email, nextPassword), signIn.csrf()).status)
+        .isEqualTo(200);
+  }
+
+  @Test
+  void passwordChangeExplicitRevocationAndAbsoluteLifetimeEndAccess() throws Exception {
+    String email = uniqueEmail("account");
+    Agent first = new Agent();
+    assertThat(first.post("/api/auth/register", json(email, PASSWORD), first.csrf()).status)
+        .isEqualTo(201);
+    assertThat(first.post("/api/auth/login", json(email, PASSWORD), first.csrf()).status)
+        .isEqualTo(200);
+    Agent second = new Agent();
+    assertThat(second.post("/api/auth/login", json(email, PASSWORD), second.csrf()).status)
+        .isEqualTo(200);
+    String nextPassword = "new password for account 123";
+    String change =
+        "{\"currentPassword\":\"" + PASSWORD + "\",\"newPassword\":\"" + nextPassword + "\"}";
+    assertThat(first.post("/api/auth/password", change, null).json().path("code").asText())
+        .isEqualTo("CSRF_INVALID");
+    assertThat(
+            first
+                .post("/api/auth/password", change.replace(PASSWORD, "wrong"), first.csrf())
+                .json()
+                .path("code")
+                .asText())
+        .isEqualTo("INVALID_CREDENTIALS");
+    assertThat(first.post("/api/auth/password", change, first.csrf()).status).isEqualTo(204);
+    assertThat(first.get("/api/auth/me").status).isEqualTo(401);
+    assertThat(second.get("/api/auth/me").status).isEqualTo(401);
+    Agent third = new Agent();
+    assertThat(third.post("/api/auth/login", json(email, nextPassword), third.csrf()).status)
+        .isEqualTo(200);
+    String oldSession = third.sessionCookie;
+    jdbc.update(
+        "UPDATE spring_session SET creation_time = ? WHERE session_id = ?",
+        Instant.now().minus(Duration.ofDays(31)).toEpochMilli(),
+        sessionIdOf(oldSession));
+    assertThat(third.get("/api/auth/me").status).isEqualTo(401);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM spring_session WHERE session_id = ?",
+                Integer.class,
+                sessionIdOf(oldSession)))
+        .isZero();
+    Agent fourth = new Agent();
+    assertThat(fourth.post("/api/auth/login", json(email, nextPassword), fourth.csrf()).status)
+        .isEqualTo(200);
+    Agent fifth = new Agent();
+    assertThat(fifth.post("/api/auth/login", json(email, nextPassword), fifth.csrf()).status)
+        .isEqualTo(200);
+    fourth.csrf();
+    assertThat(fourth.postEmpty("/api/auth/sessions/revoke").status).isEqualTo(204);
+    assertThat(fourth.get("/api/auth/me").status).isEqualTo(401);
+    assertThat(fifth.get("/api/auth/me").status).isEqualTo(401);
+  }
+
+  @Test
+  void departureDisablesLoginAndSessionsWithoutDeletingAccountHistory() throws Exception {
+    String email = uniqueEmail("departure");
+    Agent account = new Agent();
+    Resp created = account.post("/api/auth/register", json(email, PASSWORD), account.csrf());
+    assertThat(created.status).isEqualTo(201);
+    UUID id = UUID.fromString(created.json().path("id").asText());
+    assertThat(account.post("/api/auth/login", json(email, PASSWORD), account.csrf()).status)
+        .isEqualTo(200);
+    String departedCookie = account.sessionCookie;
+    String departedSessionId = sessionIdOf(departedCookie);
+    byte[] departedContext =
+        jdbc.queryForObject(
+            "SELECT a.attribute_bytes FROM spring_session_attributes a"
+                + " JOIN spring_session s ON s.primary_id = a.session_primary_id"
+                + " WHERE s.session_id = ? AND a.attribute_name = 'SPRING_SECURITY_CONTEXT'",
+            byte[].class,
+            departedSessionId);
+    String pendingCode = grants.issue("RECOVERY", email).code();
+    int usersBefore =
+        jdbc.queryForObject("SELECT COUNT(*) FROM users WHERE id = ?", Integer.class, id);
+    UUID household = UUID.randomUUID();
+    jdbc.update(
+        "INSERT INTO households (id, name) VALUES (?, ?)", household, "Departure retention");
+    jdbc.update(
+        "INSERT INTO household_members (household_id, user_id, role) VALUES (?, ?, 'OWNER')",
+        household,
+        id);
+    assertThatThrownBy(() -> identities.disableAccess(email))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("memberships");
+    UUID successor = UUID.randomUUID();
+    jdbc.update(
+        "INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+        successor,
+        uniqueEmail("successor"),
+        passwordEncoder.encode(PASSWORD),
+        Instant.now().atOffset(java.time.ZoneOffset.UTC));
+    jdbc.update(
+        "INSERT INTO household_members (household_id, user_id, role) VALUES (?, ?, 'OWNER')",
+        household,
+        successor);
+    jdbc.update(
+        "UPDATE household_members SET role = 'MEMBER' WHERE household_id = ? AND user_id = ?",
+        household,
+        id);
+    assertThatThrownBy(() -> identities.disableAccess(email))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("memberships");
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT access_disabled FROM users WHERE id = ?", Boolean.class, id))
+        .isFalse();
+    jdbc.update(
+        "DELETE FROM household_members WHERE household_id = ? AND user_id = ?", household, id);
+    identities.disableAccess(email);
+    assertThat(account.get("/api/auth/me").status).isEqualTo(401);
+    restoreLateSession(email, departedSessionId, departedContext);
+    account.sessionCookie = departedCookie;
+    assertThat(account.get("/api/households").status).isEqualTo(401);
+    Agent fresh = new Agent();
+    assertThat(fresh.post("/api/auth/login", json(email, PASSWORD), fresh.csrf()).status)
+        .isEqualTo(401);
+    Resp recovery =
+        fresh.post(
+            "/api/auth/recover",
+            "{\"email\":\""
+                + email
+                + "\",\"recoveryCode\":\""
+                + pendingCode
+                + "\",\"newPassword\":\"replacement password 123\"}",
+            fresh.csrf());
+    assertThat(recovery.json().path("code").asText()).isEqualTo("RECOVERY_INVALID");
+    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM users WHERE id = ?", Integer.class, id))
+        .isEqualTo(usersBefore);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT access_disabled FROM users WHERE id = ?", Boolean.class, id))
+        .isTrue();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM spring_session WHERE principal_name = ?",
+                Integer.class,
+                email))
+        .isZero();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM household_members WHERE household_id = ? AND user_id = ?",
+                Integer.class,
+                household,
+                id))
+        .isZero();
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM households WHERE id = ?", Integer.class, household))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void latePersistedPreRevocationLoginCannotReachHouseholdOrFinance() throws Exception {
+    String email = uniqueEmail("late");
+    Agent account = new Agent();
+    Resp registered = account.post("/api/auth/register", json(email, PASSWORD), account.csrf());
+    UUID id = UUID.fromString(registered.json().path("id").asText());
+    assertThat(account.post("/api/auth/login", json(email, PASSWORD), account.csrf()).status)
+        .isEqualTo(200);
+    String cookie = account.sessionCookie;
+    String sessionId = sessionIdOf(cookie);
+    byte[] authenticatedContext =
+        jdbc.queryForObject(
+            "SELECT a.attribute_bytes FROM spring_session_attributes a"
+                + " JOIN spring_session s ON s.primary_id = a.session_primary_id"
+                + " WHERE s.session_id = ? AND a.attribute_name = 'SPRING_SECURITY_CONTEXT'",
+            byte[].class,
+            sessionId);
+    Resp household =
+        account.post("/api/households", "{\"name\":\"Late login home\"}", account.csrf());
+    assertThat(household.status).isEqualTo(201);
+    String householdPath = "/api/households/" + household.json().path("id").asText();
+    assertThat(account.get(householdPath).status).isEqualTo(200);
+
+    identities.revokeSessions(id);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT session_generation FROM users WHERE id = ?", Long.class, id))
+        .isEqualTo(1L);
+    // Reinsert the pre-revoke serialized principal after the DELETE, as an in-flight login's
+    // Spring Session save would do. Its cookie is valid, but its generation is not.
+    restoreLateSession(email, sessionId, authenticatedContext);
+    account.sessionCookie = cookie;
+    assertThat(account.get(householdPath).status).isEqualTo(401);
+    restoreLateSession(email, sessionId, authenticatedContext);
+    account.sessionCookie = cookie;
+    assertThat(account.get(householdPath + "/transactions").status).isEqualTo(401);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM spring_session WHERE session_id = ?",
+                Integer.class,
+                sessionId))
+        .isZero();
+  }
+
+  @Test
+  void disabledMemberCannotBePromotedToSoleOwner() throws Exception {
+    String ownerEmail = uniqueEmail("owner");
+    Agent owner = new Agent();
+    owner.post("/api/auth/register", json(ownerEmail, PASSWORD), owner.csrf());
+    assertThat(owner.post("/api/auth/login", json(ownerEmail, PASSWORD), owner.csrf()).status)
+        .isEqualTo(200);
+    Resp created = owner.post("/api/households", "{\"name\":\"Safe owner home\"}", owner.csrf());
+    assertThat(created.status).isEqualTo(201);
+    UUID householdId = UUID.fromString(created.json().path("id").asText());
+    String memberEmail = uniqueEmail("member");
+    Agent member = new Agent();
+    UUID memberId =
+        UUID.fromString(
+            member
+                .post("/api/auth/register", json(memberEmail, PASSWORD), member.csrf())
+                .json()
+                .path("id")
+                .asText());
+    jdbc.update(
+        "INSERT INTO household_members (household_id, user_id, role) VALUES (?, ?, 'MEMBER')",
+        householdId,
+        memberId);
+    assertThatThrownBy(() -> identities.disableAccess(memberEmail))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("memberships");
+    // Model a disabled retained member left by the old operator workflow.
+    jdbc.update("UPDATE users SET access_disabled = TRUE WHERE id = ?", memberId);
+    HttpRequest promote =
+        HttpRequest.newBuilder(
+                URI.create(
+                    "http://localhost:"
+                        + port
+                        + "/api/households/"
+                        + householdId
+                        + "/members/"
+                        + memberId))
+            .header("Cookie", "SESSION=" + owner.sessionCookie)
+            .header("Content-Type", "application/json")
+            .header("X-CSRF-TOKEN", owner.csrf())
+            .method("PATCH", HttpRequest.BodyPublishers.ofString("{\"role\":\"OWNER\"}"))
+            .build();
+    assertThat(client.send(promote, HttpResponse.BodyHandlers.ofString()).statusCode())
+        .isEqualTo(403);
+    assertThat(owner.postEmpty("/api/households/" + householdId + "/leave").status).isEqualTo(409);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT COUNT(*) FROM household_members WHERE household_id = ? AND role = 'OWNER'",
+                Integer.class,
+                householdId))
+        .isEqualTo(1);
+  }
+
+  private void restoreLateSession(String email, String sessionId, byte[] authenticatedContext) {
+    String primaryId = UUID.randomUUID().toString();
+    long now = Instant.now().toEpochMilli();
+    jdbc.update(
+        "INSERT INTO spring_session (primary_id, session_id, creation_time, last_access_time,"
+            + " max_inactive_interval, expiry_time, principal_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        primaryId,
+        sessionId,
+        now,
+        now,
+        1800,
+        now + 1_800_000,
+        email);
+    jdbc.update(
+        "INSERT INTO spring_session_attributes (session_primary_id, attribute_name, attribute_bytes)"
+            + " VALUES (?, 'SPRING_SECURITY_CONTEXT', ?)",
+        primaryId,
+        authenticatedContext);
+  }
+
   // --- helpers ---
 
   private static String uniqueEmail(String tag) {
@@ -628,13 +1022,39 @@ class AuthSessionIT {
       return toResp(response);
     }
 
+    private String withEnrollment(String path, String json) {
+      if (!path.equals("/api/auth/register") || json == null || !json.endsWith("}")) return json;
+      try {
+        String rawEmail = mapper.readTree(json).path("email").asText();
+        if (EmailPolicy.violation(rawEmail).isPresent()) return json;
+        String canonical = EmailPolicy.normalize(rawEmail);
+        String code =
+            enrollmentCodes.computeIfAbsent(
+                canonical, key -> grants.issue("ENROLLMENT", key).code());
+        return json.substring(0, json.length() - 1) + ",\"enrollmentCode\":\"" + code + "\"}";
+      } catch (tools.jackson.core.JacksonException invalidJson) {
+        return json;
+      }
+    }
+
     Resp post(String path, String json, String csrf) throws Exception {
+      return postInternal(path, json, csrf, true);
+    }
+
+    Resp postRaw(String path, String json, String csrf) throws Exception {
+      return postInternal(path, json, csrf, false);
+    }
+
+    private Resp postInternal(String path, String json, String csrf, boolean autoEnroll)
+        throws Exception {
       HttpRequest.Builder builder =
           HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
               .timeout(Duration.ofSeconds(10))
               .header("Content-Type", "application/json")
               .header("Accept", "application/json")
-              .POST(HttpRequest.BodyPublishers.ofString(json == null ? "{}" : json));
+              .POST(
+                  HttpRequest.BodyPublishers.ofString(
+                      autoEnroll ? withEnrollment(path, json == null ? "{}" : json) : json));
       if (sessionCookie != null) {
         builder.header("Cookie", "SESSION=" + sessionCookie);
       }

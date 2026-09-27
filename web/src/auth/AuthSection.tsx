@@ -6,6 +6,9 @@ import {
   postLogin,
   postLogout,
   postRegister,
+  postRecover,
+  postChangePassword,
+  postRevokeSessions,
   type CsrfToken,
   type SafeUser,
 } from './client';
@@ -20,10 +23,17 @@ import {
 import { HouseholdSection } from '../household/HouseholdSection';
 import { JoinSection } from '../invitation/JoinSection';
 import type { PendingInvite } from '../invitation/route';
+import type { AccountLinkRoute } from './route';
 
 type Phase = 'booting' | 'ready' | 'failed';
-type Mode = 'login' | 'register';
-type ForegroundKind = 'bootstrap' | 'login' | 'register' | 'logout';
+type ForegroundKind =
+  | 'bootstrap'
+  | 'login'
+  | 'register'
+  | 'recover'
+  | 'password'
+  | 'revoke'
+  | 'logout';
 
 interface Notice {
   kind: 'info' | 'error' | 'warning';
@@ -96,6 +106,8 @@ export interface AuthSectionProps {
   joinInvalid?: boolean | undefined;
   onInviteCleared?: (() => void) | undefined;
   onLeaveJoin?: (() => void) | undefined;
+  accountLink?: AccountLinkRoute | null | undefined;
+  onLeaveAccountLink?: (() => void) | undefined;
 }
 
 export function AuthSection({
@@ -104,24 +116,31 @@ export function AuthSection({
   joinInvalid = false,
   onInviteCleared = () => {},
   onLeaveJoin = () => {},
+  accountLink = null,
+  onLeaveAccountLink = () => {},
 }: AuthSectionProps = {}) {
   const [phase, setPhase] = useState<Phase>('booting');
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [csrf, setCsrf] = useState<CsrfToken | null>(null);
   const [user, setUser] = useState<SafeUser | null>(null);
-  const [mode, setMode] = useState<Mode>('login');
 
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [regEmail, setRegEmail] = useState('');
   const [regPassword, setRegPassword] = useState('');
   const [regConfirm, setRegConfirm] = useState('');
+  const [recoverEmail, setRecoverEmail] = useState('');
+  const [recoverPassword, setRecoverPassword] = useState('');
+  const [recoverConfirm, setRecoverConfirm] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newConfirm, setNewConfirm] = useState('');
 
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [submitting, setSubmitting] = useState<'login' | 'register' | null>(
-    null,
-  );
+  const [submitting, setSubmitting] = useState<
+    'login' | 'register' | 'recover' | 'password' | 'revoke' | null
+  >(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [invitationRequestsReady, setInvitationRequestsReady] = useState(true);
   // Bumped when the join flow accepts an invitation so the household
@@ -138,9 +157,11 @@ export function AuthSection({
   const backgroundGenRef = useRef(0);
   const focusSeqRef = useRef(0);
   const opSeqRef = useRef(0);
-  const activeOpRef = useRef<{ kind: ForegroundKind; token: number } | null>(
-    null,
-  );
+  const activeOpRef = useRef<{
+    kind: ForegroundKind;
+    token: number;
+    controller: AbortController;
+  } | null>(null);
   // Synchronously mirrors the user state so focus checks never read a stale
   // value through an effect lag.
   const userRef = useRef<SafeUser | null>(null);
@@ -151,6 +172,43 @@ export function AuthSection({
   const modeHeadingRef = useRef<HTMLHeadingElement>(null);
   const noticeRef = useRef<HTMLDivElement>(null);
   const loginPasswordRef = useRef<HTMLInputElement>(null);
+
+  // Guarded render-time reset prevents a previous link's alert or typed
+  // credentials from appearing on the next link, without erasing the success
+  // notice when leaving the link after completion.
+  const [previousLink, setPreviousLink] = useState<AccountLinkRoute | null>(
+    accountLink,
+  );
+  const linkKind = accountLink?.kind;
+  const linkCode = accountLink?.code;
+  const linkInvalid = accountLink?.invalid;
+  if (
+    previousLink?.kind !== linkKind ||
+    previousLink?.code !== linkCode ||
+    previousLink?.invalid !== linkInvalid
+  ) {
+    setPreviousLink(accountLink);
+    setSubmitting(null);
+    setRegPassword('');
+    setRegConfirm('');
+    setRecoverPassword('');
+    setRecoverConfirm('');
+    if (accountLink) {
+      setNotice(null);
+      setFieldErrors({});
+      setRegEmail('');
+      setRecoverEmail('');
+    }
+  }
+
+  // An earlier request may finish after a route change. Abort its transport
+  // and invalidate its ownership before it can post an error on the new link.
+  useEffect(() => {
+    const active = activeOpRef.current;
+    if (active?.kind !== 'register' && active?.kind !== 'recover') return;
+    activeOpRef.current = null;
+    active.controller.abort();
+  }, [linkKind, linkCode, linkInvalid]);
 
   function applyUser(next: SafeUser | null) {
     userRef.current = next;
@@ -179,8 +237,8 @@ export function AuthSection({
     focusControllerRef.current = null;
     backgroundGenRef.current += 1;
     const token = ++opSeqRef.current;
-    activeOpRef.current = { kind, token };
     const controller = new AbortController();
+    activeOpRef.current = { kind, token, controller };
     trackController(controller);
     return { token, controller };
   }
@@ -403,15 +461,6 @@ export function AuthSection({
     }
   }, [notice]);
 
-  function switchMode(next: Mode) {
-    if (next === mode) return;
-    backgroundGenRef.current += 1;
-    setMode(next);
-    setFieldErrors({});
-    setNotice(null);
-    requestAnimationFrame(() => modeHeadingRef.current?.focus());
-  }
-
   function toActionError(error: unknown): ApiError {
     if (error instanceof ApiError) return error;
     return new ApiError({
@@ -565,7 +614,7 @@ export function AuthSection({
       }
       const email = normalizeEmail(regEmail);
       await postRegister(
-        { email, password: regPassword },
+        { email, password: regPassword, enrollmentCode: accountLink!.code! },
         requestCsrf,
         controller.signal,
       );
@@ -576,7 +625,7 @@ export function AuthSection({
       setLoginPassword('');
       setRegPassword('');
       setRegConfirm('');
-      setMode('login');
+      onLeaveAccountLink();
       setNotice({
         kind: 'info',
         text: 'Account created. Sign in with your new password.',
@@ -615,7 +664,201 @@ export function AuthSection({
         }
         setFieldErrors(mapped);
       }
-      setNotice(errorNotice(apiError, 'Registration could not be completed.'));
+      setNotice(
+        apiError.code === 'ENROLLMENT_INVALID'
+          ? {
+              kind: 'error',
+              text: 'This enrollment link is invalid, expired, or already used. Ask the operator for a new link.',
+            }
+          : errorNotice(apiError, 'Enrollment could not be completed.'),
+      );
+    } finally {
+      untrackController(controller);
+      endForeground(token, () => setSubmitting(null));
+    }
+  }
+
+  async function handleRecover(event: FormEvent) {
+    event.preventDefault();
+    if (!accountLink?.code || activeOpRef.current) return;
+    const errors: Record<string, string> = {};
+    const emailError = validateEmail(recoverEmail);
+    const passwordError = validateNewPassword(recoverPassword);
+    const confirmError = validateConfirm(recoverPassword, recoverConfirm);
+    if (emailError) errors.recoverEmail = emailError;
+    if (passwordError) errors.recoverPassword = passwordError;
+    if (confirmError) errors.recoverConfirm = confirmError;
+    if (Object.keys(errors).length) {
+      setFieldErrors(errors);
+      setNotice({ kind: 'error', text: 'Check the highlighted fields.' });
+      return;
+    }
+    const { token, controller } = beginForeground('recover');
+    setSubmitting('recover');
+    setFieldErrors({});
+    setNotice(null);
+    try {
+      const requestCsrf = csrf ?? (await ensureCsrf(token, controller.signal));
+      if (!requestCsrf) {
+        setNotice({ kind: 'error', text: 'Security setup failed. Retry.' });
+        return;
+      }
+      await postRecover(
+        {
+          email: normalizeEmail(recoverEmail),
+          recoveryCode: accountLink.code,
+          newPassword: recoverPassword,
+        },
+        requestCsrf,
+        controller.signal,
+      );
+      if (unmountedRef.current || !isActiveOp(token)) return;
+      setLoginEmail(normalizeEmail(recoverEmail));
+      setRecoverPassword('');
+      setRecoverConfirm('');
+      onLeaveAccountLink();
+      setNotice({
+        kind: 'info',
+        text: 'Password updated. Sign in with your new password.',
+      });
+      requestAnimationFrame(() => loginPasswordRef.current?.focus());
+    } catch (error) {
+      if (unmountedRef.current || !isActiveOp(token)) return;
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      const apiError = toActionError(error);
+      if (apiError.code === 'CSRF_INVALID') {
+        const refreshed = await refreshTokenForRetry(token, controller.signal);
+        if (unmountedRef.current || !isActiveOp(token)) return;
+        setNotice({
+          kind: 'error',
+          text: refreshed
+            ? 'Your security token was refreshed. Review your details and try recovery again.'
+            : 'Your security token was rejected. Reload the original recovery link and try again.',
+          correlationId: apiError.correlationId,
+        });
+        return;
+      }
+      setRecoverPassword('');
+      setRecoverConfirm('');
+      setNotice(
+        apiError.code === 'RECOVERY_INVALID'
+          ? {
+              kind: 'error',
+              text: 'This recovery link is invalid, expired, or already used. Ask the operator for a new link.',
+            }
+          : {
+              kind: 'error',
+              text: apiError.timedOut
+                ? 'Recovery outcome is unknown. Try signing in with your new password before requesting a new link.'
+                : 'Recovery could not be confirmed. Check your connection or contact the operator.',
+              correlationId: apiError.correlationId,
+            },
+      );
+    } finally {
+      untrackController(controller);
+      endForeground(token, () => setSubmitting(null));
+    }
+  }
+
+  async function handleAccountAction(
+    kind: 'password' | 'revoke',
+    event?: FormEvent,
+  ) {
+    event?.preventDefault();
+    if (activeOpRef.current || !userRef.current) return;
+    if (kind === 'password') {
+      const errors: Record<string, string> = {};
+      const currentError = validateLoginPassword(currentPassword);
+      const passwordError = validateNewPassword(newPassword);
+      const confirmError = validateConfirm(newPassword, newConfirm);
+      if (currentError) errors.currentPassword = currentError;
+      if (passwordError) errors.newPassword = passwordError;
+      if (confirmError) errors.newConfirm = confirmError;
+      if (Object.keys(errors).length) {
+        setFieldErrors(errors);
+        setNotice({ kind: 'error', text: 'Check the highlighted fields.' });
+        return;
+      }
+    }
+    const { token, controller } = beginForeground(kind);
+    setSubmitting(kind);
+    setFieldErrors({});
+    setNotice(null);
+    try {
+      const requestCsrf = csrf ?? (await ensureCsrf(token, controller.signal));
+      if (!requestCsrf) {
+        setNotice({ kind: 'error', text: 'Security setup failed. Retry.' });
+        return;
+      }
+      if (kind === 'password') {
+        await postChangePassword(
+          { currentPassword, newPassword },
+          requestCsrf,
+          controller.signal,
+        );
+      } else {
+        await postRevokeSessions(requestCsrf, controller.signal);
+      }
+      if (unmountedRef.current || !isActiveOp(token)) return;
+      applyUser(null);
+      setCsrf(null);
+      setCurrentPassword('');
+      setNewPassword('');
+      setNewConfirm('');
+      setLoginPassword('');
+      setRegPassword('');
+      setRegConfirm('');
+      if (joinActive) onLeaveJoin();
+      if (accountLink) onLeaveAccountLink();
+      setNotice({
+        kind: 'info',
+        text:
+          kind === 'password'
+            ? 'Password changed. All sessions ended. Sign in with your new password.'
+            : 'All sessions ended. Sign in again.',
+      });
+      try {
+        const fresh = await fetchCsrf(controller.signal);
+        if (unmountedRef.current || !isActiveOp(token)) return;
+        setCsrf(fresh);
+      } catch {
+        if (unmountedRef.current || !isActiveOp(token)) return;
+        setNotice({
+          kind: 'warning',
+          text: 'Sessions ended. Reload before signing in again.',
+        });
+      }
+    } catch (error) {
+      if (unmountedRef.current || !isActiveOp(token)) return;
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      const apiError = toActionError(error);
+      setCurrentPassword('');
+      setNewPassword('');
+      setNewConfirm('');
+      if (apiError.fieldErrors?.newPassword) {
+        setFieldErrors({ newPassword: apiError.fieldErrors.newPassword });
+      }
+      if (apiError.code === 'CSRF_INVALID')
+        await refreshTokenForRetry(token, controller.signal);
+      if (unmountedRef.current || !isActiveOp(token)) return;
+      if (apiError.status === 401 && apiError.code !== 'INVALID_CREDENTIALS') {
+        handleHouseholdSessionExpired();
+      } else {
+        setNotice({
+          kind: 'error',
+          text:
+            apiError.code === 'INVALID_CREDENTIALS'
+              ? 'Current password is incorrect.'
+              : apiError.timedOut || apiError.code === 'NETWORK_ERROR'
+                ? 'Outcome unknown. Check whether your session is still active before retrying.'
+                : apiError.code === 'CSRF_INVALID'
+                  ? 'Security token refreshed. Review and try again.'
+                  : apiError.code === 'VALIDATION_FAILED'
+                    ? 'Check the highlighted fields and choose a new password.'
+                    : 'Request failed. Your session may still be active.',
+          correlationId: apiError.correlationId,
+        });
+      }
     } finally {
       untrackController(controller);
       endForeground(token, () => setSubmitting(null));
@@ -834,6 +1077,22 @@ export function AuthSection({
       <section className="auth" aria-labelledby="auth-title">
         <h2 id="auth-title">Account</h2>
         {joinFlow()}
+        {accountLink && (
+          <div className="auth-card">
+            <p role="status">
+              You are already signed in. To use an operator-issued{' '}
+              {accountLink.kind === 'enroll' ? 'enrollment' : 'recovery'} link,
+              first sign out and reopen the original link.
+            </p>
+            <button
+              type="button"
+              className="auth-button"
+              onClick={onLeaveAccountLink}
+            >
+              Dismiss account link
+            </button>
+          </div>
+        )}
         {notice && (
           <div
             ref={noticeRef}
@@ -864,6 +1123,105 @@ export function AuthSection({
           </button>
         </div>
         <div className="auth-card">
+          <form
+            className="auth-form"
+            onSubmit={(event) => void handleAccountAction('password', event)}
+            noValidate
+          >
+            <h3>Change password</h3>
+            <div className="auth-field">
+              <label htmlFor="current-password">Current password</label>
+              <input
+                id="current-password"
+                type="password"
+                autoComplete="current-password"
+                required
+                value={currentPassword}
+                onChange={(event) => setCurrentPassword(event.target.value)}
+                aria-invalid={Boolean(fieldErrors.currentPassword)}
+                aria-describedby={
+                  fieldErrors.currentPassword
+                    ? 'current-password-error'
+                    : undefined
+                }
+              />
+              {fieldErrors.currentPassword && (
+                <p
+                  id="current-password-error"
+                  role="alert"
+                  className="auth-error"
+                >
+                  {fieldErrors.currentPassword}
+                </p>
+              )}
+            </div>
+            <div className="auth-field">
+              <label htmlFor="new-password">New password</label>
+              <input
+                id="new-password"
+                type="password"
+                autoComplete="new-password"
+                required
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                aria-invalid={Boolean(fieldErrors.newPassword)}
+                aria-describedby="new-password-hint new-password-error"
+              />
+              <p id="new-password-hint" className="auth-hint">
+                {PASSWORD_HINT}
+              </p>
+              {fieldErrors.newPassword && (
+                <p id="new-password-error" role="alert" className="auth-error">
+                  {fieldErrors.newPassword}
+                </p>
+              )}
+            </div>
+            <div className="auth-field">
+              <label htmlFor="new-confirm">Confirm new password</label>
+              <input
+                id="new-confirm"
+                type="password"
+                autoComplete="new-password"
+                required
+                value={newConfirm}
+                onChange={(event) => setNewConfirm(event.target.value)}
+                aria-invalid={Boolean(fieldErrors.newConfirm)}
+                aria-describedby={
+                  fieldErrors.newConfirm ? 'new-confirm-error' : undefined
+                }
+              />
+              {fieldErrors.newConfirm && (
+                <p id="new-confirm-error" role="alert" className="auth-error">
+                  {fieldErrors.newConfirm}
+                </p>
+              )}
+            </div>
+            <button
+              type="submit"
+              className="auth-button"
+              disabled={submitting !== null || loggingOut}
+            >
+              {submitting === 'password'
+                ? 'Changing…'
+                : 'Change password and sign out everywhere'}
+            </button>
+          </form>
+          <p className="auth-hint">
+            Lost access to your password? Contact the operator for an assisted
+            recovery link; your email alone cannot authorize recovery.
+          </p>
+          <button
+            type="button"
+            className="auth-button"
+            disabled={submitting !== null || loggingOut}
+            onClick={() => void handleAccountAction('revoke')}
+          >
+            {submitting === 'revoke'
+              ? 'Ending sessions…'
+              : 'Sign out everywhere'}
+          </button>
+        </div>
+        <div className="auth-card">
           <HouseholdSection
             key={user.id}
             csrf={csrf}
@@ -881,36 +1239,42 @@ export function AuthSection({
     );
   }
 
-  const isLogin = mode === 'login';
+  const isLogin =
+    accountLink?.kind !== 'enroll' && accountLink?.kind !== 'recover';
 
   return (
     <section className="auth" aria-labelledby="auth-title">
       <h2 id="auth-title">Account</h2>
       {joinFlow()}
-      <div
-        className="auth-tabs"
-        role="group"
-        aria-label="Choose sign in or create account"
-      >
-        <button
-          type="button"
-          className={`auth-tab${isLogin ? ' auth-tab--active' : ''}`}
-          aria-pressed={isLogin}
-          disabled={submitting !== null}
-          onClick={() => switchMode('login')}
-        >
-          Sign in
-        </button>
-        <button
-          type="button"
-          className={`auth-tab${!isLogin ? ' auth-tab--active' : ''}`}
-          aria-pressed={!isLogin}
-          disabled={submitting !== null}
-          onClick={() => switchMode('register')}
-        >
-          Create account
-        </button>
-      </div>
+      {!accountLink && (
+        <p className="auth-hint">
+          New here or lost your password? Contact the HouseSync operator for a
+          private enrollment or recovery link. Email alone is not proof of
+          account ownership.
+        </p>
+      )}
+      {accountLink && (
+        <div className="auth-card">
+          {accountLink.invalid || !accountLink.code ? (
+            <p role="alert">
+              This {accountLink.kind === 'enroll' ? 'enrollment' : 'recovery'}{' '}
+              link cannot be used. Ask the operator for a new link.
+            </p>
+          ) : (
+            <p>
+              Use the email address associated with this operator-issued{' '}
+              {accountLink.kind === 'enroll' ? 'enrollment' : 'recovery'} link.
+            </p>
+          )}
+          <button
+            type="button"
+            className="auth-button"
+            onClick={onLeaveAccountLink}
+          >
+            Back to sign in
+          </button>
+        </div>
+      )}
 
       {notice && (
         <div
@@ -929,7 +1293,7 @@ export function AuthSection({
         </div>
       )}
 
-      {isLogin ? (
+      {isLogin || !accountLink?.code || accountLink.invalid ? (
         <form
           className="auth-form"
           onSubmit={(event) => void handleLogin(event)}
@@ -991,14 +1355,14 @@ export function AuthSection({
             {submitting === 'login' ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
-      ) : (
+      ) : accountLink.kind === 'enroll' ? (
         <form
           className="auth-form"
           onSubmit={(event) => void handleRegister(event)}
           noValidate
         >
           <h3 ref={modeHeadingRef} tabIndex={-1} className="auth-form-title">
-            Create account
+            Enroll account
           </h3>
           <div className="auth-field">
             <label htmlFor="register-email">Email</label>
@@ -1079,7 +1443,89 @@ export function AuthSection({
             className="auth-button"
             disabled={submitting !== null}
           >
-            {submitting === 'register' ? 'Creating…' : 'Create account'}
+            {submitting === 'register' ? 'Creating…' : 'Enroll account'}
+          </button>
+        </form>
+      ) : (
+        <form
+          className="auth-form"
+          onSubmit={(event) => void handleRecover(event)}
+          noValidate
+        >
+          <h3 className="auth-form-title">Recover account</h3>
+          <div className="auth-field">
+            <label htmlFor="recover-email">Email</label>
+            <input
+              id="recover-email"
+              type="email"
+              autoComplete="email"
+              inputMode="email"
+              maxLength={254}
+              required
+              value={recoverEmail}
+              onChange={(event) => setRecoverEmail(event.target.value)}
+              aria-invalid={Boolean(fieldErrors.recoverEmail)}
+              aria-describedby={
+                fieldErrors.recoverEmail ? 'recover-email-error' : undefined
+              }
+            />
+            {fieldErrors.recoverEmail && (
+              <p id="recover-email-error" role="alert" className="auth-error">
+                {fieldErrors.recoverEmail}
+              </p>
+            )}
+          </div>
+          <div className="auth-field">
+            <label htmlFor="recover-password">New password</label>
+            <input
+              id="recover-password"
+              type="password"
+              autoComplete="new-password"
+              required
+              value={recoverPassword}
+              onChange={(event) => setRecoverPassword(event.target.value)}
+              aria-invalid={Boolean(fieldErrors.recoverPassword)}
+              aria-describedby="recover-password-hint recover-password-error"
+            />
+            <p id="recover-password-hint" className="auth-hint">
+              {PASSWORD_HINT}
+            </p>
+            {fieldErrors.recoverPassword && (
+              <p
+                id="recover-password-error"
+                role="alert"
+                className="auth-error"
+              >
+                {fieldErrors.recoverPassword}
+              </p>
+            )}
+          </div>
+          <div className="auth-field">
+            <label htmlFor="recover-confirm">Confirm new password</label>
+            <input
+              id="recover-confirm"
+              type="password"
+              autoComplete="new-password"
+              required
+              value={recoverConfirm}
+              onChange={(event) => setRecoverConfirm(event.target.value)}
+              aria-invalid={Boolean(fieldErrors.recoverConfirm)}
+              aria-describedby={
+                fieldErrors.recoverConfirm ? 'recover-confirm-error' : undefined
+              }
+            />
+            {fieldErrors.recoverConfirm && (
+              <p id="recover-confirm-error" role="alert" className="auth-error">
+                {fieldErrors.recoverConfirm}
+              </p>
+            )}
+          </div>
+          <button
+            className="auth-button"
+            type="submit"
+            disabled={submitting !== null}
+          >
+            {submitting === 'recover' ? 'Updating…' : 'Update password'}
           </button>
         </form>
       )}

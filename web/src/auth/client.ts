@@ -117,6 +117,8 @@ export type ApiErrorCode =
   | 'CSRF_INVALID'
   | 'FORBIDDEN'
   | 'REGISTRATION_CONFLICT'
+  | 'ENROLLMENT_INVALID'
+  | 'RECOVERY_INVALID'
   | 'RATE_LIMITED'
   | 'HOUSEHOLD_NOT_FOUND'
   | 'INVITATION_NOT_FOUND'
@@ -206,6 +208,8 @@ function knownCode(value: unknown): ApiErrorCode | undefined {
     'CSRF_INVALID',
     'FORBIDDEN',
     'REGISTRATION_CONFLICT',
+    'ENROLLMENT_INVALID',
+    'RECOVERY_INVALID',
     'RATE_LIMITED',
     'HOUSEHOLD_NOT_FOUND',
     'INVITATION_NOT_FOUND',
@@ -601,7 +605,7 @@ function unsafeHeaders(csrf: CsrfToken): Record<string, string> {
 }
 
 export async function postRegister(
-  credentials: Credentials,
+  credentials: Credentials & { enrollmentCode: string },
   csrf: CsrfToken,
   signal?: AbortSignal,
   timeoutMs: number = AUTH_TIMEOUT_MS,
@@ -647,6 +651,79 @@ export async function postRegister(
     response,
     response.status === 400 ? 'VALIDATION_FAILED' : 'UNKNOWN_ERROR',
     'Registration could not be completed.',
+  );
+}
+
+export async function postRecover(
+  details: { email: string; recoveryCode: string; newPassword: string },
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await apiFetch(
+    '/api/auth/recover',
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify(details),
+    },
+    signal,
+    AUTH_TIMEOUT_MS,
+  );
+  if (response.status === 204) return;
+  throw await parseErrorResponse(
+    response,
+    response.status === 403 ? 'RECOVERY_INVALID' : 'UNKNOWN_ERROR',
+    'Password recovery could not be completed.',
+  );
+}
+
+export async function postChangePassword(
+  details: { currentPassword: string; newPassword: string },
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await apiFetch(
+    '/api/auth/password',
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+      body: JSON.stringify(details),
+    },
+    signal,
+    AUTH_TIMEOUT_MS,
+  );
+  if (response.status === 204) return;
+  throw await parseErrorResponse(
+    response,
+    response.status === 401 ? 'INVALID_CREDENTIALS' : 'UNKNOWN_ERROR',
+    'Password change could not be completed.',
+  );
+}
+
+export async function postRevokeSessions(
+  csrf: CsrfToken,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await apiFetch(
+    '/api/auth/sessions/revoke',
+    {
+      method: 'POST',
+      credentials: 'include',
+      headers: unsafeHeaders(csrf),
+      cache: 'no-store',
+    },
+    signal,
+    AUTH_TIMEOUT_MS,
+  );
+  if (response.status === 204) return;
+  throw await parseErrorResponse(
+    response,
+    'UNKNOWN_ERROR',
+    'Session revocation could not be completed.',
   );
 }
 

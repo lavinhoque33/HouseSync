@@ -1,26 +1,32 @@
 package com.housesync.config;
 
+import com.housesync.identity.security.AbsoluteSessionLifetimeFilter;
+import com.housesync.identity.security.SessionGenerationFilter;
+import java.time.Clock;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.AccessDeniedHandler;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.authentication.session.SessionAuthenticationStrategy;
 import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler;
 
 /**
- * Session-based security. Health probes and the CSRF bootstrap stay public; registration and
- * login accept anonymous JSON posts guarded by CSRF; {@code /me} needs an authenticated session;
- * logout runs the standard handlers for authenticated and anonymous callers alike. The household
- * routes permit exactly {@code POST /api/households}, {@code GET /api/households}, {@code GET
- * /api/households/{householdId}}, {@code GET /api/households/{householdId}/members}, {@code PATCH
- * /api/households/{householdId}/members/{userId}}, {@code DELETE
+ * Browser security. Health probes and CSRF bootstrap stay public; anonymous enrollment and
+ * recovery require operator-issued grants, while login stays anonymous. All writes require CSRF.
+ * {@code /me} needs an authenticated session; logout accepts authenticated or anonymous calls. The
+ * household routes are exactly {@code POST /api/households}, {@code GET /api/households}, {@code
+ * GET /api/households/{householdId}}, {@code GET /api/households/{householdId}/members}, {@code
+ * PATCH /api/households/{householdId}/members/{userId}}, {@code DELETE
  * /api/households/{householdId}/members/{userId}}, and {@code POST
  * /api/households/{householdId}/leave} for authenticated users. Invitations permit
  * exactly {@code POST} and {@code GET /api/households/{householdId}/invitations}, {@code DELETE
@@ -51,6 +57,7 @@ import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler
  * form/basic login, no remember-me: browsers use the same-origin session cookie plus CSRF header.
  */
 @Configuration(proxyBeanMethods = false)
+@ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class SecurityConfiguration {
 
   @Bean
@@ -60,7 +67,9 @@ public class SecurityConfiguration {
       SecurityContextRepository securityContexts,
       SessionAuthenticationStrategy sessionStrategy,
       AuthenticationEntryPoint jsonEntryPoint,
-      AccessDeniedHandler jsonDeniedHandler)
+      AccessDeniedHandler jsonDeniedHandler,
+      Clock clock,
+      JdbcTemplate jdbc)
       throws Exception {
     return http.authorizeHttpRequests(
             requests ->
@@ -77,9 +86,13 @@ public class SecurityConfiguration {
                         HttpMethod.POST,
                         "/api/auth/register",
                         "/api/auth/login",
-                        "/api/auth/logout")
+                        "/api/auth/logout",
+                        "/api/auth/recover")
                     .permitAll()
                     .requestMatchers(HttpMethod.GET, "/api/auth/me")
+                    .authenticated()
+                    .requestMatchers(
+                        HttpMethod.POST, "/api/auth/password", "/api/auth/sessions/revoke")
                     .authenticated()
                     .requestMatchers(HttpMethod.POST, "/api/households")
                     .authenticated()
@@ -248,6 +261,8 @@ public class SecurityConfiguration {
                 csrf.csrfTokenRepository(csrfTokens)
                     .ignoringRequestMatchers("/api/provider-webhooks/plaid")
                     .csrfTokenRequestHandler(new XorCsrfTokenRequestAttributeHandler()))
+        .addFilterBefore(new AbsoluteSessionLifetimeFilter(clock), AuthorizationFilter.class)
+        .addFilterBefore(new SessionGenerationFilter(jdbc), AuthorizationFilter.class)
         .requestCache(AbstractHttpConfigurer::disable)
         .formLogin(AbstractHttpConfigurer::disable)
         .httpBasic(AbstractHttpConfigurer::disable)

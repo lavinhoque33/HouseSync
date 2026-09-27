@@ -2,6 +2,7 @@ package com.housesync;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -46,11 +47,12 @@ import com.housesync.household.web.HouseholdMemberResponse;
 import com.housesync.household.web.HouseholdResponse;
 import com.housesync.identity.application.HouseSyncUserDetails;
 import com.housesync.identity.application.HouseSyncUserDetailsService;
+import com.housesync.identity.application.IdentityGrants;
 import com.housesync.identity.application.IdentityService;
-import com.housesync.identity.web.SafeUserResponse;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -61,6 +63,8 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
@@ -82,7 +86,9 @@ class SecurityConfigurationTest {
 
   @Autowired private MockMvc mvc;
   @MockitoBean private IdentityService identities;
+  @MockitoBean private IdentityGrants grants;
   @MockitoBean private HouseSyncUserDetailsService userDetails;
+  @MockitoBean private JdbcTemplate jdbc;
   @MockitoBean private HouseholdService households;
   @MockitoBean private InvitationService invitations;
   @MockitoBean private FinancialAccountService financialAccounts;
@@ -115,6 +121,12 @@ class SecurityConfigurationTest {
 
   @MockitoBean private BankActivityService bankActivity;
   @MockitoBean private WebhookIngressService webhookIngress;
+
+  @BeforeEach
+  @SuppressWarnings("unchecked")
+  void allowSyntheticAuthenticatedPrincipals() {
+    when(jdbc.query(anyString(), any(ResultSetExtractor.class), any(UUID.class))).thenReturn(true);
+  }
 
   @ParameterizedTest
   @ValueSource(
@@ -334,7 +346,15 @@ class SecurityConfigurationTest {
   }
 
   @ParameterizedTest
-  @ValueSource(strings = {"/api/auth/register", "/api/auth/login", "/api/auth/logout"})
+  @ValueSource(
+      strings = {
+        "/api/auth/register",
+        "/api/auth/login",
+        "/api/auth/logout",
+        "/api/auth/recover",
+        "/api/auth/password",
+        "/api/auth/sessions/revoke"
+      })
   void unsafeAuthRequestsWithoutCsrfAreRejectedWithCsrfInvalid(String path) throws Exception {
     mvc.perform(
             post(path)
@@ -500,28 +520,11 @@ class SecurityConfigurationTest {
 
   private static org.springframework.test.web.servlet.request.RequestPostProcessor signedInAs(
       UUID actorId) {
-    HouseSyncUserDetails principal = new HouseSyncUserDetails(actorId, "person@example.test", null);
+    HouseSyncUserDetails principal =
+        new HouseSyncUserDetails(actorId, "person@example.test", null, 0);
     return authentication(
         new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(
             principal, null, List.of()));
-  }
-
-  @Test
-  void registerDelegatesToIdentityServiceAndReturnsSafeUser() throws Exception {
-    UUID id = UUID.randomUUID();
-    when(identities.register(any(), any()))
-        .thenReturn(new SafeUserResponse(id, "person@example.test"));
-    mvc.perform(
-            post("/api/auth/register")
-                .with(csrf())
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(
-                    "{\"email\":\"Person@Example.TEST\",\"password\":\"long-enough-password\"}"))
-        .andExpect(status().isCreated())
-        .andExpect(jsonPath("$.id").value(id.toString()))
-        .andExpect(jsonPath("$.email").value("person@example.test"))
-        .andExpect(jsonPath("$.password").doesNotExist())
-        .andExpect(jsonPath("$.passwordHash").doesNotExist());
   }
 
   @RestController

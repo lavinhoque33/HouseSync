@@ -37,6 +37,7 @@ abstract class ConnectedFinanceITSupport {
     registry.add("DB_PASSWORD", container::getPassword);
   }
 
+  @Autowired protected com.housesync.identity.application.IdentityGrants grants;
   @Autowired protected JdbcTemplate jdbc;
   @LocalServerPort protected int port;
 
@@ -48,7 +49,9 @@ abstract class ConnectedFinanceITSupport {
     Agent agent = new Agent();
     String email =
         tag + UUID.randomUUID().toString().replace("-", "").substring(0, 12) + "@example.test";
-    assertThat(agent.post("/api/auth/register", identityJson(email), agent.csrfToken()).status())
+    String enrollmentCode = grants.issue("ENROLLMENT", email).code();
+    String registration = registrationJson(email, enrollmentCode);
+    assertThat(agent.post("/api/auth/register", registration, agent.csrfToken()).status())
         .isEqualTo(201);
     assertThat(agent.post("/api/auth/login", identityJson(email), agent.csrfToken()).status())
         .isEqualTo(200);
@@ -208,6 +211,17 @@ abstract class ConnectedFinanceITSupport {
         owner.get("/api/households/" + householdId + "/financial-connections/" + connectionId);
     assertThat(response.status()).isEqualTo(200);
     return response.json().path("version").asInt();
+  }
+
+  /** Registration payload: the enrollment code is recipient-bound and single-use. */
+  protected static String registrationJson(String email, String enrollmentCode) {
+    return "{\"email\":\""
+        + email
+        + "\",\"password\":\""
+        + PASSWORD
+        + "\",\"enrollmentCode\":\""
+        + enrollmentCode
+        + "\"}";
   }
 
   protected static String identityJson(String email) {

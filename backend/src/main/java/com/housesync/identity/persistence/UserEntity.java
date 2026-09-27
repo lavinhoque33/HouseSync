@@ -27,6 +27,12 @@ public class UserEntity {
   @Column(name = "created_at", nullable = false)
   private Instant createdAt;
 
+  @Column(name = "access_disabled", nullable = false)
+  private boolean accessDisabled;
+
+  @Column(name = "session_generation", nullable = false)
+  private long sessionGeneration;
+
   protected UserEntity() {}
 
   public UserEntity(UUID id, String email, String passwordHash, Instant createdAt) {
@@ -50,5 +56,13 @@ public class UserEntity {
 
   public Instant getCreatedAt() {
     return createdAt;
+  }
+
+  public boolean isAccessDisabled() {
+    return accessDisabled;
+  }
+
+  public long getSessionGeneration() {
+    return sessionGeneration;
   }
 }

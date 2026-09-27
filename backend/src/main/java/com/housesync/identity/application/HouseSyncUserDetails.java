@@ -22,12 +22,14 @@ public final class HouseSyncUserDetails implements UserDetails, CredentialsConta
 
   private final UUID id;
   private final String email;
+  private final long sessionGeneration;
   private transient String passwordHash;
 
-  public HouseSyncUserDetails(UUID id, String email, String passwordHash) {
+  public HouseSyncUserDetails(UUID id, String email, String passwordHash, long sessionGeneration) {
     this.id = id;
     this.email = email;
     this.passwordHash = passwordHash;
+    this.sessionGeneration = sessionGeneration;
   }
 
   public UUID getId() {
@@ -36,6 +38,10 @@ public final class HouseSyncUserDetails implements UserDetails, CredentialsConta
 
   public String getEmail() {
     return email;
+  }
+
+  public long getSessionGeneration() {
+    return sessionGeneration;
   }
 
   @Override

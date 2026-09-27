@@ -53,11 +53,11 @@ class AuthIpRateLimitIT {
   void thirtiethFirstAttemptsPassAndThirtyFirstIsRateLimited() throws Exception {
     String session = bootstrap();
     String token = csrfToken(session);
-    // Invalid shapes are counted before validation/password work: 30 fast 400s, then 429.
+    // Invalid enrollment attempts are counted before grant lookup: 30 generic denials, then 429.
     for (int i = 0; i < 30; i++) {
       HttpResponse<String> response =
           register(session, token, "{\"email\":\"bad-" + i + "\",\"password\":\"x\"}");
-      assertThat(response.statusCode()).as("attempt %d", i).isEqualTo(400);
+      assertThat(response.statusCode()).as("attempt %d", i).isEqualTo(403);
     }
     HttpResponse<String> limited =
         register(session, token, "{\"email\":\"bad-final\",\"password\":\"x\"}");

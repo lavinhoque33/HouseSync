@@ -106,9 +106,7 @@ describe('signed-out join', () => {
   it('shows a generic prompt and never calls preview', async () => {
     const calls = stubJoin({});
     renderJoin({ user: null });
-    expect(
-      await screen.findByText(/Sign in or create an account in this tab/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Sign in in this tab/i)).toBeInTheDocument();
     expect(screen.queryByText('Elm Street home')).not.toBeInTheDocument();
     await act(async () => {});
     expect(invitationCalls(calls, '/api/invitations/preview')).toHaveLength(0);
@@ -118,7 +116,7 @@ describe('signed-out join', () => {
   it('dismisses locally without any invitation request', async () => {
     const calls = stubJoin({});
     const { props } = renderJoin({ user: null });
-    await screen.findByText(/Sign in or create an account in this tab/i);
+    await screen.findByText(/Sign in in this tab/i);
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss invitation' }));
     expect(props.onLeaveJoin).toHaveBeenCalledTimes(1);
     expect(
@@ -443,8 +441,8 @@ describe('route states', () => {
   });
 });
 
-describe('same-tab register then login retention', () => {
-  it('keeps the capability through registration and previews after login', async () => {
+describe('same-tab sign-in retention', () => {
+  it('keeps the capability through sign-in and previews after login', async () => {
     let authenticated = false;
     const calls: Array<{ url: string; init?: RequestInit | undefined }> = [];
     const fetchMock = vi.fn(
@@ -492,36 +490,7 @@ describe('same-tab register then login retention', () => {
       />,
     );
     // Signed out: generic prompt, and no preview request leaves the browser.
-    expect(
-      await screen.findByText(/Sign in or create an account in this tab/i),
-    ).toBeInTheDocument();
-    expect(
-      calls.filter(({ url }) => url === '/api/invitations/preview'),
-    ).toHaveLength(0);
-
-    // Register in the same tab: the capability must survive.
-    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
-    fireEvent.change(screen.getByLabelText('Email'), {
-      target: { value: USER.email },
-    });
-    fireEvent.change(screen.getByLabelText('Password'), {
-      target: { value: LONG_PASSWORD },
-    });
-    fireEvent.change(screen.getByLabelText('Confirm password'), {
-      target: { value: LONG_PASSWORD },
-    });
-    const createButtons = screen.getAllByRole('button', {
-      name: 'Create account',
-    });
-    fireEvent.click(createButtons[createButtons.length - 1]!);
-    expect(
-      await screen.findByText(
-        'Account created. Sign in with your new password.',
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Sign in or create an account in this tab/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Sign in in this tab/i)).toBeInTheDocument();
     expect(
       calls.filter(({ url }) => url === '/api/invitations/preview'),
     ).toHaveLength(0);
@@ -600,7 +569,7 @@ describe('same-tab register then login retention', () => {
         onLeaveJoin={() => {}}
       />,
     );
-    await screen.findByText(/Sign in or create an account in this tab/i);
+    await screen.findByText(/Sign in in this tab/i);
     fireEvent.change(screen.getByLabelText('Email'), {
       target: { value: USER.email },
     });

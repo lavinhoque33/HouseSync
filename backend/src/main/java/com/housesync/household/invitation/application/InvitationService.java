@@ -197,6 +197,16 @@ public class InvitationService {
         || !microsNow().isBefore(invitation.getExpiresAt())) {
       throw new InvitationNotFoundException();
     }
+    // Serialize with operator disable even if this request passed the session guard earlier.
+    // Otherwise a late invitation write could leave membership on a disabled account.
+    var enabled =
+        jdbc.query(
+            "SELECT NOT access_disabled FROM users WHERE id = ? FOR SHARE",
+            (rs, row) -> rs.getBoolean(1),
+            actorId);
+    if (enabled.size() != 1 || !enabled.getFirst()) {
+      throw new InvitationForbiddenException();
+    }
     jdbc.update(
         "INSERT INTO household_members (household_id, user_id, role) VALUES (?, ?, 'MEMBER')"
             + " ON CONFLICT DO NOTHING",

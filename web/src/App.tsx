@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import { AuthSection } from './auth/AuthSection';
+import {
+  clearAccountLinkFragment,
+  readAccountLinkRoute,
+  type AccountLinkRoute,
+} from './auth/route';
 import { HealthStatus } from './HealthStatus';
 import {
   clearJoinFragment,
@@ -15,10 +20,14 @@ export function App() {
   const [joinState, setJoinState] = useState<JoinRouteState>(() =>
     readJoinRoute(),
   );
+  const [accountLink, setAccountLink] = useState<AccountLinkRoute | null>(() =>
+    readAccountLinkRoute(),
+  );
 
   // Strip the fragment immediately after extraction so the secret does not
   // linger in the visible URL or history entries.
   useLayoutEffect(() => {
+    if (accountLink && window.location.hash) clearAccountLinkFragment();
     if (joinState.invite) {
       clearJoinFragment(joinState.invite.invitationId);
     } else if (window.location.hash.startsWith('#invite=')) {
@@ -34,6 +43,9 @@ export function App() {
   useEffect(() => {
     const onPopState = () => {
       const next = readJoinRoute();
+      const link = readAccountLinkRoute();
+      if (link && window.location.hash) clearAccountLinkFragment();
+      setAccountLink(link);
       // A history entry can carry a fragment (back/forward to the original
       // link): capture the capability and strip it immediately, just like
       // the initial load.
@@ -57,6 +69,11 @@ export function App() {
     // reopen the original link.
     window.history.pushState(null, '', '/');
     setJoinState({ joinActive: false, joinInvalid: false, invite: null });
+  }, []);
+
+  const leaveAccountLink = useCallback(() => {
+    window.history.pushState(null, '', '/');
+    setAccountLink(null);
   }, []);
 
   return (
@@ -112,6 +129,8 @@ export function App() {
           joinInvalid={joinState.joinInvalid}
           onInviteCleared={handleInviteCleared}
           onLeaveJoin={handleLeaveJoin}
+          accountLink={accountLink}
+          onLeaveAccountLink={leaveAccountLink}
         />
       </main>
 

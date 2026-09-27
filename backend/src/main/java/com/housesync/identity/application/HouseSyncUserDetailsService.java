@@ -28,9 +28,10 @@ public class HouseSyncUserDetailsService implements UserDetailsService {
   public UserDetails loadUserByUsername(String login) throws UsernameNotFoundException {
     String canonical = login == null ? null : EmailPolicy.normalize(login);
     UserEntity entity = canonical == null ? null : users.findByEmail(canonical).orElse(null);
-    if (entity == null) {
+    if (entity == null || entity.isAccessDisabled()) {
       throw new UsernameNotFoundException("Unknown login identifier.");
     }
-    return new HouseSyncUserDetails(entity.getId(), entity.getEmail(), entity.getPasswordHash());
+    return new HouseSyncUserDetails(
+        entity.getId(), entity.getEmail(), entity.getPasswordHash(), entity.getSessionGeneration());
   }
 }

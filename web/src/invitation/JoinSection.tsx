@@ -496,9 +496,11 @@ export function JoinSection({
         <h2 id="join-title">Household invitation</h2>
         <div role="status" aria-live="polite" className="join-notice">
           <p>
-            You have been invited to join a household on HouseSync. Sign in or
-            create an account in this tab to continue — your invitation is kept
-            in this tab while you do. No household details are shown until you
+            You have been invited to join a household on HouseSync. Sign in in
+            this tab to continue — your invitation is kept in memory. If you
+            need an account, ask the operator for a private enrollment link and
+            open it in a separate tab. Keep this invitation tab open, then
+            return here to sign in. No household details are shown until you
             sign in.
           </p>
         </div>
