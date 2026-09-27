@@ -292,7 +292,7 @@ describe('recurring household review and retained plans', () => {
     fireEvent.click(
       within(form).getByRole('button', { name: 'Save shared plan' }),
     );
-    await screen.findByText(/Expected amount: 125.00 USD/);
+    await screen.findByText('125.00 USD');
     await waitFor(() =>
       expect(screen.getByText('Household plan updated.')).toHaveFocus(),
     );
@@ -402,8 +402,8 @@ describe('recurring household review and retained plans', () => {
     );
     expect(screen.queryByText('2026-08-01')).toBeNull();
     expect(
-      screen.getByText(
-        /Matching text \(household-shared intent\): Electric supplier/,
+      within(document.getElementById(`insights-plan-${plan.id}`)!).getByText(
+        'Electric supplier',
       ),
     ).toBeInTheDocument();
   });
@@ -436,7 +436,7 @@ describe('recurring household review and retained plans', () => {
     fireEvent.click(
       await screen.findByRole('button', { name: 'View evidence' }),
     );
-    await screen.findByText(/Current plan: Electric · archived/);
+    await screen.findByText(/Electric · archived · version 2/);
     expect(screen.queryByRole('button', { name: 'Archive plan' })).toBeNull();
     expect(screen.getByText('2026-09-01')).toBeInTheDocument();
     expect(

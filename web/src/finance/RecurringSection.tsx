@@ -133,7 +133,9 @@ function EvidenceRows({
           <tr>
             <th scope="col">Date</th>
             <th scope="col">Description</th>
-            <th scope="col">Amount</th>
+            <th scope="col" className="insight-number">
+              Amount
+            </th>
             <th scope="col">Category</th>
             <th scope="col">Detail</th>
           </tr>
@@ -143,7 +145,9 @@ function EvidenceRows({
             <tr key={item.id}>
               <td>{item.occurredOn}</td>
               <td>{item.description}</td>
-              <td>{formatMoney(item.money.amount, currency)}</td>
+              <td className="insight-number">
+                {formatMoney(item.money.amount, currency)}
+              </td>
               <td>{item.category ?? 'Uncategorized'}</td>
               <td>
                 <button
@@ -831,412 +835,637 @@ export function RecurringSection({
       tabIndex={-1}
       aria-label="Recurring expenses and household plans"
     >
-      <h5>Possible recurring expenses</h5>
-      <p>
-        Currently shared, posted expenses only; past 36 months through today in
-        the household reporting zone. This is a conservative description-group
-        heuristic, not a bill, paid status, payment or cancellation. Multiple
-        charges with identical normalized descriptions may not be distinguished;
-        missing cycles or uncertain cadence may not be suggested. Refunds affect
-        the spending comparison above, not recurrence observations. Refresh
-        after ledger or disclosure changes.
-      </p>
-      <FilterBar
-        title="Recurring expense filters"
-        summary={`${review === 'OPEN' ? 'Open' : 'Dismissed'} reviews`}
-        activeCount={review === 'OPEN' ? 0 : 1}
-        onReset={() => setReview('OPEN')}
+      <section
+        className="insight-panel"
+        aria-label="Possible recurring expense suggestions"
       >
-        <label>
-          Review filter{' '}
-          <select
-            value={review}
-            onChange={(event) =>
-              setReview(event.target.value as 'OPEN' | 'DISMISSED')
-            }
-          >
-            <option value="OPEN">Open</option>
-            <option value="DISMISSED">Dismissed</option>
-          </select>
-        </label>
-      </FilterBar>
-      <p>
-        Your dismissals are private review preferences, not shared plans. A
-        previously shared suggestion disappearing means current shared evidence
-        changed or no longer qualifies; detached preferences are not readable or
-        restorable until it qualifies again. At most 1,000 preferences are kept
-        per member per household; old dismissals may reappear after eviction.
-      </p>
-      <button
-        type="button"
-        className="household-button household-button--secondary"
-        onClick={invalidate}
-      >
-        Refresh recurring records
-      </button>
-      {error && (
-        <div
-          ref={noticeRef}
-          tabIndex={-1}
-          role="alert"
-          className="household-notice household-notice--error"
-        >
-          {error}{' '}
+        <div className="insight-panel__header">
+          <div>
+            <h3>Possible recurring expenses</h3>
+            <div className="insight-badges">
+              <span className="insight-badge" data-tone="accent">
+                Suggestions · not plans
+              </span>
+              {candidates && (
+                <span className="insight-badge">
+                  {candidateRows.length} {review.toLowerCase()} shown
+                  {candidateCursor ? ' · more available' : ''}
+                </span>
+              )}
+            </div>
+          </div>
           <button
             type="button"
-            className="household-button"
+            className="household-button household-button--secondary"
             onClick={invalidate}
           >
-            Reload current records
+            Refresh recurring records
           </button>
         </div>
-      )}
-      {message && (
-        <p ref={statusRef} role="status" tabIndex={-1}>
-          {message}
+        <p>
+          Currently shared POSTED expenses only. Suggestions are not bills,
+          verified payments or cancellations. Not observed does not mean unpaid
+          or late.
         </p>
-      )}
-      {loading && <p role="status">Loading current recurring records…</p>}
-      {candidates && (
-        <>
+        <details className="insight-notes">
+          <summary>How suggestions and private reviews work</summary>
           <p>
-            Window [{candidates.evidenceFrom}, {candidates.evidenceTo}) · as of{' '}
-            {candidates.asOfDate}, {candidates.reportingTimeZone}, {currency}.{' '}
-            {candidateCursor
-              ? 'Candidate list is partial.'
-              : 'All qualifying candidates in this filter shown.'}
+            Past 36 months through today in the household reporting zone. This
+            conservative description-group heuristic may merge identical
+            descriptions or miss uncertain cycles. Refunds affect spending
+            comparison, not recurrence observations. Refresh after ledger or
+            disclosure changes.
           </p>
-          {candidateRows.length === 0 && (
-            <p>
-              No currently qualifying {review.toLowerCase()} recurring
-              suggestions. Manual plans can still be created by an owner.
-            </p>
-          )}
-          <ul className="recurring-cards">
-            {candidateRows.map((item) => (
-              <li key={item.merchantKey}>
-                <h6>{item.label}</h6>
-                <p>
-                  {item.occurrenceCount} disclosed expenses (
-                  {item.firstOccurredOn} to {item.lastOccurredOn}); exact
-                  minimum {formatMoney(item.minAmount, currency)}, lower median{' '}
-                  {formatMoney(item.medianAmount, currency)}, maximum{' '}
-                  {formatMoney(item.maxAmount, currency)}.{' '}
-                  {item.amountPattern === 'STABLE'
-                    ? 'Amounts within 10% of the median.'
-                    : 'Variable amounts; no fixed-charge inference.'}
-                </p>
-                <p>
-                  {item.cadence.toLowerCase()} anchored {item.anchorOn}{' '}
-                  {item.calendarAnchor === 'END_OF_MONTH'
-                    ? 'on month end'
-                    : item.calendarAnchor === 'DAY_OF_MONTH'
-                      ? 'on the calendar day'
-                      : ''}
-                  ; allowed date deviation{' '}
-                  {item.cadence === 'WEEKLY' || item.cadence === 'BIWEEKLY'
-                    ? '±1'
-                    : '±3'}{' '}
-                  days. Category-based suggestion:{' '}
-                  {item.suggestedKind.replace('_', ' ').toLowerCase()}, not a
-                  confirmed contract.
-                </p>
-                <p>
-                  Next possible slot:{' '}
-                  {item.nextExpectedOn ?? 'schedule date limit'} ·{' '}
-                  {item.expectationState.replace('_', ' ').toLowerCase()}. Not
-                  observed does not mean unpaid, late or canceled.{' '}
-                  {item.activePlanId
-                    ? 'A separately authored active plan matches this description.'
-                    : 'No active plan linked.'}
-                </p>
-                <button
-                  type="button"
-                  className="household-button household-button--secondary"
-                  onClick={() =>
-                    void openEvidence('candidate', item.merchantKey)
-                  }
-                >
-                  View current evidence
-                </button>{' '}
-                <button
-                  type="button"
-                  className="household-button household-button--secondary"
-                  disabled={busy}
-                  onClick={() =>
-                    void runAction(
-                      (token, signal) =>
-                        putRecurringReview(
-                          household.id,
-                          currency,
-                          item.merchantKey,
-                          item.candidateFingerprint,
-                          item.reviewVersion,
-                          item.reviewStatus === 'OPEN' ? 'DISMISSED' : 'OPEN',
-                          token,
-                          signal,
-                        ),
-                      item.reviewStatus === 'OPEN'
-                        ? 'Suggestion dismissed for you.'
-                        : 'Suggestion restored for you.',
-                    )
-                  }
-                >
-                  {item.reviewStatus === 'OPEN'
-                    ? 'Dismiss for me'
-                    : 'Restore for me'}
-                </button>{' '}
-                {owner && !item.activePlanId && (
-                  <button
-                    type="button"
-                    className="household-button"
-                    onClick={() => startCreate(item)}
-                  >
-                    Use current suggestion to draft shared plan
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-          {candidateCursor && (
+          <p>
+            Dismissals are private review preferences, not shared plans. A
+            suggestion can disappear when current shared evidence changes;
+            detached preferences are unavailable until it qualifies again. At
+            most 1,000 preferences are kept per member per household; old
+            dismissals may reappear after eviction.
+          </p>
+        </details>
+        <FilterBar
+          title="Recurring expense filters"
+          summary={`${review === 'OPEN' ? 'Open' : 'Dismissed'} reviews`}
+          activeCount={review === 'OPEN' ? 0 : 1}
+          onReset={() => setReview('OPEN')}
+        >
+          <label>
+            Review filter{' '}
+            <select
+              value={review}
+              onChange={(event) =>
+                setReview(event.target.value as 'OPEN' | 'DISMISSED')
+              }
+            >
+              <option value="OPEN">Open</option>
+              <option value="DISMISSED">Dismissed</option>
+            </select>
+          </label>
+        </FilterBar>
+        <div className="insight-actions">
+          <span className="insight-badge">
+            {review === 'OPEN' ? 'Open review' : 'Dismissed review'}
+          </span>
+        </div>
+        {error && (
+          <div
+            ref={noticeRef}
+            tabIndex={-1}
+            role="alert"
+            className="household-notice household-notice--error"
+          >
+            {error}{' '}
             <button
               type="button"
               className="household-button"
-              disabled={busy}
-              onClick={() => void loadPage('candidate')}
+              onClick={invalidate}
             >
-              Load more candidates
+              Reload current records
             </button>
-          )}
-        </>
-      )}
-      <h5>Tracked household bills/subscriptions</h5>
-      <p>
-        Explicit household-authored plans remain independently shared intent
-        even if supporting transactions are later unshared; archiving does not
-        erase them. Current disclosed observations are recalculated, not
-        retained evidence. No plan executes a payment, verifies a charge as paid
-        or cancels a subscription. Plans with identical normalized matching text
-        cannot be tracked separately; enter distinct matching descriptions when
-        appropriate.
-      </p>
-      {owner ? (
-        <button
-          type="button"
-          className="household-button"
-          onClick={() => startCreate()}
-        >
-          Create manual household plan
-        </button>
-      ) : (
-        <p>
-          Only a current household owner can create, edit or archive shared
-          plans. All current members can review suggestions and read plans.
-        </p>
-      )}
-      {plans && (
-        <>
-          <p>
-            {planCursor
-              ? 'Active plan list is partial; load more for all active plans.'
-              : 'All active plans shown.'}
+          </div>
+        )}
+        {message && (
+          <p ref={statusRef} role="status" tabIndex={-1}>
+            {message}
           </p>
-          {planRows.length === 0 && (
-            <p>No active tracked household plans in {currency}.</p>
-          )}
-          <ul className="recurring-cards">
-            {planRows.map(({ plan, expectation }) => (
-              <li id={`insights-plan-${plan.id}`} tabIndex={-1} key={plan.id}>
-                <h6>
-                  {plan.label} · {plan.kind.replace('_', ' ').toLowerCase()}
-                </h6>
-                <p>
-                  Matching text (household-shared intent):{' '}
-                  {plan.matchDescription}. Schedule:{' '}
-                  {plan.cadence.toLowerCase()} from {plan.anchorOn}{' '}
-                  {plan.calendarAnchor?.replaceAll('_', ' ').toLowerCase() ??
-                    ''}
-                  . Expected amount:{' '}
-                  {plan.expectedAmount === null
-                    ? 'unknown/variable'
-                    : formatMoney(plan.expectedAmount, plan.currency)}
-                  . Not counted as actual spending.
-                </p>
-                <p>
-                  Latest scheduled slot:{' '}
-                  {expectation.latestExpectedOn ?? 'not started'} ·{' '}
-                  {expectation.latestState.replace('_', ' ').toLowerCase()}.{' '}
-                  {expectation.latestState === 'OBSERVED'
-                    ? 'One disclosed expense matched; payment is not verified.'
-                    : expectation.latestState === 'AMBIGUOUS'
-                      ? 'Multiple disclosed expenses matched; no charge was selected.'
-                      : 'No verified payment status.'}{' '}
-                  {expectation.matchedCount !== null
-                    ? `${expectation.matchedCount} current matches. `
-                    : ''}
-                  {expectation.observedAmount !== null
-                    ? `Observed expense ${formatMoney(expectation.observedAmount, plan.currency)}. `
-                    : ''}
-                  Next slot:{' '}
-                  {expectation.nextExpectedOn ?? 'schedule date limit'}.{' '}
-                  {expectation.windowFrom !== null
-                    ? `Latest slot window [${expectation.windowFrom}, ${expectation.windowTo}).`
-                    : ''}
-                </p>
-                <button
-                  type="button"
-                  className="household-button household-button--secondary"
-                  onClick={() => void openEvidence('plan', plan.id)}
-                >
-                  View evidence
-                </button>{' '}
-                {owner && (
-                  <>
+        )}
+        {loading && <p role="status">Loading current recurring records…</p>}
+        {candidates && (
+          <>
+            <dl className="insight-facts">
+              <div>
+                <dt>Current evidence window</dt>
+                <dd>
+                  [{candidates.evidenceFrom}, {candidates.evidenceTo})
+                </dd>
+              </div>
+              <div>
+                <dt>As of</dt>
+                <dd>
+                  {candidates.asOfDate} · {candidates.reportingTimeZone} ·{' '}
+                  {currency}
+                </dd>
+              </div>
+            </dl>
+            <p>
+              {candidateCursor
+                ? 'Candidate list is partial.'
+                : 'All qualifying candidates in this filter shown.'}
+            </p>
+            {candidateRows.length === 0 && (
+              <p className="insight-empty">
+                No currently qualifying {review.toLowerCase()} recurring
+                suggestions. Manual plans can still be created by an owner.
+              </p>
+            )}
+            <ul className="recurring-cards">
+              {candidateRows.map((item) => (
+                <li key={item.merchantKey} className="insight-panel">
+                  <div className="insight-panel__header">
+                    <h4>{item.label}</h4>
+                    <div className="insight-badges">
+                      <span className="insight-badge">
+                        {item.cadence.toLowerCase()}
+                      </span>
+                      <span className="insight-badge">
+                        {item.expectationState
+                          .replaceAll('_', ' ')
+                          .toLowerCase()}
+                      </span>
+                      <span className="insight-badge">
+                        {item.suggestedKind.replaceAll('_', ' ').toLowerCase()}{' '}
+                        suggestion
+                      </span>
+                    </div>
+                  </div>
+                  <dl className="insight-facts">
+                    <div>
+                      <dt>Current occurrences</dt>
+                      <dd>
+                        {item.occurrenceCount} disclosed expenses ·{' '}
+                        {item.firstOccurredOn} to {item.lastOccurredOn}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Exact amount range</dt>
+                      <dd>
+                        {formatMoney(item.minAmount, currency)} minimum ·{' '}
+                        {formatMoney(item.medianAmount, currency)} lower median
+                        · {formatMoney(item.maxAmount, currency)} maximum
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Anchor</dt>
+                      <dd>
+                        {item.anchorOn} ·{' '}
+                        {item.calendarAnchor === 'END_OF_MONTH'
+                          ? 'month end'
+                          : item.calendarAnchor === 'DAY_OF_MONTH'
+                            ? 'calendar day'
+                            : 'weekly anchor'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Next possible slot</dt>
+                      <dd>{item.nextExpectedOn ?? 'schedule date limit'}</dd>
+                    </div>
+                    <div>
+                      <dt>Tracked plan</dt>
+                      <dd>
+                        {item.activePlanId
+                          ? 'Separately authored active plan linked'
+                          : 'No active plan linked'}
+                      </dd>
+                    </div>
+                  </dl>
+                  <details className="insight-notes">
+                    <summary>Suggestion uncertainty</summary>
+                    <p>
+                      {item.amountPattern === 'STABLE'
+                        ? 'Amounts within 10% of the median.'
+                        : 'Variable amounts; no fixed-charge inference.'}{' '}
+                      Allowed date deviation{' '}
+                      {item.cadence === 'WEEKLY' || item.cadence === 'BIWEEKLY'
+                        ? '±1'
+                        : '±3'}{' '}
+                      days. Category-based suggestion, not a confirmed contract.
+                      Not observed does not mean unpaid, late or canceled.
+                    </p>
+                  </details>
+                  <div className="insight-actions">
                     <button
                       type="button"
                       className="household-button household-button--secondary"
-                      onClick={() => startEdit(plan)}
+                      onClick={() =>
+                        void openEvidence('candidate', item.merchantKey)
+                      }
                     >
-                      Edit shared plan
+                      View current evidence
                     </button>{' '}
                     <button
-                      id={`recurring-archive-${plan.id}`}
                       type="button"
                       className="household-button household-button--secondary"
                       disabled={busy}
-                      onClick={() => {
-                        setArchiveTarget(plan);
-                        requestAnimationFrame(() =>
-                          document
-                            .getElementById(
-                              `recurring-archive-confirm-${plan.id}`,
-                            )
-                            ?.focus(),
-                        );
-                      }}
+                      onClick={() =>
+                        void runAction(
+                          (token, signal) =>
+                            putRecurringReview(
+                              household.id,
+                              currency,
+                              item.merchantKey,
+                              item.candidateFingerprint,
+                              item.reviewVersion,
+                              item.reviewStatus === 'OPEN'
+                                ? 'DISMISSED'
+                                : 'OPEN',
+                              token,
+                              signal,
+                            ),
+                          item.reviewStatus === 'OPEN'
+                            ? 'Suggestion dismissed for you.'
+                            : 'Suggestion restored for you.',
+                        )
+                      }
                     >
-                      Archive plan
-                    </button>
-                    {archiveTarget?.id === plan.id &&
-                      archiveTarget.version === plan.version && (
-                        <div
-                          className="household-notice"
-                          role="group"
-                          aria-label={`Archive ${plan.label} confirmation`}
-                        >
-                          <p>
-                            Archive {plan.label}? This permanently removes it
-                            from active tracking. It cannot be restored or
-                            edited afterward. The independently authored
-                            household intent remains readable in archived plans;
-                            this does not cancel any bill or subscription.
-                          </p>
-                          <button
-                            id={`recurring-archive-confirm-${plan.id}`}
-                            type="button"
-                            className="household-button"
-                            disabled={busy}
-                            onClick={() =>
-                              void runAction(
-                                (token, signal) =>
-                                  patchRecurringPlan(
-                                    household.id,
-                                    plan.id,
-                                    {
-                                      expectedVersion: plan.version,
-                                      status: 'ARCHIVED',
-                                    },
-                                    token,
-                                    signal,
-                                  ),
-                                'Household plan archived; retained intent remains readable.',
-                              )
-                            }
-                          >
-                            Confirm archive
-                          </button>{' '}
-                          <button
-                            type="button"
-                            className="household-button household-button--secondary"
-                            disabled={busy}
-                            onClick={() => {
-                              setArchiveTarget(null);
-                              requestAnimationFrame(() =>
-                                document
-                                  .getElementById(
-                                    `recurring-archive-${plan.id}`,
-                                  )
-                                  ?.focus(),
-                              );
-                            }}
-                          >
-                            Cancel archive
-                          </button>
-                        </div>
-                      )}
-                  </>
-                )}
-              </li>
-            ))}
-          </ul>
-          {planCursor && (
+                      {item.reviewStatus === 'OPEN'
+                        ? 'Dismiss for me'
+                        : 'Restore for me'}
+                    </button>{' '}
+                    {owner && !item.activePlanId && (
+                      <button
+                        type="button"
+                        className="household-button"
+                        onClick={() => startCreate(item)}
+                      >
+                        Use current suggestion to draft shared plan
+                      </button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {candidateCursor && (
+              <button
+                type="button"
+                className="household-button"
+                disabled={busy}
+                onClick={() => void loadPage('candidate')}
+              >
+                Load more candidates
+              </button>
+            )}
+          </>
+        )}
+      </section>
+      <section className="insight-panel" aria-label="Tracked household plans">
+        <div className="insight-panel__header">
+          <div>
+            <h3>Tracked household bills and subscriptions</h3>
+            <div className="insight-badges">
+              <span className="insight-badge" data-tone="accent">
+                Shared plans · not payments
+              </span>
+              {plans && (
+                <span className="insight-badge">
+                  {planRows.length} active shown
+                  {planCursor ? ' · more available' : ''}
+                </span>
+              )}
+            </div>
+          </div>
+          {owner && (
             <button
               type="button"
               className="household-button"
-              disabled={busy}
-              onClick={() => void loadPage('plan')}
+              onClick={() => startCreate()}
             >
-              Load more active plans
+              Create manual household plan
             </button>
           )}
-          {history.length > 0 && (
-            <>
-              <h6>Archived household plans · retained intent</h6>
-              <ul className="recurring-cards">
-                {history.map((plan) => (
-                  <li key={plan.id}>
-                    {plan.label} · {plan.kind.replace('_', ' ')} ·{' '}
-                    {plan.matchDescription} · archived.{' '}
+        </div>
+        <p>
+          Plans are household-authored intent, not actual spending, verified
+          payments or canceled subscriptions. Current disclosed observations are
+          recalculated, not retained history.
+        </p>
+        <details className="insight-notes">
+          <summary>Plan visibility and matching</summary>
+          <p>
+            Plans remain shared even if supporting transactions are later
+            unshared; archiving does not erase the intent. Plans with identical
+            normalized matching text cannot be tracked separately; enter
+            distinct matching descriptions where appropriate.
+          </p>
+        </details>
+        {!owner && (
+          <p>
+            Only a current household owner can create, edit or archive shared
+            plans. All current members can review suggestions and read plans.
+          </p>
+        )}
+        {plans && (
+          <>
+            <p>
+              {planCursor
+                ? 'Active plan list is partial; load more for all active plans.'
+                : 'All active plans shown.'}
+            </p>
+            {planRows.length === 0 && (
+              <p className="insight-empty">
+                No active tracked household plans in {currency}.
+              </p>
+            )}
+            <ul className="recurring-cards">
+              {planRows.map(({ plan, expectation }) => (
+                <li
+                  id={`insights-plan-${plan.id}`}
+                  tabIndex={-1}
+                  key={plan.id}
+                  className="insight-panel"
+                >
+                  <div className="insight-panel__header">
+                    <h4>{plan.label}</h4>
+                    <div className="insight-badges">
+                      <span className="insight-badge">
+                        {plan.kind.replaceAll('_', ' ').toLowerCase()}
+                      </span>
+                      <span className="insight-badge">
+                        {plan.cadence.toLowerCase()}
+                      </span>
+                      <span className="insight-badge">
+                        {expectation.latestState
+                          .replaceAll('_', ' ')
+                          .toLowerCase()}
+                      </span>
+                    </div>
+                  </div>
+                  <dl className="insight-facts">
+                    <div>
+                      <dt>Matching description · shared intent</dt>
+                      <dd>{plan.matchDescription}</dd>
+                    </div>
+                    <div>
+                      <dt>Schedule anchor</dt>
+                      <dd>
+                        {plan.anchorOn} ·{' '}
+                        {plan.calendarAnchor
+                          ?.replaceAll('_', ' ')
+                          .toLowerCase() ?? 'weekly anchor'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Expected amount · not actual spending</dt>
+                      <dd>
+                        {plan.expectedAmount === null
+                          ? 'unknown/variable'
+                          : formatMoney(plan.expectedAmount, plan.currency)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Latest scheduled slot</dt>
+                      <dd>{expectation.latestExpectedOn ?? 'not started'}</dd>
+                    </div>
+                    <div>
+                      <dt>Next slot</dt>
+                      <dd>
+                        {expectation.nextExpectedOn ?? 'schedule date limit'}
+                      </dd>
+                    </div>
+                    {expectation.matchedCount !== null && (
+                      <div>
+                        <dt>Current matches</dt>
+                        <dd>{expectation.matchedCount}</dd>
+                      </div>
+                    )}
+                    {expectation.observedAmount !== null && (
+                      <div>
+                        <dt>Observed expense · not verified payment</dt>
+                        <dd>
+                          {formatMoney(
+                            expectation.observedAmount,
+                            plan.currency,
+                          )}
+                        </dd>
+                      </div>
+                    )}
+                    {expectation.windowFrom !== null && (
+                      <div>
+                        <dt>Latest slot window</dt>
+                        <dd>
+                          [{expectation.windowFrom}, {expectation.windowTo})
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                  <p>
+                    {expectation.latestState === 'OBSERVED'
+                      ? 'One disclosed expense matched; payment is not verified.'
+                      : expectation.latestState === 'AMBIGUOUS'
+                        ? 'Multiple disclosed expenses matched; no charge was selected.'
+                        : 'No verified payment status.'}
+                  </p>
+                  <div className="insight-actions">
                     <button
                       type="button"
                       className="household-button household-button--secondary"
                       onClick={() => void openEvidence('plan', plan.id)}
                     >
                       View evidence
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-          {historyMore && (
-            <button
-              type="button"
-              className="household-button"
-              disabled={busy}
-              onClick={() => void loadPage('history')}
+                    </button>{' '}
+                    {owner && (
+                      <>
+                        <button
+                          type="button"
+                          className="household-button household-button--secondary"
+                          onClick={() => startEdit(plan)}
+                        >
+                          Edit shared plan
+                        </button>{' '}
+                        <button
+                          id={`recurring-archive-${plan.id}`}
+                          type="button"
+                          className="household-button household-button--secondary"
+                          disabled={busy}
+                          onClick={() => {
+                            setArchiveTarget(plan);
+                            requestAnimationFrame(() =>
+                              document
+                                .getElementById(
+                                  `recurring-archive-confirm-${plan.id}`,
+                                )
+                                ?.focus(),
+                            );
+                          }}
+                        >
+                          Archive plan
+                        </button>
+                        {archiveTarget?.id === plan.id &&
+                          archiveTarget.version === plan.version && (
+                            <div
+                              className="household-notice"
+                              role="group"
+                              aria-label={`Archive ${plan.label} confirmation`}
+                            >
+                              <p>
+                                Archive {plan.label}? This permanently removes
+                                it from active tracking. It cannot be restored
+                                or edited afterward. The independently authored
+                                household intent remains readable in archived
+                                plans; this does not cancel any bill or
+                                subscription.
+                              </p>
+                              <button
+                                id={`recurring-archive-confirm-${plan.id}`}
+                                type="button"
+                                className="household-button"
+                                disabled={busy}
+                                onClick={() =>
+                                  void runAction(
+                                    (token, signal) =>
+                                      patchRecurringPlan(
+                                        household.id,
+                                        plan.id,
+                                        {
+                                          expectedVersion: plan.version,
+                                          status: 'ARCHIVED',
+                                        },
+                                        token,
+                                        signal,
+                                      ),
+                                    'Household plan archived; retained intent remains readable.',
+                                  )
+                                }
+                              >
+                                Confirm archive
+                              </button>{' '}
+                              <button
+                                type="button"
+                                className="household-button household-button--secondary"
+                                disabled={busy}
+                                onClick={() => {
+                                  setArchiveTarget(null);
+                                  requestAnimationFrame(() =>
+                                    document
+                                      .getElementById(
+                                        `recurring-archive-${plan.id}`,
+                                      )
+                                      ?.focus(),
+                                  );
+                                }}
+                              >
+                                Cancel archive
+                              </button>
+                            </div>
+                          )}
+                      </>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {planCursor && (
+              <button
+                type="button"
+                className="household-button"
+                disabled={busy}
+                onClick={() => void loadPage('plan')}
+              >
+                Load more active plans
+              </button>
+            )}
+            <section
+              className="insight-panel"
+              aria-label="Archived household plans"
             >
-              Load more archived plans (history may be capped)
-            </button>
-          )}
-        </>
-      )}
+              <div className="insight-panel__header">
+                <h3>Archived household plans</h3>
+                <span className="insight-badge">
+                  {history.length} retained shown
+                  {historyMore ? ' · more available' : ''}
+                </span>
+              </div>
+              <p>
+                Archived plans retain household-authored intent, not historical
+                evidence of payment. Evidence below is recalculated from
+                currently disclosed expenses.
+              </p>
+              {history.length > 0 && (
+                <>
+                  <ul className="recurring-cards">
+                    {history.map((plan) => (
+                      <li key={plan.id} className="insight-panel">
+                        <div className="insight-panel__header">
+                          <h4>{plan.label}</h4>
+                          <div className="insight-badges">
+                            <span className="insight-badge">
+                              {plan.kind.replaceAll('_', ' ').toLowerCase()}
+                            </span>
+                            <span className="insight-badge">Archived</span>
+                          </div>
+                        </div>
+                        <dl className="insight-facts">
+                          <div>
+                            <dt>
+                              Matching description · retained shared intent
+                            </dt>
+                            <dd>{plan.matchDescription}</dd>
+                          </div>
+                          <div>
+                            <dt>Schedule</dt>
+                            <dd>
+                              {plan.cadence.toLowerCase()} from {plan.anchorOn}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Expected amount · not actual spending</dt>
+                            <dd>
+                              {plan.expectedAmount === null
+                                ? 'unknown/variable'
+                                : formatMoney(
+                                    plan.expectedAmount,
+                                    plan.currency,
+                                  )}
+                            </dd>
+                          </div>
+                        </dl>
+                        <button
+                          type="button"
+                          className="household-button household-button--secondary"
+                          onClick={() => void openEvidence('plan', plan.id)}
+                        >
+                          View evidence
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {history.length === 0 && (
+                <p className="insight-empty">
+                  No archived household plans in {currency}.
+                </p>
+              )}
+              {historyMore && (
+                <button
+                  type="button"
+                  className="household-button"
+                  disabled={busy}
+                  onClick={() => void loadPage('history')}
+                >
+                  Load more archived plans (history may be capped)
+                </button>
+              )}
+            </section>
+          </>
+        )}
+      </section>
       {detail && (
         <section
-          className="insights-detail"
+          className="insights-detail insight-panel"
           aria-label="Current recurring evidence"
         >
-          <h6>
+          <h4>
             {detail.kind === 'candidate'
               ? 'Possible recurrence'
               : 'Tracked plan'}{' '}
             · current shared evidence
-          </h6>
+          </h4>
           {evidence ? (
             <>
+              <dl className="insight-facts">
+                <div>
+                  <dt>Current evidence window</dt>
+                  <dd>
+                    [{evidence.evidenceFrom}, {evidence.evidenceTo})
+                  </dd>
+                </div>
+                <div>
+                  <dt>As of</dt>
+                  <dd>{evidence.asOfDate}</dd>
+                </div>
+              </dl>
               <p>
-                Current window [{evidence.evidenceFrom}, {evidence.evidenceTo});
-                as of {evidence.asOfDate}.{' '}
                 {evidenceCursor
                   ? 'Evidence is partial.'
                   : 'All matching current evidence shown.'}{' '}
@@ -1244,16 +1473,29 @@ export function RecurringSection({
                 unshare.
               </p>
               {'plan' in evidence && (
-                <p>
-                  Current plan: {evidence.plan.label} ·{' '}
-                  {evidence.plan.status.toLowerCase()} · version{' '}
-                  {evidence.plan.version}. Latest scheduled slot{' '}
-                  {evidence.expectation.latestExpectedOn ?? 'not started'};{' '}
-                  {evidence.expectation.latestState
-                    .replace('_', ' ')
-                    .toLowerCase()}
-                  . Current evidence does not certify payment.
-                </p>
+                <dl className="insight-facts">
+                  <div>
+                    <dt>Current plan</dt>
+                    <dd>
+                      {evidence.plan.label} ·{' '}
+                      {evidence.plan.status.toLowerCase()} · version{' '}
+                      {evidence.plan.version}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Latest scheduled slot</dt>
+                    <dd>
+                      {evidence.expectation.latestExpectedOn ?? 'not started'} ·{' '}
+                      {evidence.expectation.latestState
+                        .replaceAll('_', ' ')
+                        .toLowerCase()}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Payment status</dt>
+                    <dd>Current evidence does not certify payment.</dd>
+                  </div>
+                </dl>
               )}
               {detail.kind === 'candidate' &&
                 'candidate' in evidence &&
@@ -1264,7 +1506,9 @@ export function RecurringSection({
                   </p>
                 )}
               {evidenceRows.length === 0 && (
-                <p>No currently disclosed matching expenses.</p>
+                <p className="insight-empty">
+                  No currently disclosed matching expenses.
+                </p>
               )}
               <EvidenceRows
                 items={evidenceRows}
@@ -1301,17 +1545,17 @@ export function RecurringSection({
       )}
       {owner && formOpen && (
         <form
-          className="insights-detail recurring-form"
+          className="insights-detail recurring-form insight-panel"
           onSubmit={submit}
           aria-label={editing ? 'Edit household plan' : 'Create household plan'}
         >
-          <h6>
+          <h4>
             {editing
               ? 'Edit retained household plan'
               : source
                 ? 'Candidate-assisted plan · all fields editable'
                 : 'Manual household plan'}
-          </h6>
+          </h4>
           <p>
             {source
               ? 'Prefilled only from the current disclosed candidate. You choose and can edit every field; saving checks current candidate freshness.'
@@ -1440,23 +1684,31 @@ export function RecurringSection({
                 keeps this explicitly published intent. No evidence, source
                 transaction or bank account is stored in the plan.
               </p>
-              <dl>
-                <dt>Label and kind</dt>
-                <dd>
-                  {draft.label || '(enter label)'} · {draft.kind}
-                </dd>
-                <dt>Currency and matching text</dt>
-                <dd>
-                  {currency} ·{' '}
-                  {draft.matchDescription || '(enter matching text)'}
-                </dd>
-                <dt>Schedule</dt>
-                <dd>
-                  {draft.cadence} · {draft.anchorOn || '(choose date)'} ·{' '}
-                  {draft.calendarAnchor ?? 'not applicable'}
-                </dd>
-                <dt>Expected amount</dt>
-                <dd>{draft.expectedAmount || 'unknown/variable'}</dd>
+              <dl className="insight-facts">
+                <div>
+                  <dt>Label and kind</dt>
+                  <dd>
+                    {draft.label || '(enter label)'} · {draft.kind}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Currency and matching text</dt>
+                  <dd>
+                    {currency} ·{' '}
+                    {draft.matchDescription || '(enter matching text)'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Schedule</dt>
+                  <dd>
+                    {draft.cadence} · {draft.anchorOn || '(choose date)'} ·{' '}
+                    {draft.calendarAnchor ?? 'not applicable'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Expected amount</dt>
+                  <dd>{draft.expectedAmount || 'unknown/variable'}</dd>
+                </div>
               </dl>
               <label>
                 <input

@@ -110,8 +110,17 @@ function MonthlyNetChart({
     const magnitude = value < 0n ? -value : value;
     return magnitude > largest ? magnitude : largest;
   }, 0n);
+  if (values.length === 0)
+    return <p className="insight-empty">No months in this trend range.</p>;
+  if (maximum === 0n)
+    return (
+      <div className="insight-empty" role="status">
+        Net spending is zero in every displayed month. Expenses and refunds may
+        still be present; see exact monthly amounts below.
+      </div>
+    );
   return (
-    <figure className="insights-chart" aria-hidden="true">
+    <figure className="insights-chart">
       <figcaption>Monthly net spending · {currency}</figcaption>
       <div className="insights-chart-legend">
         Refund-heavy net ← zero → positive net
@@ -162,13 +171,15 @@ function SpendCells({
 }) {
   return (
     <>
-      <td>
-        {amount(spend.expenseTotal, currency)} ({spend.expenseCount} expenses)
+      <td className="insight-number">
+        {amount(spend.expenseTotal, currency)}
+        <small> {spend.expenseCount} expenses</small>
       </td>
-      <td>
-        {amount(spend.refundTotal, currency)} ({spend.refundCount} refunds)
+      <td className="insight-number">
+        {amount(spend.refundTotal, currency)}
+        <small> {spend.refundCount} refunds</small>
       </td>
-      <td>{amount(spend.netSpending, currency)}</td>
+      <td className="insight-number">{amount(spend.netSpending, currency)}</td>
     </>
   );
 }
@@ -227,6 +238,7 @@ export function InsightsSection({
   const [busy, setBusy] = useState(false);
   const [paging, setPaging] = useState(false);
   const [error, setError] = useState('');
+  const [summaryError, setSummaryError] = useState('');
   const [detailError, setDetailError] = useState('');
   const controllers = useRef(new Set<AbortController>());
   const detailControllers = useRef(new Set<AbortController>());
@@ -348,6 +360,7 @@ export function InsightsSection({
       setBusy(true);
       setPaging(false);
       setError('');
+      setSummaryError('');
       setComparison(null);
       setSeries(null);
       setGroups([]);
@@ -397,13 +410,31 @@ export function InsightsSection({
         applied.baseline,
         applied.currency,
         controller.signal,
-      ),
+      )
+        .then((snapshot) => ({ snapshot, warning: '' }))
+        .catch(
+          (
+            failure: unknown,
+          ): { snapshot: InsightSummary | null; warning: string } => {
+            if (
+              failure instanceof ApiError &&
+              (failure.status === 401 ||
+                failure.status === 403 ||
+                failure.status === 404 ||
+                failure.code === 'HOUSEHOLD_NOT_FOUND' ||
+                failure.code === 'INSIGHT_SNAPSHOT_STALE')
+            )
+              throw failure;
+            return { snapshot: null, warning: readableError(failure) };
+          },
+        ),
     ])
-      .then(([comp, trend, snapshot]) => {
+      .then(([comp, trend, { snapshot, warning }]) => {
         if (controller.signal.aborted || generation.current !== current) return;
         setComparison(comp);
         setSeries(trend);
         setSummary(snapshot);
+        setSummaryError(warning);
         setGroups(comp.items);
         setGroupCursor(comp.nextCursor);
         const queued = pendingDriver.current;
@@ -737,14 +768,17 @@ export function InsightsSection({
       aria-label="Household Insights"
       data-testid="insights-section"
     >
-      <h4>Insights · shared spending</h4>
-      <p>
-        Current shared records only: HOUSEHOLD, POSTED expenses and refunds.
-        Private entries, pending bank activity, transfers, allocations and
-        repayments are excluded. Corrections and disclosure changes restate past
-        months; figures do not indicate complete bank coverage. Merchant /
-        description groups are not verified businesses.
-      </p>
+      <h2>Insights · shared spending</h2>
+      <details className="insight-notes">
+        <summary>What these figures include</summary>
+        <p>
+          Current shared records only: HOUSEHOLD, POSTED expenses and refunds.
+          Private entries, pending bank activity, transfers, allocations and
+          repayments are excluded. Corrections and disclosure changes restate
+          past months; figures do not indicate complete bank coverage. Merchant
+          / description groups are not verified businesses.
+        </p>
+      </details>
       {resolveCalculationZone(reportingZone).fellBack && (
         <p role="status">
           Your browser cannot calculate defaults in {reportingZone}; defaults
@@ -870,6 +904,19 @@ export function InsightsSection({
           Loading insights for {applied.month} versus {applied.baseline}…
         </p>
       )}
+      {summaryError && !error && (
+        <div className="household-notice" role="status">
+          Summary unavailable: {summaryError} The comparison and monthly records
+          are still available.
+          <button
+            type="button"
+            className="household-button household-button--secondary"
+            onClick={() => setRevision((value) => value + 1)}
+          >
+            Retry summary and insights
+          </button>
+        </div>
+      )}
       {summary && (
         <SummaryView
           summary={summary}
@@ -879,186 +926,325 @@ export function InsightsSection({
       )}
       {comparison && series && (
         <>
-          <p>
-            Showing {applied.currency}, {comparison.reportingTimeZone}; as of{' '}
-            {comparison.asOfDate}. Selected {comparison.period.from} to{' '}
-            {comparison.period.to} (exclusive),{' '}
-            {stateLabel(comparison.period.state)} Baseline{' '}
-            {comparison.baselinePeriod.from} to {comparison.baselinePeriod.to}{' '}
-            (exclusive), {stateLabel(comparison.baselinePeriod.state)}
-          </p>
-          <p>
-            Net spending {money(comparison.current.netSpending)} vs{' '}
-            {money(comparison.baseline.netSpending)}.{' '}
-            {comparison.change.direction === 'UNCHANGED'
-              ? 'Unchanged'
-              : comparison.change.direction === 'INCREASE'
-                ? 'Increase'
-                : 'Decrease'}{' '}
-            of {money(comparison.change.delta)} (expenses minus refunds).{' '}
-            {comparison.change.percentChange === null
-              ? `Percent unavailable: ${comparison.change.percentUnavailableReason === 'BASELINE_ZERO' ? 'zero baseline' : 'negative baseline'}.`
-              : `${comparison.change.percentChange}% relative to positive baseline.`}{' '}
-            Income separately: {money(comparison.current.incomeTotal)} vs{' '}
-            {money(comparison.baseline.incomeTotal)}.
-          </p>
-          <p>
-            Net change = (current expenses{' '}
-            {money(comparison.current.expenseTotal)}
-            {' − '}baseline expenses {money(comparison.baseline.expenseTotal)})
-            {' − '}(current refunds {money(comparison.current.refundTotal)}
-            {' − '}baseline refunds {money(comparison.baseline.refundTotal)})
-            {' = '}
-            {money(comparison.change.delta)}. This is arithmetic, not a claim
-            about why spending changed.
-          </p>
-          <h5>Monthly trend · exact values</h5>
-          <p>
-            Each row is a full calendar month. Expenses less refunds may make
-            net spending negative.
-          </p>
-          <MonthlyNetChart series={series} currency={applied.currency} />
-          <p>
-            Bars compare signed net spending across these months, not expense
-            volume or bank coverage. Left means refunds exceeded expenses; right
-            means expenses exceeded refunds. Exact expenses, refunds, net and
-            income are in the table below.
-          </p>
-          <p>Focus a table and use the arrow keys to scroll horizontally.</p>
-          <div
-            className="insights-scroll"
-            role="region"
-            aria-label="Monthly spending table"
-            tabIndex={0}
-          >
-            <table>
-              <caption>
-                Monthly spending in {applied.currency} from {series.fromMonth}{' '}
-                to {series.toMonth} (exclusive)
-              </caption>
-              <thead>
-                <tr>
-                  <th scope="col">Month and state</th>
-                  <th scope="col">Expenses</th>
-                  <th scope="col">Refunds</th>
-                  <th scope="col">Net spending</th>
-                  <th scope="col">Income separately</th>
-                </tr>
-              </thead>
-              <tbody>
-                {series.items.map((item) => (
-                  <tr key={item.period.month}>
-                    <th scope="row">
-                      {item.period.month} ·{' '}
-                      {item.period.state.toLowerCase().replace('_', ' ')}
-                    </th>
-                    <SpendCells
-                      spend={item.totals}
-                      currency={applied.currency}
-                    />
-                    <td>{money(item.totals.incomeTotal)}</td>
-                  </tr>
+          {!summary && (
+            <section className="insight-panel" aria-label="Spending comparison">
+              <div className="insight-panel__header">
+                <h3>Spending comparison</h3>
+                <div className="insight-badges">
+                  <span className="insight-badge">
+                    {applied.month} vs {applied.baseline}
+                  </span>
+                  <span className="insight-badge">{applied.currency}</span>
+                  <span className="insight-badge">
+                    {comparison.period.state.replaceAll('_', ' ').toLowerCase()}
+                  </span>
+                </div>
+              </div>
+              <div className="insight-metrics">
+                {(
+                  [
+                    [
+                      'Net spending',
+                      comparison.current.netSpending,
+                      comparison.baseline.netSpending,
+                    ],
+                    [
+                      'Expenses',
+                      comparison.current.expenseTotal,
+                      comparison.baseline.expenseTotal,
+                    ],
+                    [
+                      'Refunds',
+                      comparison.current.refundTotal,
+                      comparison.baseline.refundTotal,
+                    ],
+                    [
+                      'Income · separate',
+                      comparison.current.incomeTotal,
+                      comparison.baseline.incomeTotal,
+                    ],
+                  ] as const
+                ).map(([label, current, baseline]) => (
+                  <div className="insight-metric" key={label}>
+                    <span className="insight-metric__label">{label}</span>
+                    <strong className="insight-metric__value">
+                      {money(current)}
+                    </strong>
+                    <span className="insight-metric__note">
+                      Baseline {money(baseline)}
+                    </span>
+                  </div>
                 ))}
-              </tbody>
-            </table>
-          </div>
-          <h5>
-            {applied.dimension === 'CATEGORY'
-              ? 'Categories'
-              : 'Merchant / description groups'}{' '}
-            · comparison
-          </h5>
-          <p>
-            Ranked by absolute exact net change. Current and baseline totals
-            above cover all groups;{' '}
-            {groupCursor
-              ? 'this table is partial — load more to see every group.'
-              : 'all groups are shown.'}{' '}
-            A zero net group can still contain expenses and refunds.
-          </p>
-          <div
-            className="insights-scroll"
-            role="region"
-            aria-label="Group comparison table"
-            tabIndex={0}
-          >
-            <table>
-              <caption>
-                Group differences for {applied.month} versus {applied.baseline},{' '}
-                {applied.currency}
-              </caption>
-              <thead>
-                <tr>
-                  <th scope="col">Group</th>
-                  <th scope="col">Current expenses</th>
-                  <th scope="col">Current refunds</th>
-                  <th scope="col">Current net</th>
-                  <th scope="col">Baseline expenses</th>
-                  <th scope="col">Baseline refunds</th>
-                  <th scope="col">Baseline net</th>
-                  <th scope="col">Change</th>
-                </tr>
-              </thead>
-              <tbody>
-                {groups.map((group) => (
-                  <tr key={group.key}>
-                    <th scope="row">
-                      <button
-                        type="button"
-                        className="household-button household-button--secondary"
-                        onClick={() => selectGroup(group)}
-                        aria-label={`View trend and evidence for ${group.label}`}
-                      >
-                        {group.label}
-                      </button>
-                    </th>
-                    <SpendCells
-                      spend={group.current}
-                      currency={applied.currency}
-                    />
-                    <SpendCells
-                      spend={group.baseline}
-                      currency={applied.currency}
-                    />
-                    <td>
-                      {group.change.direction}: {money(group.change.delta)};{' '}
-                      {group.change.percentChange === null
-                        ? `percentage unavailable (${group.change.percentUnavailableReason === 'BASELINE_ZERO' ? 'zero' : 'negative'} baseline)`
-                        : `${group.change.percentChange}%`}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {groups.length === 0 && !groupCursor && (
-            <p>
-              No disclosed expenses or refunds in either compared month. Income
-              is separate.
-            </p>
+              </div>
+              <div className="insight-badges">
+                <span className="insight-badge">
+                  {comparison.change.direction.toLowerCase()} ·{' '}
+                  {money(comparison.change.delta)}
+                </span>
+                <span className="insight-badge">
+                  {comparison.change.percentChange === null
+                    ? `Percent unavailable: ${comparison.change.percentUnavailableReason === 'BASELINE_ZERO' ? 'zero' : 'negative'} baseline`
+                    : `${comparison.change.percentChange}% vs positive baseline`}
+                </span>
+                <span className="insight-badge">
+                  As of {comparison.asOfDate} · {comparison.reportingTimeZone}
+                </span>
+              </div>
+              <details className="insight-notes">
+                <summary>Period and calculation details</summary>
+                <p>
+                  Selected [{comparison.period.from}, {comparison.period.to}) ·{' '}
+                  {stateLabel(comparison.period.state)}
+                  Baseline [{comparison.baselinePeriod.from},{' '}
+                  {comparison.baselinePeriod.to}) ·{' '}
+                  {stateLabel(comparison.baselinePeriod.state)}
+                </p>
+                <p>
+                  Net change = (current expenses{' '}
+                  {money(comparison.current.expenseTotal)} − baseline expenses{' '}
+                  {money(comparison.baseline.expenseTotal)}) − (current refunds{' '}
+                  {money(comparison.current.refundTotal)} − baseline refunds{' '}
+                  {money(comparison.baseline.refundTotal)}) ={' '}
+                  {money(comparison.change.delta)}. This is arithmetic, not a
+                  claim about why spending changed.
+                </p>
+              </details>
+            </section>
           )}
-          {groupCursor && (
-            <button
-              type="button"
-              className="household-button"
-              disabled={paging}
-              onClick={() => void nextGroups()}
-            >
-              {paging ? 'Loading groups…' : 'Load more groups'}
-            </button>
-          )}
+          <section className="insight-panel" aria-label="Monthly trend">
+            <div className="insight-panel__header">
+              <h3>Monthly trend</h3>
+              <span className="insight-badge">
+                Exact values · {applied.currency}
+              </span>
+            </div>
+            <MonthlyNetChart series={series} currency={applied.currency} />
+            <details className="insight-notes">
+              <summary>Reading the monthly trend</summary>
+              <p>
+                Each row is a full calendar month. Bars compare signed net
+                spending, not expense volume or bank coverage. Left means
+                refunds exceeded expenses; right means expenses exceeded
+                refunds. Zero net can include both expenses and refunds. Income
+                is separate. Focus the table and use arrow keys to scroll
+                horizontally.
+              </p>
+            </details>
+            <details className="insight-notes">
+              <summary>Exact monthly amounts</summary>
+              <div
+                className="insights-scroll"
+                role="region"
+                aria-label="Monthly spending table"
+                tabIndex={0}
+              >
+                <table>
+                  <caption>
+                    Monthly spending in {applied.currency} from{' '}
+                    {series.fromMonth} to {series.toMonth} (exclusive)
+                  </caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Month and state</th>
+                      <th scope="col" className="insight-number">
+                        Expenses
+                      </th>
+                      <th scope="col" className="insight-number">
+                        Refunds
+                      </th>
+                      <th scope="col" className="insight-number">
+                        Net spending
+                      </th>
+                      <th scope="col" className="insight-number">
+                        Income separately
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {series.items.map((item) => (
+                      <tr key={item.period.month}>
+                        <th scope="row">
+                          {item.period.month}{' '}
+                          <span className="insight-badge">
+                            {item.period.state.toLowerCase().replace('_', ' ')}
+                          </span>
+                        </th>
+                        <SpendCells
+                          spend={item.totals}
+                          currency={applied.currency}
+                        />
+                        <td className="insight-number">
+                          {money(item.totals.incomeTotal)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </section>
+          <section className="insight-panel" aria-label="Group comparison">
+            <div className="insight-panel__header">
+              <h3>
+                {applied.dimension === 'CATEGORY'
+                  ? 'Categories'
+                  : 'Merchant / description groups'}
+              </h3>
+              <span className="insight-badge">
+                Comparison · {applied.month} vs {applied.baseline}
+              </span>
+            </div>
+            {groups.length > 0 && (
+              <>
+                <p>
+                  Ranked by absolute exact net change.{' '}
+                  {groupCursor
+                    ? 'This table is partial — load more to see every group.'
+                    : 'All groups are shown.'}{' '}
+                  A zero net group can still contain expenses and refunds.
+                </p>
+                <div
+                  className="insights-scroll"
+                  role="region"
+                  aria-label="Group comparison table"
+                  tabIndex={0}
+                >
+                  <table>
+                    <caption>
+                      Group differences for {applied.month} versus{' '}
+                      {applied.baseline}, {applied.currency}
+                    </caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Group</th>
+                        <th scope="col" className="insight-number">
+                          Selected net
+                        </th>
+                        <th scope="col" className="insight-number">
+                          Baseline net
+                        </th>
+                        <th scope="col" className="insight-number">
+                          Exact change
+                        </th>
+                        <th scope="col">Amounts and counts</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {groups.map((group) => (
+                        <tr key={group.key}>
+                          <th scope="row">
+                            <button
+                              type="button"
+                              className="household-button household-button--secondary"
+                              onClick={() => selectGroup(group)}
+                              aria-label={`View trend and evidence for ${group.label}`}
+                            >
+                              {group.label}
+                            </button>
+                          </th>
+                          <td className="insight-number">
+                            {money(group.current.netSpending)}
+                          </td>
+                          <td className="insight-number">
+                            {money(group.baseline.netSpending)}
+                          </td>
+                          <td className="insight-number">
+                            <span className="insight-badge">
+                              {group.change.direction.toLowerCase()}
+                            </span>{' '}
+                            {money(group.change.delta)}
+                            <small>
+                              {group.change.percentChange === null
+                                ? ` · percentage unavailable (${group.change.percentUnavailableReason === 'BASELINE_ZERO' ? 'zero' : 'negative'} baseline)`
+                                : ` · ${group.change.percentChange}%`}
+                            </small>
+                          </td>
+                          <td>
+                            <details className="insight-notes">
+                              <summary>Expenses and refunds</summary>
+                              <dl className="insight-facts">
+                                <div>
+                                  <dt>Selected expenses</dt>
+                                  <dd>
+                                    {money(group.current.expenseTotal)} ·{' '}
+                                    {group.current.expenseCount}
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt>Selected refunds</dt>
+                                  <dd>
+                                    {money(group.current.refundTotal)} ·{' '}
+                                    {group.current.refundCount}
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt>Baseline expenses</dt>
+                                  <dd>
+                                    {money(group.baseline.expenseTotal)} ·{' '}
+                                    {group.baseline.expenseCount}
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt>Baseline refunds</dt>
+                                  <dd>
+                                    {money(group.baseline.refundTotal)} ·{' '}
+                                    {group.baseline.refundCount}
+                                  </dd>
+                                </div>
+                              </dl>
+                            </details>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+            {groups.length === 0 && !groupCursor && (
+              <p className="insight-empty">
+                No disclosed expenses or refunds in either compared month.
+                Income is separate.
+              </p>
+            )}
+            {groupCursor && (
+              <button
+                type="button"
+                className="household-button"
+                disabled={paging}
+                onClick={() => void nextGroups()}
+              >
+                {paging ? 'Loading groups…' : 'Load more groups'}
+              </button>
+            )}
+          </section>
         </>
       )}
       {selected && (
-        <div className="insights-detail">
-          <h5 ref={detailHeadingRef} tabIndex={-1}>
-            {selected.label} · disclosed evidence
-          </h5>
-          <p>
-            Descriptions are public ledger text. Each transaction detail is
-            reauthorized before opening. A refund follows its source expense’s
-            current group even if its own description differs.
-          </p>
+        <section
+          className="insights-detail insight-panel"
+          aria-label="Group evidence"
+        >
+          <div className="insight-panel__header">
+            <h3 ref={detailHeadingRef} tabIndex={-1}>
+              {selected.label} · disclosed evidence
+            </h3>
+            <button
+              type="button"
+              className="household-button household-button--secondary"
+              onClick={clearDetails}
+            >
+              Close group
+            </button>
+          </div>
+          <details className="insight-notes">
+            <summary>Evidence and authorization</summary>
+            <p>
+              Descriptions are public ledger text. Each transaction detail is
+              reauthorized before opening. A refund follows its source expense’s
+              current group even if its own description differs.
+            </p>
+          </details>
           {groupSeries && (
             <div
               className="insights-scroll"
@@ -1073,9 +1259,15 @@ export function InsightsSection({
                 <thead>
                   <tr>
                     <th scope="col">Month</th>
-                    <th scope="col">Expenses</th>
-                    <th scope="col">Refunds</th>
-                    <th scope="col">Net</th>
+                    <th scope="col" className="insight-number">
+                      Expenses
+                    </th>
+                    <th scope="col" className="insight-number">
+                      Refunds
+                    </th>
+                    <th scope="col" className="insight-number">
+                      Net
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1098,12 +1290,12 @@ export function InsightsSection({
             const page = evidence[month];
             return (
               <div key={month}>
-                <h6>
+                <h4>
                   {month === applied.month
                     ? 'Selected month'
                     : 'Baseline month'}{' '}
                   · {month}
-                </h6>
+                </h4>
                 {page ? (
                   <>
                     <p>
@@ -1129,7 +1321,9 @@ export function InsightsSection({
                             <th scope="col">Date</th>
                             <th scope="col">Kind</th>
                             <th scope="col">Public description</th>
-                            <th scope="col">Signed amount</th>
+                            <th scope="col" className="insight-number">
+                              Signed amount
+                            </th>
                             <th scope="col">Category</th>
                             <th scope="col">Detail</th>
                           </tr>
@@ -1138,9 +1332,15 @@ export function InsightsSection({
                           {page.items.map((item) => (
                             <tr key={item.id}>
                               <td>{item.occurredOn}</td>
-                              <td>{item.kind}</td>
+                              <td>
+                                <span className="insight-badge">
+                                  {item.kind.toLowerCase()}
+                                </span>
+                              </td>
                               <td>{item.description}</td>
-                              <td>{money(item.money.amount)}</td>
+                              <td className="insight-number">
+                                {money(item.money.amount)}
+                              </td>
                               <td>{item.category ?? 'Uncategorized'}</td>
                               <td>
                                 <button
@@ -1182,14 +1382,7 @@ export function InsightsSection({
               </div>
             );
           })}
-          <button
-            type="button"
-            className="household-button household-button--secondary"
-            onClick={clearDetails}
-          >
-            Close group
-          </button>
-        </div>
+        </section>
       )}
       <BudgetSection
         key={`${household.id}:${household.role}:${applied.month}:${applied.currency}`}

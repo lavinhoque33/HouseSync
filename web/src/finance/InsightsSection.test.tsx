@@ -5,7 +5,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type Household } from '../auth/client';
 import { nextInsightMonth } from './insights';
 import { InsightsSection } from './InsightsSection';
@@ -114,6 +114,7 @@ function mount(
   refreshSignal = 0,
   onSessionExpired = vi.fn(),
   onHouseholdAccessChanged = vi.fn(),
+  onOpenTransaction = vi.fn(),
 ) {
   return render(
     <InsightsSection
@@ -124,14 +125,14 @@ function mount(
       refreshSignal={refreshSignal}
       onSessionExpired={onSessionExpired}
       onHouseholdAccessChanged={onHouseholdAccessChanged}
-      onOpenTransaction={vi.fn()}
+      onOpenTransaction={onOpenTransaction}
       budgetPending={null}
       setBudgetPending={vi.fn()}
       nowProvider={() => new Date('2026-09-25T12:00:00Z')}
     />,
   );
 }
-fetchSummary.mockImplementation(async () => summary());
+beforeEach(() => fetchSummary.mockImplementation(async () => summary()));
 afterEach(() => {
   vi.clearAllMocks();
 });
@@ -212,6 +213,7 @@ describe('household insights interactions', () => {
       ),
     }));
     const view = mount();
+    fireEvent.click(await screen.findByText('Exact monthly amounts'));
     await screen.findByRole('table', { name: /Monthly spending in USD/ });
     const chartRows = view.container.querySelectorAll('.insights-chart li');
     expect(chartRows).toHaveLength(4);
@@ -234,8 +236,91 @@ describe('household insights interactions', () => {
       within(table).getByText('-50000000000000000000.00 USD'),
     ).toBeInTheDocument();
     expect(
-      within(table).getByText('100000000000000000000.00 USD'),
+      within(table).getByRole('cell', {
+        name: '100000000000000000000.00 USD',
+      }),
     ).toBeInTheDocument();
+  });
+
+  it('replaces an all-zero net chart with a compact state while retaining nonzero expense and refund evidence', async () => {
+    fetchComparison.mockImplementation(async () => comparison([], null));
+    fetchSeries.mockImplementation(async () => ({
+      ...series(),
+      items: [
+        {
+          period: period('2026-09'),
+          totals: {
+            ...totals,
+            expenseTotal: '12.00',
+            refundTotal: '12.00',
+            expenseCount: '2',
+            refundCount: '1',
+          },
+        },
+      ],
+    }));
+    const view = mount();
+    fireEvent.click(await screen.findByText('Exact monthly amounts'));
+    await screen.findByRole('table', { name: /Monthly spending in USD/ });
+    expect(
+      view.container.querySelector('.insights-chart'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Net spending is zero in every displayed month/),
+    ).toBeInTheDocument();
+    const table = screen.getByRole('table', {
+      name: /Monthly spending in USD/,
+    });
+    expect(within(table).getByText(/2 expenses/)).toBeInTheDocument();
+    expect(within(table).getByText(/1 refunds/)).toBeInTheDocument();
+  });
+
+  it('retains comparison and trend when the independent summary request fails', async () => {
+    fetchComparison.mockImplementation(async () => comparison([], null));
+    fetchSeries.mockImplementation(async () => series());
+    fetchSummary.mockRejectedValueOnce(new Error('summary unavailable'));
+    mount();
+    expect(
+      await screen.findByRole('heading', { name: 'Spending comparison' }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Exact monthly amounts'));
+    expect(
+      screen.getByRole('table', { name: /Monthly spending in USD/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: 'Overview' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/Summary unavailable:/)).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Retry summary and insights' }),
+    );
+    expect(
+      await screen.findByRole('heading', { name: 'Overview' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Summary unavailable:/)).not.toBeInTheDocument();
+  });
+
+  it('does not substitute comparison data for a forbidden summary read', async () => {
+    fetchComparison.mockImplementation(async () => comparison([], null));
+    fetchSeries.mockImplementation(async () => series());
+    fetchSummary.mockRejectedValueOnce(
+      new ApiError({
+        status: 403,
+        code: 'UNKNOWN_ERROR',
+        message: 'Access denied',
+      }),
+    );
+    mount();
+    await screen.findByRole('alert');
+    expect(
+      screen.queryByRole('heading', { name: 'Overview' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: 'Spending comparison' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: 'Monthly trend' }),
+    ).not.toBeInTheDocument();
   });
 
   it('paginates evidence past 100 records, retaining totals and direct detail actions', async () => {
@@ -275,7 +360,8 @@ describe('household insights interactions', () => {
         nextCursor: month === '2026-08' || cursor ? null : 'next',
       }),
     );
-    mount();
+    const onOpenTransaction = vi.fn();
+    mount(0, vi.fn(), vi.fn(), onOpenTransaction);
     fireEvent.click(
       await screen.findByRole('button', {
         name: /View trend and evidence for Groceries 0/,
@@ -295,6 +381,17 @@ describe('household insights interactions', () => {
         }),
       ).getAllByRole('row'),
     ).toHaveLength(102);
+    expect(
+      screen.getByRole('table', {
+        name: /Disclosed transactions for Groceries 0 in 2026-08/,
+      }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: 'Open authorized detail for Public 100',
+      }),
+    );
+    expect(onOpenTransaction).toHaveBeenCalledWith(row(100).id);
   });
 
   it('loads more than 100 description groups without dropping whole-population totals', async () => {
@@ -330,9 +427,6 @@ describe('household insights interactions', () => {
     expect(
       screen.getAllByRole('button', { name: /View trend and evidence/ }),
     ).toHaveLength(101);
-    expect(
-      screen.getByText(/Net spending 0.00 USD vs 0.00 USD/),
-    ).toBeInTheDocument();
   });
 
   it('removes retained money and delegates session loss instead of retrying under old authority', async () => {
@@ -514,7 +608,7 @@ describe('household insights interactions', () => {
       }),
     );
     await screen.findByRole('heading', {
-      name: 'Merchant / description groups · comparison',
+      name: 'Merchant / description groups',
     });
     expect(screen.getByLabelText('Breakdown')).toHaveValue('MERCHANT');
   });

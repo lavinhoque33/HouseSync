@@ -85,29 +85,49 @@ function ProgressRow({
   currency: FinancialAccountCurrency;
 }) {
   return (
-    <tr>
-      <th scope="row">{label(item.target.bucket)}</th>
-      <td>
+    <tr
+      className={
+        item.target.bucket === 'OVERALL' ? 'budget-row--overall' : undefined
+      }
+    >
+      <th scope="row">
+        {item.target.bucket === 'OVERALL'
+          ? 'Overall · overlaps categories'
+          : label(item.target.bucket)}
+      </th>
+      <td className="insight-number">
         {formatMoney(item.target.money.amount, currency)}
         {item.target.money.amount.replace('.', '').replace(/^0+/, '') === ''
           ? ' (deliberate zero target)'
           : ''}
       </td>
-      <td>
-        {formatMoney(item.actual.expenseTotal, currency)} expenses less{' '}
-        {formatMoney(item.actual.refundTotal, currency)} refunds (
-        {countText(item.actual.expenseCount, 'expense')},{' '}
-        {countText(item.actual.refundCount, 'refund')})
+      <td className="insight-number">
+        {formatMoney(item.actual.netSpending, currency)}
+        <small className="budget-row__detail">
+          {' '}
+          {formatMoney(item.actual.expenseTotal, currency)} expenses (
+          {countText(item.actual.expenseCount, 'expense')}) less{' '}
+          {formatMoney(item.actual.refundTotal, currency)} refunds (
+          {countText(item.actual.refundCount, 'refund')})
+        </small>
       </td>
-      <td>{formatMoney(item.actual.netSpending, currency)}</td>
-      <td>{formatMoney(item.remaining, currency)}</td>
-      <td>{formatMoney(item.overBy, currency)}</td>
-      <td>
+      <td className="insight-number">
+        {formatMoney(item.remaining, currency)}
+      </td>
+      <td className="insight-number">{formatMoney(item.overBy, currency)}</td>
+      <td className="insight-number">
         {item.percentUsed === null
           ? 'Unavailable: zero target'
           : `${item.percentUsed}%`}
       </td>
-      <td>{item.status}</td>
+      <td>
+        <span
+          className="insight-badge"
+          data-tone={item.status === 'OVER' ? 'warning' : 'neutral'}
+        >
+          {item.status.replaceAll('_', ' ').toLowerCase()}
+        </span>
+      </td>
     </tr>
   );
 }
@@ -578,42 +598,113 @@ export function BudgetSection({
     <section
       id={`insights-budget-${household.id}`}
       tabIndex={-1}
-      className="budget-section"
+      className="budget-section insight-panel"
       aria-label="Monthly household budget targets"
     >
-      <h5>
-        Monthly budget targets · {month} · {currency}
-      </h5>
+      <div className="insight-panel__header">
+        <div>
+          <h3>Monthly budget targets</h3>
+          <div className="insight-badges">
+            <span className="insight-badge" data-tone="accent">
+              {month} · {currency}
+            </span>
+            {progress && (
+              <span className="insight-badge">
+                {active.length} active targets
+              </span>
+            )}
+            {progress && (
+              <span className="insight-badge">
+                {progress.period.state.toLowerCase().replace('_', ' ')}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="insight-actions">
+          {owner && (
+            <button
+              className="household-button"
+              ref={createRef}
+              type="button"
+              onClick={() => openCreate()}
+            >
+              Create monthly target
+            </button>
+          )}
+          <button
+            className="household-button household-button--secondary"
+            type="button"
+            onClick={() => setRevision((value) => value + 1)}
+          >
+            Refresh budget and current records
+          </button>
+        </div>
+      </div>
       <p>
-        Household planning intent, not a balance, allocation, spending limit or
-        recurring template. Current disclosed POSTED expenses less refunds only;
-        corrections, category changes and sharing changes restate past spending.
-        Overall overlaps category targets and is never added to them. Targets
-        for other months are not created automatically.
+        Targets are household planning intent, not a balance, allocation,
+        spending limit or recurring template. Missing targets are not zero
+        targets. Overall overlaps categories; never add those rows together.
       </p>
-      {progress && (
+      <details className="insight-notes">
+        <summary>How budget progress is calculated</summary>
         <p>
-          Full month {progress.period.from} to {progress.period.to} (exclusive),{' '}
-          {progress.period.state.toLowerCase().replace('_', ' ')}; as of{' '}
-          {progress.asOfDate} in {progress.reportingTimeZone}. Future-dated
-          posted shared spending can appear even for future months. Totals:{' '}
-          {formatMoney(progress.totals.expenseTotal, currency)} expenses less{' '}
-          {formatMoney(progress.totals.refundTotal, currency)} refunds ={' '}
-          {formatMoney(progress.totals.netSpending, currency)} net (
-          {countText(progress.totals.expenseCount, 'expense')},{' '}
-          {countText(progress.totals.refundCount, 'refund')}).
+          Only currently disclosed POSTED expenses less refunds count.
+          Corrections, category changes and sharing changes restate past
+          spending. Targets for other months are not created automatically.
         </p>
+        <p>
+          Future-dated posted shared spending can appear even for future months.
+          A deliberate zero target has no available percentage.
+        </p>
+      </details>
+      {progress && (
+        <>
+          <div className="insight-metrics">
+            <div className="insight-metric">
+              <span className="insight-metric__label">Net shared spending</span>
+              <strong className="insight-metric__value">
+                {formatMoney(progress.totals.netSpending, currency)}
+              </strong>
+              <span className="insight-metric__note">
+                Expenses less refunds
+              </span>
+            </div>
+            <div className="insight-metric">
+              <span className="insight-metric__label">Expenses</span>
+              <strong className="insight-metric__value">
+                {formatMoney(progress.totals.expenseTotal, currency)}
+              </strong>
+              <span className="insight-metric__note">
+                {countText(progress.totals.expenseCount, 'expense')}
+              </span>
+            </div>
+            <div className="insight-metric">
+              <span className="insight-metric__label">Refunds</span>
+              <strong className="insight-metric__value">
+                {formatMoney(progress.totals.refundTotal, currency)}
+              </strong>
+              <span className="insight-metric__note">
+                {countText(progress.totals.refundCount, 'refund')}
+              </span>
+            </div>
+          </div>
+          <dl className="insight-facts">
+            <div>
+              <dt>Full month</dt>
+              <dd>
+                {progress.period.from} to {progress.period.to} (exclusive)
+              </dd>
+            </div>
+            <div>
+              <dt>As of</dt>
+              <dd>
+                {progress.asOfDate} in {progress.reportingTimeZone}
+              </dd>
+            </div>
+          </dl>
+        </>
       )}
-      {owner ? (
-        <button
-          className="household-button"
-          ref={createRef}
-          type="button"
-          onClick={() => openCreate()}
-        >
-          Create monthly target
-        </button>
-      ) : (
+      {!owner && (
         <p>
           Only a current household owner can create, edit or archive targets.
           Members can read shared progress and history.
@@ -638,13 +729,6 @@ export function BudgetSection({
           </button>
         </div>
       )}
-      <button
-        className="household-button household-button--secondary"
-        type="button"
-        onClick={() => setRevision((value) => value + 1)}
-      >
-        Refresh budget and current records
-      </button>
       {!online && (
         <p role="status">
           Offline. Budget reads may be stale; edits are paused. Reconnect to
@@ -678,13 +762,13 @@ export function BudgetSection({
       {progress && (
         <>
           {!progress.overall && (
-            <p>
+            <p className="insight-empty">
               No overall target set. This is not a zero target; the full-month
               spending above still counts.
             </p>
           )}
           {progress.categories.length === 0 && (
-            <p>
+            <p className="insight-empty">
               No category targets set. Untargeted spending is still shown below.
             </p>
           )}
@@ -703,12 +787,21 @@ export function BudgetSection({
                 <thead>
                   <tr>
                     <th scope="col">Scope</th>
-                    <th scope="col">Target</th>
-                    <th scope="col">Expenses and refunds</th>
-                    <th scope="col">Net actual</th>
-                    <th scope="col">Signed remaining</th>
-                    <th scope="col">Over by</th>
-                    <th scope="col">Used</th>
+                    <th scope="col" className="insight-number">
+                      Target
+                    </th>
+                    <th scope="col" className="insight-number">
+                      Net actual · expenses less refunds
+                    </th>
+                    <th scope="col" className="insight-number">
+                      Signed remaining
+                    </th>
+                    <th scope="col" className="insight-number">
+                      Over by
+                    </th>
+                    <th scope="col" className="insight-number">
+                      Used
+                    </th>
                     <th scope="col">Status</th>
                   </tr>
                 </thead>
@@ -724,22 +817,46 @@ export function BudgetSection({
               </table>
             </div>
           )}
+          <dl className="insight-facts">
+            <div>
+              <dt>Net spending without an active category target</dt>
+              <dd>{formatMoney(progress.untargeted.netSpending, currency)}</dd>
+            </div>
+            <div>
+              <dt>Untargeted expenses</dt>
+              <dd>
+                {formatMoney(progress.untargeted.expenseTotal, currency)} ·{' '}
+                {countText(progress.untargeted.expenseCount, 'expense')}
+              </dd>
+            </div>
+            <div>
+              <dt>Untargeted refunds</dt>
+              <dd>
+                {formatMoney(progress.untargeted.refundTotal, currency)} ·{' '}
+                {countText(progress.untargeted.refundCount, 'refund')}
+              </dd>
+            </div>
+          </dl>
           <p>
-            Without an active category target:{' '}
-            {formatMoney(progress.untargeted.expenseTotal, currency)} expenses
-            less {formatMoney(progress.untargeted.refundTotal, currency)}{' '}
-            refunds = {formatMoney(progress.untargeted.netSpending, currency)}{' '}
-            net ({countText(progress.untargeted.expenseCount, 'expense')},{' '}
-            {countText(progress.untargeted.refundCount, 'refund')}). This is
-            included in overall actual when an overall target exists.
+            Untargeted net spending is included in overall actual when an
+            overall target exists.
           </p>
           {active.length > 0 && (
             <ul className="budget-actions">
               {active.map(({ target }) => (
-                <li key={target.id}>
-                  <strong>{label(target.bucket)}</strong> ·{' '}
-                  {formatMoney(target.money.amount, currency)} · version{' '}
-                  {target.version}
+                <li key={target.id} className="insight-panel">
+                  <div className="insight-panel__header">
+                    <strong>{label(target.bucket)}</strong>
+                    <span className="insight-badge">
+                      Version {target.version}
+                    </span>
+                  </div>
+                  <dl className="insight-facts">
+                    <div>
+                      <dt>Target amount</dt>
+                      <dd>{formatMoney(target.money.amount, currency)}</dd>
+                    </div>
+                  </dl>
                   {owner && (
                     <>
                       {' '}
@@ -776,10 +893,10 @@ export function BudgetSection({
         </>
       )}
       {owner && archiving && (
-        <div className="budget-review">
-          <h6>
+        <div className="budget-review insight-panel">
+          <h4>
             Archive {label(archiving.bucket)} for {archiving.month}?
-          </h6>
+          </h4>
           <p>
             Archiving is terminal. This household target stays in history but
             stops contributing to current progress; replacing it requires a new
@@ -793,7 +910,7 @@ export function BudgetSection({
             />{' '}
             I confirm this household-wide archive.
           </label>
-          <div className="budget-actions">
+          <div className="insight-actions">
             <button
               className="household-button"
               disabled={!online || !ack || working}
@@ -814,15 +931,15 @@ export function BudgetSection({
         </div>
       )}
       {owner && open && (
-        <div className="budget-review">
-          <h6>
+        <div className="budget-review insight-panel">
+          <h4>
             {editing
               ? 'Edit'
               : pending?.attempted
                 ? 'Recover or retry'
                 : 'Create'}{' '}
             household budget target
-          </h6>
+          </h4>
           <form onSubmit={prepare}>
             <label>
               Target month{' '}
@@ -890,38 +1007,53 @@ export function BudgetSection({
                 create a second intent.
               </p>
             )}
-            <button
-              className="household-button"
-              type="submit"
-              disabled={working}
-            >
-              {pending?.attempted ? 'Review same creation' : 'Review target'}
-            </button>
-            <button
-              className="household-button household-button--secondary"
-              disabled={working}
-              type="button"
-              onClick={close}
-            >
-              Cancel
-            </button>
+            <div className="insight-actions">
+              <button
+                className="household-button"
+                type="submit"
+                disabled={working}
+              >
+                {pending?.attempted ? 'Review same creation' : 'Review target'}
+              </button>
+              <button
+                className="household-button household-button--secondary"
+                disabled={working}
+                type="button"
+                onClick={close}
+              >
+                Cancel
+              </button>
+            </div>
           </form>
           {review && (
-            <div className="budget-review">
+            <div className="budget-review insight-panel">
+              <h4>Confirm household target</h4>
               <p>
                 Review household disclosure: all current members can see this{' '}
                 {label(draft.bucket)} target for {draft.month} in{' '}
-                {creationCurrency}. Amount{' '}
-                {formatMoney(
-                  normalizeTargetAmount(draft.amount, creationCurrency)!,
-                  creationCurrency,
-                )}
-                .{' '}
+                {creationCurrency}.{' '}
                 {editing
                   ? 'The previous amount is replaced for the entire selected month.'
                   : 'This is one target only; no future months are filled.'}{' '}
                 Zero is a deliberate no-spending target, not an absent target.
               </p>
+              <dl className="insight-facts">
+                <div>
+                  <dt>Target amount</dt>
+                  <dd>
+                    {formatMoney(
+                      normalizeTargetAmount(draft.amount, creationCurrency)!,
+                      creationCurrency,
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>Month and bucket</dt>
+                  <dd>
+                    {draft.month} · {label(draft.bucket)}
+                  </dd>
+                </div>
+              </dl>
               <label>
                 <input
                   type="checkbox"
@@ -930,29 +1062,31 @@ export function BudgetSection({
                 />{' '}
                 I confirm this household-wide target.
               </label>
-              <button
-                className="household-button"
-                type="button"
-                disabled={!online || !ack || working}
-                onClick={() => void submit()}
-              >
-                {editing
-                  ? 'Save amount'
-                  : pending
-                    ? 'Create or retry same target'
-                    : 'Create target'}
-              </button>
-              <button
-                className="household-button household-button--secondary"
-                type="button"
-                onClick={() => {
-                  setReview(false);
-                  setAck(false);
-                  amountRef.current?.focus();
-                }}
-              >
-                Back to amount
-              </button>
+              <div className="insight-actions">
+                <button
+                  className="household-button"
+                  type="button"
+                  disabled={!online || !ack || working}
+                  onClick={() => void submit()}
+                >
+                  {editing
+                    ? 'Save amount'
+                    : pending
+                      ? 'Create or retry same target'
+                      : 'Create target'}
+                </button>
+                <button
+                  className="household-button household-button--secondary"
+                  type="button"
+                  onClick={() => {
+                    setReview(false);
+                    setAck(false);
+                    amountRef.current?.focus();
+                  }}
+                >
+                  Back to amount
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -965,17 +1099,28 @@ export function BudgetSection({
         {showHistory ? 'Hide' : 'Show'} archived target history for {month}
       </button>
       {showHistory && (
-        <div>
-          <h6>Archived monthly targets</h6>
+        <div className="insight-panel">
+          <h4>Archived monthly targets</h4>
           {history.length === 0 && !loading && (
-            <p>No archived targets in this selected month and currency.</p>
+            <p className="insight-empty">
+              No archived targets in this selected month and currency.
+            </p>
           )}
           <ul className="budget-actions">
             {history.map((item) => (
-              <li key={item.id}>
-                {label(item.bucket)} ·{' '}
-                {formatMoney(item.money.amount, currency)} · archived (version{' '}
-                {item.version})
+              <li key={item.id} className="insight-panel">
+                <div className="insight-panel__header">
+                  <strong>{label(item.bucket)}</strong>
+                  <span className="insight-badge">
+                    Archived · version {item.version}
+                  </span>
+                </div>
+                <dl className="insight-facts">
+                  <div>
+                    <dt>Target amount</dt>
+                    <dd>{formatMoney(item.money.amount, currency)}</dd>
+                  </div>
+                </dl>
                 {owner && (
                   <button
                     className="household-button household-button--secondary"
