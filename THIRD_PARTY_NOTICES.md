@@ -16,4 +16,4 @@ Dependency caches, `node_modules`, application JARs, container images and built 
 
 ## Images
 
-The screenshots under `docs/images/` were captured from this application using synthetic local data. They do not contain real household records or third-party stock imagery.
+The screenshots under `docs/images/` were captured from this application using synthetic local data and Plaid's Sandbox test bank. They do not contain real household records or third-party stock imagery. `plaid-link-desktop.png` shows Plaid Link, Plaid's own interface, including the Plaid logo and institution logos it displays; those marks belong to their respective owners and are shown only to illustrate the integration.
