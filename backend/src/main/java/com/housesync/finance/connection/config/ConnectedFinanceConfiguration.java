@@ -11,10 +11,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Wires the provider boundary. Fail-closed validation runs eagerly at startup whenever the
- * feature is enabled; the default-disabled application constructs the same beans without requiring
- * any provider secret or encryption key. The deterministic fake exists as a bean for tests and
- * explicit local configuration only and is never selected silently.
+ * Wires the provider boundary. Fail-closed validation runs eagerly at startup whenever the feature
+ * is enabled; the default-disabled application constructs the same beans without requiring any
+ * provider secret or encryption key. The deterministic fake exists as a bean for tests and explicit
+ * local configuration only and is never selected silently.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(ConnectedFinanceProperties.class)

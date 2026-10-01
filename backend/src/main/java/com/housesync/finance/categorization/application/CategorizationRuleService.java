@@ -45,10 +45,10 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Owner-private categorization rule use cases (categorization contract §4). Rules are
- * learned explicitly from one owned posted non-refund entry the actor already categorized as USER:
- * the server derives the strongest match key from authorized stored evidence, and clients never
- * submit household, owner, or match fields. Rules affect only future classification — a create,
+ * Owner-private categorization rule use cases (categorization contract §4). Rules are learned
+ * explicitly from one owned posted non-refund entry the actor already categorized as USER: the
+ * server derives the strongest match key from authorized stored evidence, and clients never submit
+ * household, owner, or match fields. Rules affect only future classification — a create,
  * correction, or deactivation never rewrites an existing category, amount, or assignment
  * provenance.
  *

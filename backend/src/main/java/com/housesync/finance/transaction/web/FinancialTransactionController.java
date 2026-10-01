@@ -34,10 +34,10 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Transaction endpoints: own entries at any visibility plus the household feed. List
- * query parameters, including the optional own-view disclosure scope, are filtered in SQL
- * after membership authorization, never in memory; non-owner account references are redacted to
- * null in the authorized projection.
+ * Transaction endpoints: own entries at any visibility plus the household feed. List query
+ * parameters, including the optional own-view disclosure scope, are filtered in SQL after
+ * membership authorization, never in memory; non-owner account references are redacted to null in
+ * the authorized projection.
  */
 @RestController
 @RequestMapping("/api/households/{householdId}/transactions")

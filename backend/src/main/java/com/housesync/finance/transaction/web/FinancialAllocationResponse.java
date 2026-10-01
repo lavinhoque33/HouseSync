@@ -5,9 +5,9 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Exact documented allocation DTO (ADR 0007): frozen ordered participant shares that sum
- * exactly to the original magnitude, plus the expense version at response time as an informational
- * snapshot. It carries no account fields, so non-owner reads need no redaction.
+ * Exact documented allocation DTO (ADR 0007): frozen ordered participant shares that sum exactly to
+ * the original magnitude, plus the expense version at response time as an informational snapshot.
+ * It carries no account fields, so non-owner reads need no redaction.
  */
 public record FinancialAllocationResponse(
     UUID id,

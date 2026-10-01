@@ -8,13 +8,13 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Observation-to-ledger provenance. At most one CURRENT association may exist per
- * observation (partial unique index) and per ledger entry; the association is what makes an
- * observation admitted, and a confirmation without it can never be visible reporting.
+ * Observation-to-ledger provenance. At most one CURRENT association may exist per observation
+ * (partial unique index) and per ledger entry; the association is what makes an observation
+ * admitted, and a confirmation without it can never be visible reporting.
  *
- * <p>Replacement moves the CURRENT row to VOIDED while the replacement becomes CURRENT, so
- * earlier provenance is retained and the partial unique index keeps exactly one current association
- * per observation.
+ * <p>Replacement moves the CURRENT row to VOIDED while the replacement becomes CURRENT, so earlier
+ * provenance is retained and the partial unique index keeps exactly one current association per
+ * observation.
  */
 @Entity
 @Table(name = "connection_ledger_associations")

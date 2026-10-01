@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily HouseSync encrypted backup
+Documentation=file:///opt/housesync/deploy/backup/README.md
+
+[Timer]
+# 03:30 in the host's timezone (`timedatectl`). Schedule the NAS pull after the job's
+# worst-case completion time and verify UTC freshness assumptions before enabling alerts.
+OnCalendar=*-*-* 03:30:00
+# Spread the start by a few minutes: the exact minute is not a fixed, predictable target.
+RandomizedDelaySec=5m
+# A run missed while the host was down happens as soon as the host is back.
+Persistent=true
+Unit=housesync-backup.service
+
+[Install]
+WantedBy=timers.target

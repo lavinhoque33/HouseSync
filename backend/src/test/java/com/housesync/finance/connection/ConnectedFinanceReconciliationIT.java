@@ -31,8 +31,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import tools.jackson.databind.JsonNode;
 
 /**
- * Reconciliation and recovery on real PostgreSQL: modified-admitted coalescing with an
- * untouched ledger, removed-admitted review without auto-void, KEEP/APPLY/VOID resolution, atomic
+ * Reconciliation and recovery on real PostgreSQL: modified-admitted coalescing with an untouched
+ * ledger, removed-admitted review without auto-void, KEEP/APPLY/VOID resolution, atomic
  * replace-ledger with retained history, allocation/refund guards, stale-version no-partial-write,
  * idempotent replay, post-disconnect and suspended review, LINKING refusal, former-member privacy,
  * disconnect-time unadmitted erasure, observation version exhaustion, and concurrent-resolution

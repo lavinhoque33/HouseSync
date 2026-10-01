@@ -22,12 +22,12 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Exact spending-summary read (manual-finance API): every current member may read the
- * per-currency magnitudes over an explicit half-open date interval. Both {@code from} (inclusive)
- * and {@code to} (exclusive) are required; report boundaries may extend through {@code 9999-12-31}
- * so the final supported transaction date stays queryable. Query parameters are filtered strictly
- * and the aggregation runs in SQL under the household lifecycle lock, never over an unrestricted
- * in-memory result.
+ * Exact spending-summary read (manual-finance API): every current member may read the per-currency
+ * magnitudes over an explicit half-open date interval. Both {@code from} (inclusive) and {@code to}
+ * (exclusive) are required; report boundaries may extend through {@code 9999-12-31} so the final
+ * supported transaction date stays queryable. Query parameters are filtered strictly and the
+ * aggregation runs in SQL under the household lifecycle lock, never over an unrestricted in-memory
+ * result.
  */
 @RestController
 @RequestMapping("/api/households/{householdId}/spending-summary")

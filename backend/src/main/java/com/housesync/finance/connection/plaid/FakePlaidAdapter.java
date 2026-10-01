@@ -10,10 +10,10 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Deterministic fake provider for tests and explicit local configuration only. Selected
- * exclusively through {@code app.connected-finance.provider=fake} together with {@code
- * fake-allowed=true}; never silently in production. Identities derive from the attempt UUID so
- * repeated runs are stable without live accounts or paid calls.
+ * Deterministic fake provider for tests and explicit local configuration only. Selected exclusively
+ * through {@code app.connected-finance.provider=fake} together with {@code fake-allowed=true};
+ * never silently in production. Identities derive from the attempt UUID so repeated runs are stable
+ * without live accounts or paid calls.
  */
 public class FakePlaidAdapter implements PlaidAdapter {
 

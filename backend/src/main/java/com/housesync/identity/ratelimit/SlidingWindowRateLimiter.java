@@ -13,9 +13,9 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Bounded in-memory sliding-window limiter.
  *
- * <p>Single-process abuse prevention: at most {@code maxKeys} distinct keys are
- * retained, callers inject the {@link Clock} so windows and expiry are unit-testable without
- * sleeping, and all state changes happen under one monitor so concurrent servlet requests are safe.
+ * <p>Single-process abuse prevention: at most {@code maxKeys} distinct keys are retained, callers
+ * inject the {@link Clock} so windows and expiry are unit-testable without sleeping, and all state
+ * changes happen under one monitor so concurrent servlet requests are safe.
  *
  * <p>Each bucket keeps the limit and window it was created with, and every prune uses the owning
  * bucket's window — a short-window request can never expire a long-window budget early. Only

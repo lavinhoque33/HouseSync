@@ -91,8 +91,9 @@ public class FinancialAccountEntity {
   }
 
   /**
-   * Creates a private account row admitted through explicit connected-account selection. The caller owns the surrounding selection transaction and has already validated
-   * kind/currency eligibility and label policy.
+   * Creates a private account row admitted through explicit connected-account selection. The caller
+   * owns the surrounding selection transaction and has already validated kind/currency eligibility
+   * and label policy.
    */
   public static FinancialAccountEntity connected(
       UUID id,

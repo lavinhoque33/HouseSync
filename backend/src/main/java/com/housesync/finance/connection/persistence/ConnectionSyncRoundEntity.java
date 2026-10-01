@@ -8,10 +8,10 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * One fenced sync round. The round records the original committed cursor, the working
- * page cursor, its connection generation and lease fence, and staged delta counts. Only the final
- * page may apply staged deltas and advance the Item-wide cursor; an abandoned round keeps the
- * original cursor and its staged rows are scrubbed after 24 hours.
+ * One fenced sync round. The round records the original committed cursor, the working page cursor,
+ * its connection generation and lease fence, and staged delta counts. Only the final page may apply
+ * staged deltas and advance the Item-wide cursor; an abandoned round keeps the original cursor and
+ * its staged rows are scrubbed after 24 hours.
  */
 @Entity
 @Table(name = "connection_sync_rounds")

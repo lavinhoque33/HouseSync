@@ -29,8 +29,8 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Plaid REST adapter over the JDK HTTP client (no provider SDK). Covers exactly these calls:
- * {@code /link/token/create} (new and update mode), {@code /item/public_token/exchange}, {@code
+ * Plaid REST adapter over the JDK HTTP client (no provider SDK). Covers exactly these calls: {@code
+ * /link/token/create} (new and update mode), {@code /item/public_token/exchange}, {@code
  * /accounts/get}, and {@code /item/remove}.
  *
  * <p>Runs fully outside domain write transactions; callers persist intent first. Request bodies and

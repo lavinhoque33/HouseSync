@@ -19,10 +19,10 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Owner-only categorization provenance resource: exactly one GET under the existing
- * transaction path. No body, no query parameters; only delivered method/path combinations enter the
- * security allowlist. Responses carry the six safe provenance fields and never rule, provider,
- * evidence, or review internals.
+ * Owner-only categorization provenance resource: exactly one GET under the existing transaction
+ * path. No body, no query parameters; only delivered method/path combinations enter the security
+ * allowlist. Responses carry the six safe provenance fields and never rule, provider, evidence, or
+ * review internals.
  */
 @RestController
 @RequestMapping("/api/households/{householdId}/transactions")

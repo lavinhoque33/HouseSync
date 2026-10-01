@@ -18,8 +18,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Fixed transaction-category taxonomy: a bounded read-only list for current household
- * members, outside the transactions prefix so the security allowlist names it explicitly. No query
+ * Fixed transaction-category taxonomy: a bounded read-only list for current household members,
+ * outside the transactions prefix so the security allowlist names it explicitly. No query
  * parameters are documented, so any parameter is rejected.
  */
 @RestController

@@ -34,8 +34,8 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Sharing contract on real PostgreSQL: SQL-scoped household feed over disclosed entries
- * from any owner including departed owners, non-owner account redaction in feed and detail,
+ * Sharing contract on real PostgreSQL: SQL-scoped household feed over disclosed entries from any
+ * owner including departed owners, non-owner account redaction in feed and detail,
  * financial-owner-only mutation, whole-refund-group disclosure and revocation with the source
  * expense version as the group concurrency token, lifecycle-safe access for removed members and
  * outsiders, and bounded lock behavior with no partial state.

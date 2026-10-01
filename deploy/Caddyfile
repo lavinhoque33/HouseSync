@@ -1,0 +1,36 @@
+# Reference Caddy HTTPS entry point; review exposure on the chosen host.
+#
+# Deliberately no global options block: automatic HTTPS works without an operator email address, so
+# nothing here depends on a value that has not been chosen yet.
+#
+{$DOMAIN} {
+	header {
+		# The proxy and the web container both identify themselves; the boundary does not have to.
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+
+	# Caddy-generated denials/errors bypass deferred site headers, so repeat them here.
+	handle_errors {
+		header {
+			-Server
+			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		}
+	}
+
+	# Only the three documented public probes are routable; the rest of the management surface
+	# is never reachable through this public boundary.
+	@probes path /actuator/health /actuator/health/liveness /actuator/health/readiness
+
+	handle /actuator/* {
+		handle @probes {
+			reverse_proxy web:8080
+		}
+		# `error`, not `respond`: the denial must be rendered through the error route above.
+		error 404
+	}
+
+	handle {
+		reverse_proxy web:8080
+	}
+}

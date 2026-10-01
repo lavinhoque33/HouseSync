@@ -74,8 +74,8 @@ public class FinancialTransactionEntity {
   private int version;
 
   /**
-   * How the effective category was assigned: NONE, LEGACY, USER, OWNER_RULE, PROVIDER,
-   * or INHERITED. Provenance describes the current category, not what the latest classifier would
+   * How the effective category was assigned: NONE, LEGACY, USER, OWNER_RULE, PROVIDER, or
+   * INHERITED. Provenance describes the current category, not what the latest classifier would
    * choose; the V15 database check bounds the coherent combinations.
    */
   @Enumerated(EnumType.STRING)

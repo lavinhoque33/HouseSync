@@ -36,11 +36,11 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Allocation contract on real PostgreSQL (ADR 0007): owner-only creation of one active
- * allocation per posted household expense, durable create idempotency with 201/200 replay and
- * since-revoked representations, the expense version as the only concurrency token, safe privacy
- * precedence on reads, ALLOCATION_CONFLICT blocking of money correction and privacy revocation, and
- * atomic void deactivation.
+ * Allocation contract on real PostgreSQL (ADR 0007): owner-only creation of one active allocation
+ * per posted household expense, durable create idempotency with 201/200 replay and since-revoked
+ * representations, the expense version as the only concurrency token, safe privacy precedence on
+ * reads, ALLOCATION_CONFLICT blocking of money correction and privacy revocation, and atomic void
+ * deactivation.
  */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,

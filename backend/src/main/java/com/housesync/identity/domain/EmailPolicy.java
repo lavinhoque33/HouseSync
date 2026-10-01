@@ -9,8 +9,8 @@ import java.util.regex.Pattern;
  *
  * <p>The identifier is an ASCII email, trimmed and lowercased with a locale-independent policy, at
  * most 254 characters. The canonical form is what is stored and compared, so uniqueness in
- * PostgreSQL is case-insensitive by construction. Email is an unverified login identifier;
- * it must not be treated as proof of ownership (for example of a household invitation).
+ * PostgreSQL is case-insensitive by construction. Email is an unverified login identifier; it must
+ * not be treated as proof of ownership (for example of a household invitation).
  */
 public final class EmailPolicy {
 

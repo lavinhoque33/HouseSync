@@ -25,9 +25,9 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Shared connected-finance guards: explicit enablement, household lifecycle locking with the documented lock
- * order (household, then connection), owner-scoped loads with indistinguishable 404s, canonical
- * idempotency fingerprints, and ciphertext binding scopes.
+ * Shared connected-finance guards: explicit enablement, household lifecycle locking with the
+ * documented lock order (household, then connection), owner-scoped loads with indistinguishable
+ * 404s, canonical idempotency fingerprints, and ciphertext binding scopes.
  */
 abstract class ConnectedFinanceBase {
 

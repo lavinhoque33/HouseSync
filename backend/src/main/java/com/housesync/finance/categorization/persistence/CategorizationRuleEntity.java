@@ -14,10 +14,9 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * One owner-private exact categorization rule. Rules are scoped to one household and
- * one stable financial owner, never to membership rows, so departure preserves retained history
- * while current membership gates access; a household OWNER role confers no access to another user's
- * rules.
+ * One owner-private exact categorization rule. Rules are scoped to one household and one stable
+ * financial owner, never to membership rows, so departure preserves retained history while current
+ * membership gates access; a household OWNER role confers no access to another user's rules.
  *
  * <p>The V16 database bounds match forms and status; the partial unique index keeps at most one
  * ACTIVE rule per (household, owner, match type, key). Deactivation is one-way and retained — the
@@ -166,8 +165,8 @@ public class CategorizationRuleEntity {
   }
 
   /**
-   * The one-way deactivation move: retained with its provenance, never reactivated, and no
-   * prior OWNER_RULE assignment is rewritten.
+   * The one-way deactivation move: retained with its provenance, never reactivated, and no prior
+   * OWNER_RULE assignment is rewritten.
    */
   public void deactivated(Instant updatedAt) {
     this.status = RuleStatus.INACTIVE;

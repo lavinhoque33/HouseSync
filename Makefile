@@ -19,7 +19,7 @@ help:
 	  '  web-check      Lint, types, formatting, tests, production build' \
 	  '  verify         Run both check suites (requires Docker and JDK 21)' \
 	  '  format         Apply backend and web formatters' \
-	  '  app-up         Build/start/wait for the container stack; web on :8081' \
+	  '  app-up         Build/start/wait for containers; web :8081 or WEB_PORT' \
 	  '  down           Remove stack containers/network; retain database volume'
 
 .env:

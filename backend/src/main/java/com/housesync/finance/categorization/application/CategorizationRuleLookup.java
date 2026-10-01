@@ -9,10 +9,10 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Classification-time seam for exact owner-rule lookup. The new-entry classifier in
- * the transaction domain calls this use case inside its own authorized transaction; the lookup is
- * scoped by household and financial owner in SQL, so no other member's rule — and no broad
- * fetch-then-filter scan — is ever involved.
+ * Classification-time seam for exact owner-rule lookup. The new-entry classifier in the transaction
+ * domain calls this use case inside its own authorized transaction; the lookup is scoped by
+ * household and financial owner in SQL, so no other member's rule — and no broad fetch-then-filter
+ * scan — is ever involved.
  */
 @Service
 public class CategorizationRuleLookup {

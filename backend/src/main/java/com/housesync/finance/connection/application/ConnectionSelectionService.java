@@ -36,10 +36,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 
 /**
- * Explicit discovered-account selection. Selection canonically sorts the requested
- * local mapping IDs, admits each eligible mapping at most once by creating or reusing a private
- * CONNECTED account row, and preserves history on deselection. Requires ACTIVE with no reconnect
- * attempt in flight.
+ * Explicit discovered-account selection. Selection canonically sorts the requested local mapping
+ * IDs, admits each eligible mapping at most once by creating or reusing a private CONNECTED account
+ * row, and preserves history on deselection. Requires ACTIVE with no reconnect attempt in flight.
  */
 @Service
 public class ConnectionSelectionService extends ConnectedFinanceBase {

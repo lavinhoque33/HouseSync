@@ -26,9 +26,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import tools.jackson.databind.JsonNode;
 
 /**
- * Owner-private inbox decisions: dismissal and material-revision reopening, idempotent
- * confirmation replay, modified/removed admitted labeling with an untouched ledger, confirmation
- * field strictness, and CONNECTED refund constraints with shared disclosure.
+ * Owner-private inbox decisions: dismissal and material-revision reopening, idempotent confirmation
+ * replay, modified/removed admitted labeling with an untouched ledger, confirmation field
+ * strictness, and CONNECTED refund constraints with shared disclosure.
  */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,

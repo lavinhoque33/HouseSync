@@ -25,9 +25,9 @@ public interface FinancialTransactionRepository
       @Param("actorId") UUID actorId);
 
   /**
-   * Authorized detail scope: the actor's own entry at any visibility, or another
-   * owner's entry currently disclosed to the household. Membership is joined in the same query so a
-   * removed or non-member actor never resolves the row at all.
+   * Authorized detail scope: the actor's own entry at any visibility, or another owner's entry
+   * currently disclosed to the household. Membership is joined in the same query so a removed or
+   * non-member actor never resolves the row at all.
    */
   @Query(
       "SELECT t FROM FinancialTransactionEntity t, HouseholdMemberEntity m"

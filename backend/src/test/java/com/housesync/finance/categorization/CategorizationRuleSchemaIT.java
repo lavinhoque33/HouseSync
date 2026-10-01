@@ -17,9 +17,9 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * V16 persistence proof on real PostgreSQL: the retained owner-rule table with per-owner scoped
- * active uniqueness, bounded match forms, the retained rule reference from the ledger's
- * provenance column, the source-entry reference enforcing household/owner consistency, and the
- * durable rule-creation idempotency table.
+ * active uniqueness, bounded match forms, the retained rule reference from the ledger's provenance
+ * column, the source-entry reference enforcing household/owner consistency, and the durable
+ * rule-creation idempotency table.
  */
 @Testcontainers
 class CategorizationRuleSchemaIT {

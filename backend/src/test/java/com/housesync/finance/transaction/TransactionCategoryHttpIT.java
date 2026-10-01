@@ -31,10 +31,10 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Category contract on real PostgreSQL: the fixed taxonomy endpoint, nullable category
- * create/patch semantics with explicit null, refund inheritance and whole-group propagation
- * including retained voided refunds, voided-entry rejection, fingerprint participation, and the
- * source-expense version as the refund-group concurrency token.
+ * Category contract on real PostgreSQL: the fixed taxonomy endpoint, nullable category create/patch
+ * semantics with explicit null, refund inheritance and whole-group propagation including retained
+ * voided refunds, voided-entry rejection, fingerprint participation, and the source-expense version
+ * as the refund-group concurrency token.
  */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,

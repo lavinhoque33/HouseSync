@@ -1,8 +1,8 @@
 package com.housesync.finance.transaction.domain;
 
 /**
- * Fixed, server-owned flat category taxonomy (ADR 0007): exactly sixteen tokens, declared in
- * the documented response order. Tokens are case-sensitive, never derived from {@code kind} or
+ * Fixed, server-owned flat category taxonomy (ADR 0007): exactly sixteen tokens, declared in the
+ * documented response order. Tokens are case-sensitive, never derived from {@code kind} or
  * visibility, and have no hierarchy, customization, or household variants. Labels are returned by
  * the server and are the only user-visible category names; clients must not derive them.
  */

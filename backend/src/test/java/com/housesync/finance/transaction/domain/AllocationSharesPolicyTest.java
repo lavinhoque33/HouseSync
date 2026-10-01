@@ -12,10 +12,10 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 /**
- * Exact equal-division mathematics behind allocations (ADR 0007): integer minor units at
- * the explicit currency scale, remainder awarding to the earliest ordered participants,
- * conservation of the magnitude, monotonic refund shares that exactly reverse the original shares
- * at a full refund, and canonical user-UUID string ordering.
+ * Exact equal-division mathematics behind allocations (ADR 0007): integer minor units at the
+ * explicit currency scale, remainder awarding to the earliest ordered participants, conservation of
+ * the magnitude, monotonic refund shares that exactly reverse the original shares at a full refund,
+ * and canonical user-UUID string ordering.
  */
 class AllocationSharesPolicyTest {
 

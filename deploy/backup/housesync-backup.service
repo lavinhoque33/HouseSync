@@ -1,0 +1,22 @@
+[Unit]
+Description=HouseSync nightly encrypted backup (PostgreSQL dump + host configuration)
+Documentation=file:///opt/housesync/deploy/backup/README.md
+# The only dependency is the local Docker daemon that `docker exec` talks to. The job makes no
+# outbound calls, so it deliberately does not order itself after network-online.target.
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/housesync-backup
+User=root
+# Allow for a large reviewed dataset; a timeout must not be mistaken for recoverability.
+# Test actual job duration and retain the previous artifacts on failure.
+TimeoutStartSec=3600
+# Everything here is secret-bearing by default; the script relaxes exactly the artifacts the NAS
+# pull needs (640 root:backupreader) and nothing else.
+UMask=0077
+# journald only: the script timestamps every step, never prints a secret, and has no other sink.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=housesync-backup

@@ -8,10 +8,10 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Durable coalescing sync demand. {@code demandSequence} is monotonic: a webhook that
- * arrives while a round is running increments it, so the finishing worker schedules another round
- * instead of losing the wake-up. A round claims a fence and lease; only the current fence holder
- * may commit an outcome or advance the committed sequence.
+ * Durable coalescing sync demand. {@code demandSequence} is monotonic: a webhook that arrives while
+ * a round is running increments it, so the finishing worker schedules another round instead of
+ * losing the wake-up. A round claims a fence and lease; only the current fence holder may commit an
+ * outcome or advance the committed sequence.
  */
 @Entity
 @Table(name = "connection_sync_work")

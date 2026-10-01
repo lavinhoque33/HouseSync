@@ -39,10 +39,10 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Reporting HTTP contract against real PostgreSQL: household reporting-zone settings with owner-only
- * optimistic updates and exact per-currency spending summaries over half-open date intervals,
- * including authorization, strict-transport validation, version lifecycle, privacy retention, and
- * multi-currency aggregation.
+ * Reporting HTTP contract against real PostgreSQL: household reporting-zone settings with
+ * owner-only optimistic updates and exact per-currency spending summaries over half-open date
+ * intervals, including authorization, strict-transport validation, version lifecycle, privacy
+ * retention, and multi-currency aggregation.
  */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,

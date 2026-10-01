@@ -74,12 +74,12 @@ import org.springframework.transaction.support.TransactionTemplate;
  * Dismissal applies to any unadmitted observation, including pending ones, and never touches the
  * ledger. Pending, invalid, removed, and unreviewed observations never contribute to reporting.
  *
- * <p>Resolution keeps the confirmed ledger untouched for KEEP_LEDGER, applies selected bank
- * facts through the existing ledger patch value path for APPLY_BANK, and voids through the same
- * path for VOID_LEDGER. Replacement atomically voids the old entry, admits the replacement from the
- * current posted observation, and moves the CURRENT association while retaining VOIDED history.
- * Resolve and replace work after disconnect from any connection state except LINKING; they never
- * change connection generation/state, restart sync, or admit unselected accounts.
+ * <p>Resolution keeps the confirmed ledger untouched for KEEP_LEDGER, applies selected bank facts
+ * through the existing ledger patch value path for APPLY_BANK, and voids through the same path for
+ * VOID_LEDGER. Replacement atomically voids the old entry, admits the replacement from the current
+ * posted observation, and moves the CURRENT association while retaining VOIDED history. Resolve and
+ * replace work after disconnect from any connection state except LINKING; they never change
+ * connection generation/state, restart sync, or admit unselected accounts.
  */
 @Service
 public class BankActivityService {
@@ -254,11 +254,11 @@ public class BankActivityService {
   }
 
   /**
-   * Retained provider categorization evidence behind one admitted ledger entry. The
-   * association is the observation-to-ledger provenance chain, so rule derivation and the
-   * owner-only ruleEligible capability read the observation's stored stable merchant identity
-   * through it. The caller owns the surrounding authorized transaction; evidence is private server
-   * state and never reaches a browser response.
+   * Retained provider categorization evidence behind one admitted ledger entry. The association is
+   * the observation-to-ledger provenance chain, so rule derivation and the owner-only ruleEligible
+   * capability read the observation's stored stable merchant identity through it. The caller owns
+   * the surrounding authorized transaction; evidence is private server state and never reaches a
+   * browser response.
    */
   @org.springframework.transaction.annotation.Transactional(
       readOnly = true,
@@ -550,8 +550,8 @@ public class BankActivityService {
   }
 
   /**
-   * Atomically replaces one admitted ledger entry: voids the old entry under the existing manual-ledger
-   * constraints (live refunds first, active allocation deactivated only with explicit
+   * Atomically replaces one admitted ledger entry: voids the old entry under the existing
+   * manual-ledger constraints (live refunds first, active allocation deactivated only with explicit
    * acknowledgement), admits the replacement from the current posted observation through the
    * confirmation value path, and moves the CURRENT association while retaining the VOIDED history
    * row. The replacement keeps the old entry's local account; a currency/account mismatch stays

@@ -19,10 +19,10 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
  * V15 persistence proof on real PostgreSQL: the fresh schema with assignment provenance columns and
- * evidence columns; the V14-to-V15 upgrade backfilling every pre-existing non-refund as LEGACY and every
- * refund as INHERITED at migration time without rewriting any category, version, or timestamp; and
- * the coherence constraints that reject incoherent origin/category/rule combinations through the
- * database itself.
+ * evidence columns; the V14-to-V15 upgrade backfilling every pre-existing non-refund as LEGACY and
+ * every refund as INHERITED at migration time without rewriting any category, version, or
+ * timestamp; and the coherence constraints that reject incoherent origin/category/rule combinations
+ * through the database itself.
  */
 @Testcontainers
 class CategorizationProvenanceSchemaIT {

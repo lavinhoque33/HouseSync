@@ -30,7 +30,8 @@ import org.springframework.stereotype.Component;
  * attempts, or environments fails authentication.
  *
  * <p>Keys are parsed once at startup when the feature is enabled (fail-closed); when disabled the
- * bean exists but every operation rejects, keeping manual-finance paths usable without key material.
+ * bean exists but every operation rejects, keeping manual-finance paths usable without key
+ * material.
  */
 @Component
 public class ConnectionCrypto {

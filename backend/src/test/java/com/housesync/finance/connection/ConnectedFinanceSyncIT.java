@@ -43,8 +43,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import tools.jackson.databind.JsonNode;
 
 /**
- * Sync engine, webhook ingress, and first admission integration over real PostgreSQL. Uses
- * the deterministic fake provider; the scheduled worker is disabled by property so every round runs
+ * Sync engine, webhook ingress, and first admission integration over real PostgreSQL. Uses the
+ * deterministic fake provider; the scheduled worker is disabled by property so every round runs
  * under explicit test control.
  */
 @SpringBootTest(

@@ -7,8 +7,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
- * Authentication throttling: 30 registration/login attempts per source address
- * per minute plus 10 login attempts per canonical email per 10 minutes.
+ * Authentication throttling: 30 registration/login attempts per source address per minute plus 10
+ * login attempts per canonical email per 10 minutes.
  *
  * <p>Attempts are counted before password hashing work. Only the direct connection address ({@code
  * request.getRemoteAddr()}) is used; arbitrary forwarded headers are never trusted. Behind the

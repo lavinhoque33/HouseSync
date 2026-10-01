@@ -28,10 +28,10 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Derived member-balance contract on real PostgreSQL (ADR 0007): exact zero-sum
- * per-currency snapshots, the documented partial and full refund reversals, read-time
- * CURRENT/DEPARTED labels that survive departure, stable code and UUID ordering, and the exclusion
- * of private, unallocated, voided, and revoked-allocation entries.
+ * Derived member-balance contract on real PostgreSQL (ADR 0007): exact zero-sum per-currency
+ * snapshots, the documented partial and full refund reversals, read-time CURRENT/DEPARTED labels
+ * that survive departure, stable code and UUID ordering, and the exclusion of private, unallocated,
+ * voided, and revoked-allocation entries.
  */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,

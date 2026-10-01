@@ -3,8 +3,8 @@ package com.housesync.finance.transaction.web;
 import java.util.List;
 
 /**
- * Bounded fixed taxonomy response: exactly the sixteen server-owned categories in
- * documented order. Not a paginated collection, so the page envelope does not apply.
+ * Bounded fixed taxonomy response: exactly the sixteen server-owned categories in documented order.
+ * Not a paginated collection, so the page envelope does not apply.
  */
 public record TransactionCategoryListResponse(List<Item> items) {
 

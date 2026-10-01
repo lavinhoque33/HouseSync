@@ -21,24 +21,25 @@ import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler;
 
 /**
- * Browser security. Health probes and CSRF bootstrap stay public; anonymous enrollment and
- * recovery require operator-issued grants, while login stays anonymous. All writes require CSRF.
- * {@code /me} needs an authenticated session; logout accepts authenticated or anonymous calls. The
- * household routes are exactly {@code POST /api/households}, {@code GET /api/households}, {@code
- * GET /api/households/{householdId}}, {@code GET /api/households/{householdId}/members}, {@code
- * PATCH /api/households/{householdId}/members/{userId}}, {@code DELETE
+ * Browser security. Health probes and CSRF bootstrap stay public; anonymous enrollment and recovery
+ * require operator-issued grants, while login stays anonymous. All writes require CSRF. {@code /me}
+ * needs an authenticated session; logout accepts authenticated or anonymous calls. The household
+ * routes are exactly {@code POST /api/households}, {@code GET /api/households}, {@code GET
+ * /api/households/{householdId}}, {@code GET /api/households/{householdId}/members}, {@code PATCH
+ * /api/households/{householdId}/members/{userId}}, {@code DELETE
  * /api/households/{householdId}/members/{userId}}, and {@code POST
- * /api/households/{householdId}/leave} for authenticated users. Invitations permit
- * exactly {@code POST} and {@code GET /api/households/{householdId}/invitations}, {@code DELETE
+ * /api/households/{householdId}/leave} for authenticated users. Invitations permit exactly {@code
+ * POST} and {@code GET /api/households/{householdId}/invitations}, {@code DELETE
  * /api/households/{householdId}/invitations/{invitationId}}, and {@code POST
  * /api/invitations/preview} plus {@code POST /api/invitations/accept} for authenticated users. The
  * finance routes permit exactly the private-account routes and the transaction {@code POST} and
  * {@code GET /api/households/{householdId}/transactions}, {@code GET
  * /api/households/{householdId}/transactions/{transactionId}}, and {@code PATCH
- * /api/households/{householdId}/transactions/{transactionId}} for authenticated users. Categories add
- * the fixed {@code GET /api/households/{householdId}/transaction-categories} list. Categorization provenance adds
- * exactly {@code GET /api/households/{householdId}/transactions/{transactionId}/categorization},
- * the financial-owner-only provenance detail behind service-level owner scoping. Owner rules add
+ * /api/households/{householdId}/transactions/{transactionId}} for authenticated users. Categories
+ * add the fixed {@code GET /api/households/{householdId}/transaction-categories} list.
+ * Categorization provenance adds exactly {@code GET
+ * /api/households/{householdId}/transactions/{transactionId}/categorization}, the
+ * financial-owner-only provenance detail behind service-level owner scoping. Owner rules add
  * exactly {@code POST
  * /api/households/{householdId}/transactions/{transactionId}/categorization-rule}, {@code GET
  * /api/households/{householdId}/categorization-rules}, and {@code PATCH
@@ -48,8 +49,8 @@ import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler
  * /api/households/{householdId}/transactions/{transactionId}/allocation} and the bounded {@code GET
  * /api/households/{householdId}/member-balances}. Reporting adds {@code GET} and {@code PATCH
  * /api/households/{householdId}/finance-settings} and the bounded {@code GET
- * /api/households/{householdId}/spending-summary}. Connected finance adds exactly the link, operation,
- * and connection routes under {@code /api/households/{householdId}}: {@code POST
+ * /api/households/{householdId}/spending-summary}. Connected finance adds exactly the link,
+ * operation, and connection routes under {@code /api/households/{householdId}}: {@code POST
  * connection-link-attempts} and its {@code complete} subpath, {@code GET connection-operations
  * ...}, {@code GET financial-connections} with detail and {@code accounts} reads, plus {@code POST}
  * {@code account-selection}, {@code reconnect}, and {@code disconnect} actions for authenticated

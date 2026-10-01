@@ -1,0 +1,24 @@
+title = "HouseSync publication secret scanning"
+
+[extend]
+useDefault = true
+
+# These are immutable synthetic fixtures, not issued credentials. Keep the
+# exception conditional on BOTH the precise value and the specific test path;
+# do not exempt all test files or all generic-api-key findings.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Deterministic test encryption key: bytes 0 through 31"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=$''']
+paths = ['''(^|/)backend/src/test/java/com/housesync/finance/connection/(ConnectedFinance(BankActivity|CategorizationRule|Http|Reconciliation|Recovery|Review|Sync|SyncRace|SyncLimits)IT|ConnectionConcurrencyIT)\.java$''']
+
+[[rules.allowlists]]
+description = "Mock-only invitation credential and its deliberately invalid spare-bit variant"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^hGgem9rtrw2Z_PHXg76mXTNiof78wQArhcJVnsxQK6[AB]$''']
+paths = ['''(^|/)web/src/(App\.test\.tsx|auth/AuthSection\.test\.tsx|invitation/(InvitationSection|JoinSection)\.test\.tsx|invitation/(client|route)\.test\.ts)$''']

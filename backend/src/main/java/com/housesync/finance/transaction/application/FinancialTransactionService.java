@@ -63,10 +63,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Manual transaction use cases. Entries are versioned, category-aware, and either private
- * or disclosed to the whole household. Every mutation serializes with household membership
- * lifecycle through {@link HouseholdService#lockForFinance}, and refund-group operations lock their
- * source expense first and the linked refund rows in ascending UUID order.
+ * Manual transaction use cases. Entries are versioned, category-aware, and either private or
+ * disclosed to the whole household. Every mutation serializes with household membership lifecycle
+ * through {@link HouseholdService#lockForFinance}, and refund-group operations lock their source
+ * expense first and the linked refund rows in ascending UUID order.
  *
  * <p>Sharing rules: only the financial owner mutates an entry; another current member reads a
  * {@code HOUSEHOLD} entry with the account reference redacted, while a private entry stays a
@@ -378,10 +378,10 @@ public class FinancialTransactionService {
   }
 
   /**
-   * Owner-locked source entry for a categorization rule (categorization contract §4). The
-   * caller already holds the household lifecycle lock, so this only takes the owned row lock and
-   * compares the caller's version token there; rule eligibility (posted non-refund USER with a
-   * non-null category) stays in the categorization domain.
+   * Owner-locked source entry for a categorization rule (categorization contract §4). The caller
+   * already holds the household lifecycle lock, so this only takes the owned row lock and compares
+   * the caller's version token there; rule eligibility (posted non-refund USER with a non-null
+   * category) stays in the categorization domain.
    */
   public FinancialTransactionEntity loadForCategorizationRule(
       UUID householdId, UUID transactionId, UUID actorId, int expectedTransactionVersion) {

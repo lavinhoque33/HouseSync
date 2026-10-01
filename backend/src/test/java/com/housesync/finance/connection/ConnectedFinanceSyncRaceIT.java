@@ -53,11 +53,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Barrier-style real-PostgreSQL regressions for sync-worker races: the worker takes
- * the connection lock before its connection-scoped work row, a signed health event cannot overwrite
- * a concurrent disconnect, a superseded worker cannot fail the reclaiming worker's state or
- * operations, concurrent first demand is one monotonic row, and a concurrent second confirmation is
- * a safe 409 rather than a 500.
+ * Barrier-style real-PostgreSQL regressions for sync-worker races: the worker takes the connection
+ * lock before its connection-scoped work row, a signed health event cannot overwrite a concurrent
+ * disconnect, a superseded worker cannot fail the reclaiming worker's state or operations,
+ * concurrent first demand is one monotonic row, and a concurrent second confirmation is a safe 409
+ * rather than a 500.
  */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,

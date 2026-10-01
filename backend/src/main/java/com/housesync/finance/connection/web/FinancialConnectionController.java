@@ -32,8 +32,8 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Private owner-scoped connection endpoints. No transaction sync or webhook surface
- * exists on these routes.
+ * Private owner-scoped connection endpoints. No transaction sync or webhook surface exists on these
+ * routes.
  */
 @RestController
 @RequestMapping("/api/households/{householdId}/financial-connections")

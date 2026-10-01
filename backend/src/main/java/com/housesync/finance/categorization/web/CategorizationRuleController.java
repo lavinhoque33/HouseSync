@@ -28,9 +28,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Owner-private categorization rule endpoints (categorization contract §4): exactly the
- * three delivered method/path combinations — the owner's private bounded list, the explicit learn
- * action on one owned transaction, and the category/deactivation patch. Only delivered method/path
+ * Owner-private categorization rule endpoints (categorization contract §4): exactly the three
+ * delivered method/path combinations — the owner's private bounded list, the explicit learn action
+ * on one owned transaction, and the category/deactivation patch. Only delivered method/path
  * combinations enter the security allowlist. Every response carries {@code Cache-Control:
  * no-store}, and match keys, provider digests, and evidence never appear in any response.
  */

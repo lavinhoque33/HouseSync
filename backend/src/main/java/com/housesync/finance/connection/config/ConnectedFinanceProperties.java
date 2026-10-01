@@ -4,8 +4,8 @@ import java.util.Base64;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * Connected-finance configuration. The feature is explicitly opt-in: the default
- * application starts with {@code enabled=false} and manual finance is unchanged. When enabled, {@link
+ * Connected-finance configuration. The feature is explicitly opt-in: the default application starts
+ * with {@code enabled=false} and manual finance is unchanged. When enabled, {@link
  * #validateFailClosed()} rejects startup unless every required secret and key parses, so a
  * misconfigured provider can never run half-initialized.
  */

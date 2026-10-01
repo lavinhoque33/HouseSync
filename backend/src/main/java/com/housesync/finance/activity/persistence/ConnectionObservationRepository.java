@@ -78,9 +78,9 @@ public interface ConnectionObservationRepository
   long countChangedAdmitted(@Param("householdId") UUID householdId, @Param("actorId") UUID actorId);
 
   /**
-   * Confirmed-disconnect erasure: deletes only unadmitted observations
-   * (PENDING/POSTED/INVALID) with no CURRENT ledger association. Admitted rows and their
-   * associations are retained so outstanding reviews stay resolvable after disconnect.
+   * Confirmed-disconnect erasure: deletes only unadmitted observations (PENDING/POSTED/INVALID)
+   * with no CURRENT ledger association. Admitted rows and their associations are retained so
+   * outstanding reviews stay resolvable after disconnect.
    */
   @Modifying
   @Query(

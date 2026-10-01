@@ -94,9 +94,9 @@ public class ConnectionObservationEntity {
   private String pfcDetailCode;
 
   /**
-   * Separate deterministic digest over merchant/category evidence. A category- or
-   * name-only provider update changes this value without touching {@code providerRevision}, so it
-   * never reopens reconciliation or marks an admitted entry modified.
+   * Separate deterministic digest over merchant/category evidence. A category- or name-only
+   * provider update changes this value without touching {@code providerRevision}, so it never
+   * reopens reconciliation or marks an admitted entry modified.
    */
   @Column(name = "categorization_evidence_fingerprint", length = 64)
   private String categorizationEvidenceFingerprint;

@@ -30,9 +30,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Link-attempt and durable-completion endpoints. Link tokens are ephemeral response
- * values; only the encrypted replay copy rests server-side until expiry. Completion never assumes
- * browser metadata proves success: the durable operation carries the outcome.
+ * Link-attempt and durable-completion endpoints. Link tokens are ephemeral response values; only
+ * the encrypted replay copy rests server-side until expiry. Completion never assumes browser
+ * metadata proves success: the durable operation carries the outcome.
  */
 @RestController
 @RequestMapping("/api/households/{householdId}/connection-link-attempts")

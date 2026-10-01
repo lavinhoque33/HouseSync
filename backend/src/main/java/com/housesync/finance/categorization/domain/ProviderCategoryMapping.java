@@ -13,8 +13,8 @@ import java.util.Optional;
  * when the primary itself is unmapped.
  *
  * <p>The version identifies this ruleset, not the provider's taxonomy: changing the table requires
- * a new version so historical assignments keep explaining themselves. Owner rules share
- * the ruleset-version seam ({@code OWNER_RULE} seam) but are never applied by this mapping.
+ * a new version so historical assignments keep explaining themselves. Owner rules share the
+ * ruleset-version seam ({@code OWNER_RULE} seam) but are never applied by this mapping.
  */
 public final class ProviderCategoryMapping {
 

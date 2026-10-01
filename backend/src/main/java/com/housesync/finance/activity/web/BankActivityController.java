@@ -33,10 +33,10 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * Owner-private bank-activity inbox. Reads and decisions are owner-scoped; foreign,
- * former-member, other-owner, and missing resources share one indistinguishable 404. Confirm,
- * dismiss, resolve, and replace require a valid Idempotency-Key and current versions; a replay
- * reauthorizes and returns the persisted outcome.
+ * Owner-private bank-activity inbox. Reads and decisions are owner-scoped; foreign, former-member,
+ * other-owner, and missing resources share one indistinguishable 404. Confirm, dismiss, resolve,
+ * and replace require a valid Idempotency-Key and current versions; a replay reauthorizes and
+ * returns the persisted outcome.
  */
 @RestController
 @RequestMapping("/api/households/{householdId}/bank-activity")

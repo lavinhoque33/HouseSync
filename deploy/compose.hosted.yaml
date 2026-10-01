@@ -1,0 +1,42 @@
+# Reference hosted overlay for repository-root compose.yaml (operator review required).
+#
+# Runtime only: this file adds the public HTTPS entry point (Caddy) and restart policies. It does
+# not change images, application code, or loopback-only publications of postgres/backend/web.
+# Local development never loads it; root compose.yaml alone stays the local contract.
+#
+# Usage from an approved source tree with a configured untracked `.env` (see deploy/README.md):
+#   docker compose -f compose.yaml -f deploy/compose.hosted.yaml --profile app up -d --build --wait
+
+services:
+  postgres:
+    restart: unless-stopped
+
+  backend:
+    restart: unless-stopped
+
+  web:
+    restart: unless-stopped
+
+  # Public entry point. Deliberately outside the `app` profile: it is the boundary every request
+  # traverses, so it must not be droppable by forgetting `--profile app`. It also declares no
+  # depends_on: depending on the profile-gated `web` service would make every command that omits
+  # --profile app fail as an invalid project. Start order comes from the documented
+  # `up -d --build --wait`; afterwards `restart: unless-stopped` brings both back after a reboot.
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      # Review firewall policy: only these two ports should be externally reachable.
+      - "80:80"
+      - "443:443"
+    environment:
+      # Values come from the untracked host `.env`; they stay out of this file and of the images.
+      DOMAIN: ${DOMAIN:?Set DOMAIN in the host .env; see deploy/hosted.env.example}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -12,16 +12,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Owner-private categorization read use case. The route is financial-owner-only:
- * the authorization scope is the owner-scoped transaction lookup, so another current member — even
- * one sharing the household-disclosed entry — receives the generic privacy-preserving transaction
- * 404 exactly like a foreign or missing resource.
+ * Owner-private categorization read use case. The route is financial-owner-only: the authorization
+ * scope is the owner-scoped transaction lookup, so another current member — even one sharing the
+ * household-disclosed entry — receives the generic privacy-preserving transaction 404 exactly like
+ * a foreign or missing resource.
  *
- * <p>The seventh field, {@code ruleEligible}, reports whether the owner may explicitly
- * learn an exact rule from this entry right now. It is evaluated live for the current actor and
- * transaction — posted non-refund USER origin with a non-null category, a safe server-derived match
- * key, and no active rule for that key — and the derived key itself never leaves the server. The
- * review state reflects a current owner-scoped OPEN review without exposing its candidate here.
+ * <p>The seventh field, {@code ruleEligible}, reports whether the owner may explicitly learn an
+ * exact rule from this entry right now. It is evaluated live for the current actor and transaction
+ * — posted non-refund USER origin with a non-null category, a safe server-derived match key, and no
+ * active rule for that key — and the derived key itself never leaves the server. The review state
+ * reflects a current owner-scoped OPEN review without exposing its candidate here.
  */
 @Service
 public class CategorizationQueryService {

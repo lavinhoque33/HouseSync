@@ -13,8 +13,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Default-disabled application: the context starts with no provider secrets or keys, connected-finance routes
- * fail closed, and manual finance remains usable.
+ * Default-disabled application: the context starts with no provider secrets or keys,
+ * connected-finance routes fail closed, and manual finance remains usable.
  */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
