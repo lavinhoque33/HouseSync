@@ -11,7 +11,7 @@
   </parent>
   <groupId>com.housesync</groupId>
   <artifactId>housesync-backend</artifactId>
-  <version>0.0.1-SNAPSHOT</version>
+  <version>0.7.0</version>
   <name>HouseSync backend</name>
   <description>HouseSync backend: Spring Boot modular monolith</description>
 
