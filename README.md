@@ -5,6 +5,16 @@
 
 **A shared household ledger that keeps private money private.** Each member links their own bank accounts through Plaid or records entries by hand. Accounts and transactions stay private to their owner; a member discloses exactly the entries the household should share, and those are split exactly, tracked as per-member balances and settled through recorded repayments. HouseSync keeps the ledger; it never moves money or infers bank balances.
 
+## Try the live demo
+
+**[demo.hsync.ihoque.com](https://demo.hsync.ihoque.com)**: sign in with these shared demo credentials:
+
+| Email | Password |
+| --- | --- |
+| `demo@example.com` | `HouseSyncDemo2026!` |
+
+You land in a synthetic two-member household with three months of private and shared manual entries, exact splits, a refund, repayments, budgets, a tracked bill and recurring-charge suggestions. Bank linking is turned off in the demo because it needs Plaid credentials. The demo runs as a separate instance with its own database and no real household data. It resets to that seed every hour (briefly unavailable while it does), so your changes are temporary and other visitors can see them until the reset. Please don't enter real personal information. Accounts are operator-issued, so the demo has no sign-up form.
+
 ![Bank activity inbox on desktop: history synced from a linked Plaid Sandbox bank waits in the owner's private inbox, each item confirmed or dismissed before it reaches the ledger](docs/images/bank-activity-desktop.png)
 
 <img src="docs/images/household-feed-mobile.png" alt="Household feed on mobile: one member's shared manual entries and another member's shared bank-sourced entry, allocated and categorized, without account details" width="320" align="right">
