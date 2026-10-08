@@ -19,6 +19,9 @@
     <java.version>21</java.version>
     <spotless.version>3.10.2</spotless.version>
     <google-java-format.version>1.36.1</google-java-format.version>
+    <!-- Security overrides: drop when Spring Boot manages Tomcat >= 11.0.26 and Jackson BOM >= 3.1.7. -->
+    <tomcat.version>11.0.26</tomcat.version>
+    <jackson-bom.version>3.1.7</jackson-bom.version>
   </properties>
 
   <dependencies>
