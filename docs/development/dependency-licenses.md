@@ -41,9 +41,9 @@ An inventory of the locked web dependency graph and the resolved backend compile
 | `org.apache.commons:commons-lang3:3.20.0` | test | [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0.txt) |
 | `org.apache.logging.log4j:log4j-api:2.25.5` | compile | [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0.txt) |
 | `org.apache.logging.log4j:log4j-to-slf4j:2.25.5` | compile | [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0.txt) |
-| `org.apache.tomcat.embed:tomcat-embed-core:11.0.24` | compile | [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.txt) |
-| `org.apache.tomcat.embed:tomcat-embed-el:11.0.24` | compile | [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.txt) |
-| `org.apache.tomcat.embed:tomcat-embed-websocket:11.0.24` | compile | [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.txt) |
+| `org.apache.tomcat.embed:tomcat-embed-core:11.0.26` | compile | [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.txt) |
+| `org.apache.tomcat.embed:tomcat-embed-el:11.0.26` | compile | [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.txt) |
+| `org.apache.tomcat.embed:tomcat-embed-websocket:11.0.26` | compile | [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.txt) |
 | `org.apiguardian:apiguardian-api:1.1.2` | test | [The Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.txt) |
 | `org.aspectj:aspectjweaver:1.9.25.1` | compile | [Eclipse Public License - v 2.0](https://www.eclipse.org/org/documents/epl-2.0/EPL-2.0.txt) |
 | `org.assertj:assertj-core:3.27.7` | test | [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0.txt) |
@@ -156,8 +156,8 @@ An inventory of the locked web dependency graph and the resolved backend compile
 | `org.testcontainers:testcontainers-postgresql:2.0.5` | test | [MIT](http://opensource.org/licenses/MIT) |
 | `org.xmlunit:xmlunit-core:2.11.0` | test | [The Apache Software License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.txt) |
 | `org.yaml:snakeyaml:2.6` | compile | [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.txt) |
-| `tools.jackson.core:jackson-core:3.1.5` | compile | [The Apache Software License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt) |
-| `tools.jackson.core:jackson-databind:3.1.5` | compile | [The Apache Software License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt) |
+| `tools.jackson.core:jackson-core:3.1.7` | compile | [The Apache Software License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt) |
+| `tools.jackson.core:jackson-databind:3.1.7` | compile | [The Apache Software License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt) |
 
 ## Web
 
@@ -261,7 +261,7 @@ An inventory of the locked web dependency graph and the resolved backend compile
 | `assertion-error` | 2.0.1 | MIT | development |
 | `balanced-match` | 4.0.4 | MIT | development |
 | `baseline-browser-mapping` | 2.11.23 | Apache-2.0 | development |
-| `brace-expansion` | 5.0.9 | MIT | development |
+| `brace-expansion` | 5.0.12 | MIT | development |
 | `browserslist` | 4.28.9 | MIT | development |
 | `cacheable` | 2.5.0 | MIT | development |
 | `caniuse-lite` | 1.0.30001810 | CC-BY-4.0 | development |
@@ -387,7 +387,7 @@ An inventory of the locked web dependency graph and the resolved backend compile
 | `shebang-command` | 2.0.0 | MIT | development |
 | `shebang-regex` | 3.0.0 | MIT | development |
 | `siginfo` | 2.0.0 | ISC | development |
-| `source-map-js` | 1.2.1 | BSD-3-Clause | development |
+| `source-map-js` | 1.2.2 | BSD-3-Clause | development |
 | `stackback` | 0.0.2 | MIT | development |
 | `std-env` | 4.2.0 | MIT | development |
 | `strip-indent` | 3.0.0 | MIT | development |

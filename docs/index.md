@@ -7,7 +7,7 @@ Start with the [project overview](../README.md) and [engineering decisions](engi
 - [Local setup](development/local-setup.md): Docker-first startup, operator-issued enrollment and native development.
 - [Testing](development/testing.md): unit, real-PostgreSQL integration, browser and failure-path verification, with recorded results.
 - [Backend](../backend/README.md) and [web](../web/README.md): developer maps and commands.
-- [Dependency advisory review](development/dependency-review.md): affected versions, applicability and maintenance recommendations.
+- [Dependency advisory review](development/dependency-review.md): pinned patched versions, re-run advisory results and review scope.
 - [Synthetic walkthrough](development/synthetic-walkthrough.md): reproduce the screenshot data without private records.
 - [Contributing](../CONTRIBUTING.md): correctness, privacy and review expectations.
 - [Security](../SECURITY.md): reporting concerns, known dependency advisories and the security model.

@@ -1,31 +1,40 @@
 # Dependency advisory review
 
-This review records the dependency baseline's known advisories. **Passing tests do not make that baseline vulnerability-free.** The September 2026 review examined the resolved dependency graph without upgrading it or testing live deployments.
+This review records the advisory status of the resolved dependency baseline. **Passing tests do not make that baseline vulnerability-free.** The October 2026 review re-resolved the backend and web graphs after the patched-version pins below; it did not test live deployments.
+
+## Pinned versions
+
+Spring Boot 4.1.1 manages Tomcat 11.0.24 and the Jackson 3 BOM at 3.1.5, both with published advisories. `backend/pom.xml` overrides the managed versions through the Boot-defined properties:
+
+| Property | Pinned | Boot 4.1.1 default | Why |
+| --- | --- | --- | --- |
+| `tomcat.version` | 11.0.26 | 11.0.24 | Tomcat 11.0.25 alone does not cover every reviewed fix; 11.0.26 is the first release that does. |
+| `jackson-bom.version` | 3.1.7 | 3.1.5 | 3.1.6 fixes three databind advisories; two further databind advisories are fixed only in 3.1.7. |
+
+Property overrides keep every Tomcat module and the whole `tools.jackson` family aligned through Boot's own dependency management, instead of pinning individual artifacts. Remove each override once a Spring Boot release manages Tomcat 11.0.26 or newer and Jackson 3.1.7 or newer, respectively; an override left in place would then hold the dependency back.
 
 ## Observed results
 
-- `npm audit --json`: no reported advisories for the locked web graph at review time.
-- [OSV batch queries](https://google.github.io/osv.dev/post-v1-querybatch/) for 152 resolved Maven compile/runtime/test coordinates returned six advisory matches: three for Tomcat 11.0.24 and three for Jackson Databind 3.1.5.
-- The [upstream Apache notices](https://tomcat.apache.org/security-11.html) identified **23** Tomcat entries affecting 11.0.24 across the fixes in 11.0.25 and 11.0.26. Thus the six OSV matches were not an exhaustive advisory inventory. These are affected-component counts, not counts of demonstrated exploitable HouseSync endpoints.
+- `sh backend/mvnw -f backend/pom.xml dependency:list` resolved **152** compile/runtime/test coordinates, including `tomcat-embed-core`, `tomcat-embed-el` and `tomcat-embed-websocket` 11.0.26 and `jackson-core`/`jackson-databind` 3.1.7.
+- An [OSV batch query](https://google.github.io/osv.dev/post-v1-querybatch/) over all 152 coordinates returned **no advisory matches**. The same query for the previous Tomcat 11.0.24 and Jackson Databind 3.1.5 still returns three and five matches respectively, so the empty result reflects the pinned versions rather than a failed query.
+- The [Apache Tomcat 11 security notices](https://tomcat.apache.org/security-11.html) list no fix release newer than 11.0.26 at review time.
+- `npm audit` for the locked web graph (260 packages) reported no vulnerabilities. An OSV batch query over the same 260 locked package versions returned no matches.
+- `make backend-check` (formatting, unit tests, packaging and PostgreSQL integration tests) passed on the pinned versions.
 
-## Applicability and remaining risk
+## Previously reported advisories
 
-Tomcat's reviewed notices concern container authentication/constraints, HTTP/2, AJP, WebSockets, TLS/client certificates, rewrite rules, Unix sockets and HTTP/1.0 handling. The application uses Spring-managed JSON login and authorization, one embedded application, no configured WebSocket/AJP endpoints, and HTTP/2 disabled by default. The [nginx backend hop](../../web/nginx.conf) explicitly uses HTTP/1.1; reference edge TLS terminates at Caddy rather than Tomcat.
+| Component | Advisory | Fixed in | Status |
+| --- | --- | --- | --- |
+| Apache Tomcat | 23 Apache notices affecting 11.0.24, including CVE-2026-77756 (HTTP/1.0 request parsing) | 11.0.25 / 11.0.26 | Addressed by the 11.0.26 pin |
+| Jackson Databind | [GHSA-gx83-3vf8-gh7j](https://github.com/FasterXML/jackson-databind/security/advisories/GHSA-gx83-3vf8-gh7j), [GHSA-q4xh-88c3-wmh7](https://github.com/FasterXML/jackson-databind/security/advisories/GHSA-q4xh-88c3-wmh7), [GHSA-wjgm-6hv5-3cvf](https://github.com/FasterXML/jackson-databind/security/advisories/GHSA-wjgm-6hv5-3cvf) | 3.1.6 | Addressed by the 3.1.7 pin |
+| Jackson Databind | [GHSA-cxp5-3px4-pw24](https://github.com/advisories/GHSA-cxp5-3px4-pw24), [GHSA-wv8q-qhhj-9h54](https://github.com/advisories/GHSA-wv8q-qhhj-9h54) | 3.1.7 | Addressed by the 3.1.7 pin |
+| `brace-expansion` (web, development only) | [GHSA-q2hr-2g5m-vwhr](https://github.com/advisories/GHSA-q2hr-2g5m-vwhr) | 5.0.12 | Lockfile at 5.0.12 |
+| `source-map-js` (web, development only) | [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q) | 1.2.2 | Lockfile at 1.2.2 |
 
-**CVE-2026-77756 still affects the installed HTTP parser.** The documented proxy's HTTP/1.1 upstream avoids the described HTTP/1.0 trigger through that chain, but loopback and Compose-network callers can reach the backend directly. CSRF and controller validation are not parser patches. Different deployment/proxy settings require a new assessment; this review did not establish or attempt a live cross-user attack.
+Source review had already found none of the specific untrusted Jackson binding targets the first three databind advisories require, and the nginx hop uses HTTP/1.1 to the backend; those narrowed applicability but were never a substitute for the patched versions.
 
-The Jackson matches require particular untrusted deserialization targets/configuration:
+## Scope and maintenance
 
-| Advisory | Required binding/feature | Source review |
-| --- | --- | --- |
-| [GHSA-gx83-3vf8-gh7j](https://github.com/FasterXML/jackson-databind/security/advisories/GHSA-gx83-3vf8-gh7j) | Polymorphic `Comparable` binding with an insufficient validator | No such binding/default typing found |
-| [GHSA-q4xh-88c3-wmh7](https://github.com/FasterXML/jackson-databind/security/advisories/GHSA-q4xh-88c3-wmh7) | `javax.xml.datatype.Duration` / `XMLGregorianCalendar` strings | No such input types found; `java.time.Duration` is a different type |
-| [GHSA-wjgm-6hv5-3cvf](https://github.com/FasterXML/jackson-databind/security/advisories/GHSA-wjgm-6hv5-3cvf) | Untrusted `java.nio.file.Path` binding and relevant filesystem providers | No such binding found |
+This review covers the resolved backend compile/runtime/test graph and the locked web graph. It does not cover Maven build-plugin dependencies, container base-image or operating-system packages, advisories published after the review, or an operator's effective deployment configuration. An empty advisory result is point-in-time evidence, not a guarantee.
 
-These missing prerequisites narrow observed applicability; they do not certify immunity or justify suppressing dependency alerts. No exploit payloads were run against a service.
-
-## Maintenance recommendation
-
-Before operating an internet-facing instance, select and verify a compatible Spring Boot maintenance update or aligned dependency overrides covering **Tomcat 11.0.26 or newer** and the **Jackson 3.1.6 or newer compatible line**. Tomcat 11.0.25 alone does not cover all reviewed fixes. Keep Tomcat modules and the Jackson family aligned; no particular Boot upgrade has been selected or validated here.
-
-Re-resolve advisories/licenses, run `make verify`, rebuild containers and repeat authenticated/privacy browser/API checks after updating. This review does not cover every Maven plugin transitive dependency, container OS package, future advisory or effective operator configuration. See [testing](testing.md) and [deployment boundaries](deployment.md).
+After any dependency change, re-resolve advisories and [license metadata](dependency-licenses.md), run `make verify`, rebuild containers and repeat authenticated/privacy browser/API checks. See [testing](testing.md) and [deployment boundaries](deployment.md).

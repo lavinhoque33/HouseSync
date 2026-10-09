@@ -157,4 +157,4 @@ make verify   # = make backend-check + make web-check
 
 [Documentation index](docs/index.md) · [Known limits](docs/product/known-limits.md) · [Deployment boundaries](docs/development/deployment.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
-Source availability is not an invitation to use a hosted financial service; see [SECURITY.md](SECURITY.md) for known dependency advisories before deploying. HouseSync's first-party source is licensed under [MIT](LICENSE).
+Source availability is not an invitation to use a hosted financial service; see [SECURITY.md](SECURITY.md) for the dependency advisory status before deploying. HouseSync's first-party source is licensed under [MIT](LICENSE).
