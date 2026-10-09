@@ -4,6 +4,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
@@ -18,6 +19,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.housesync.finance.account.application.FinancialAccountService;
 import com.housesync.finance.activity.application.BankActivityService;
 import com.housesync.finance.categorization.application.CategorizationQueryService;
@@ -49,6 +53,7 @@ import com.housesync.identity.application.HouseSyncUserDetails;
 import com.housesync.identity.application.HouseSyncUserDetailsService;
 import com.housesync.identity.application.IdentityGrants;
 import com.housesync.identity.application.IdentityService;
+import com.housesync.identity.web.AuthExceptionHandler;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -57,6 +62,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -516,6 +522,43 @@ class SecurityConfigurationTest {
                             org.hamcrest.Matchers.containsString("household_invitations")),
                         org.hamcrest.Matchers.not(
                             org.hamcrest.Matchers.containsString("at com.housesync")))));
+  }
+
+  @Test
+  void unexpectedFailureLogsOnlyExceptionClassesNeverMessageOrStack() throws Exception {
+    UUID actorId = UUID.randomUUID();
+    String sentinel = "sentinel-user-value-7f3a";
+    doThrow(
+            new IllegalStateException(
+                "duplicate key value (email)=(" + sentinel + ")",
+                new IllegalArgumentException("root " + sentinel)))
+        .when(identities)
+        .changePassword(eq(actorId), anyString(), anyString());
+    Logger handlerLog = (Logger) LoggerFactory.getLogger(AuthExceptionHandler.class);
+    ListAppender<ILoggingEvent> appender = new ListAppender<>();
+    appender.start();
+    handlerLog.addAppender(appender);
+    try {
+      mvc.perform(
+              post("/api/auth/password")
+                  .with(signedInAs(actorId))
+                  .with(csrf())
+                  .contentType(MediaType.APPLICATION_JSON)
+                  .content("{\"currentPassword\":\"old-pass-123456\",\"newPassword\":\"x\"}"))
+          .andExpect(status().isInternalServerError())
+          .andExpect(jsonPath("$.code").value("INTERNAL_ERROR"));
+    } finally {
+      handlerLog.detachAppender(appender);
+    }
+    ILoggingEvent failed =
+        appender.list.stream()
+            .filter(event -> event.getFormattedMessage().contains("auth.request_failed"))
+            .findFirst()
+            .orElseThrow();
+    org.assertj.core.api.Assertions.assertThat(failed.getFormattedMessage())
+        .contains("cause=IllegalStateException", "rootCause=IllegalArgumentException")
+        .doesNotContain(sentinel);
+    org.assertj.core.api.Assertions.assertThat(failed.getThrowableProxy()).isNull();
   }
 
   private static org.springframework.test.web.servlet.request.RequestPostProcessor signedInAs(

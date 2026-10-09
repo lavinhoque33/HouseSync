@@ -49,6 +49,8 @@ app:
     ip-window-seconds: 60
     login-email-max-attempts: 10
     login-email-window-seconds: 600
+    session-max-creations: 30
+    session-window-seconds: 600
   connected-finance:
     enabled: ${CONNECTED_FINANCE_ENABLED:false}
     provider: ${CONNECTED_FINANCE_PROVIDER:plaid}

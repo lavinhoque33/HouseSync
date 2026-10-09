@@ -143,7 +143,13 @@ public class AuthExceptionHandler {
     if (failure == null) {
       log.warn("event=auth.request_failed code={} correlationId={}", code, correlationId);
     } else if (status.is5xxServerError()) {
-      log.error("event=auth.request_failed code={} correlationId={}", code, correlationId, failure);
+      // Never log the throwable: database/validation messages can echo user-supplied values.
+      log.error(
+          "event=auth.request_failed code={} correlationId={} cause={} rootCause={}",
+          code,
+          correlationId,
+          failure.getClass().getSimpleName(),
+          rootCause(failure).getClass().getSimpleName());
     } else {
       log.warn(
           "event=auth.request_failed code={} correlationId={} cause={}",
@@ -159,5 +165,13 @@ public class AuthExceptionHandler {
         .cacheControl(CacheControl.noStore())
         .contentType(MediaType.APPLICATION_JSON)
         .body(body);
+  }
+
+  private static Throwable rootCause(Throwable failure) {
+    Throwable root = failure;
+    for (int depth = 0; root.getCause() != null && root.getCause() != root && depth < 16; depth++) {
+      root = root.getCause();
+    }
+    return root;
   }
 }

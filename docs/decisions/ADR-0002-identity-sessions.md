@@ -58,8 +58,9 @@ not copied into long-lived session authorities.
   source address per minute, plus 10 failed login attempts per canonical identifier per 10 minutes (a slot is
   reserved before password work and returned on success). Count attempts before password work, bound retained keys
   (10,000), expire entries, return 429 + `Retry-After`, and test using an injectable clock. Trust forwarded headers
-  only from configured loopback/private-network proxy hops, so limits key on the real client. A distributed policy
-  is still required before a multi-instance deployment.
+  only from configured loopback/private-network proxy hops, so limits key on the real client. Anonymous session
+  creation has its own per-source budget (30 per 10 minutes); a refused creation persists no session. A distributed
+  policy is still required before a multi-instance deployment.
 - Authentication endpoints have explicit method/path rules; all other unimplemented routes remain denied.
   Return JSON 401/403 responses instead of redirects or generated login pages. Health probes remain public.
 

@@ -22,7 +22,7 @@ operational deployment decision, not a substitute for backend enrollment control
 
 | Method/path | Request | Success | Other outcomes |
 | --- | --- | --- | --- |
-| `GET /api/auth/csrf` | None | 200 `{"token":"...","headerName":"X-CSRF-TOKEN"}`; materializes anonymous session if needed | 5xx safe failure |
+| `GET /api/auth/csrf` | None | 200 `{"token":"...","headerName":"X-CSRF-TOKEN"}`; materializes anonymous session if needed | 429 session-creation budget exhausted (see below), 5xx safe failure |
 | `POST /api/auth/register` | `{"email":"person@example.test","password":"...","enrollmentCode":"43-character-base64url"}` + CSRF | 201 safe user; does not authenticate | 403 `ENROLLMENT_INVALID` for absent/expired/replayed/mismatched code; 400 password validation, 409 duplicate, 403 CSRF, 429 throttle |
 | `POST /api/auth/recover` | `{"email":"person@example.test","recoveryCode":"...","newPassword":"..."}` + CSRF | 204, all sessions revoked | 403 `RECOVERY_INVALID` for absent/expired/replayed/mismatched code; 400 password validation, 403 CSRF, 429 throttle |
 | `POST /api/auth/password` | `{"currentPassword":"...","newPassword":"..."}` + authenticated session/CSRF | 204, all sessions revoked including current | 401 wrong current password, 400 new password validation, 403 CSRF |
@@ -69,6 +69,22 @@ Processes on the host itself can reach the loopback-published web/backend ports 
 anything attached to the Compose network reaches them directly; both are therefore trusted to assert any client
 address. `X-Forwarded-Proto` never changes the session cookie's `Secure` attribute, which
 `SESSION_COOKIE_SECURE` sets explicitly.
+
+Anonymous session creation has its own per-address budget (`app.auth.session-max-creations`, default 30 per
+`app.auth.session-window-seconds`, default 600), because every new session is a persisted `SPRING_SESSION` row
+that lives until its 30-minute idle timeout. One filter (inside Spring Session, before the security chain) wraps
+the request so that only a call that would create a session spends budget: `GET /api/auth/csrf` without a valid
+`SESSION` cookie (a bogus cookie counts as none) and an unsafe write without a session, whose CSRF rejection
+generates a token. Requests carrying a valid session are never limited, and anonymous requests that create no
+session (401 on protected routes, health probes, the Plaid webhook) spend nothing. Beyond the budget the request
+is refused with the same 429 `RATE_LIMITED` problem response and `Retry-After` as the auth limiter, and no session
+row is written. 30 per 10 minutes admits a household behind one NAT (several devices signing in and out) while
+keeping one source to a few dozen live rows per session lifetime. The limiter is process-local and shares the
+key-capacity fail-closed behaviour of the other limiters.
+
+Unexpected-error logging never includes the exception message or stack trace, because database and validation
+messages can echo user-supplied values. Handlers log the event, error code, correlation ID and the exception class
+(plus the root-cause class for 500s) only.
 
 Unauthenticated protected access returns 401. Unimplemented routes remain denied (401 anonymous / 403
 authenticated is acceptable); no route gains access simply because the client has a session. Health GETs keep
