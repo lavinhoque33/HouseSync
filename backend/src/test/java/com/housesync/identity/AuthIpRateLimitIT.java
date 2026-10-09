@@ -68,6 +68,33 @@ class AuthIpRateLimitIT {
     assertThat(mapper.readTree(limited.body()).path("correlationId").asText()).isNotBlank();
   }
 
+  /**
+   * Behind the web proxy every request arrives from the proxy's address. A trusted (loopback)
+   * peer's {@code X-Forwarded-For} attributes each request to its real client, so exhausting one
+   * client's budget never throttles another client sharing the same proxy.
+   */
+  @Test
+  void forwardedClientsBehindTrustedProxyHaveIndependentBudgets() throws Exception {
+    String session = bootstrap();
+    String token = csrfToken(session);
+    String first = "203.0.113.10";
+    String second = "203.0.113.20";
+    for (int i = 0; i < 30; i++) {
+      HttpResponse<String> response =
+          registerVia(first, session, token, "{\"email\":\"first-" + i + "\",\"password\":\"x\"}");
+      assertThat(response.statusCode()).as("attempt %d", i).isEqualTo(403);
+    }
+    assertThat(
+            registerVia(first, session, token, "{\"email\":\"first-x\",\"password\":\"x\"}")
+                .statusCode())
+        .isEqualTo(429);
+
+    HttpResponse<String> other =
+        registerVia(second, session, token, "{\"email\":\"second\",\"password\":\"x\"}");
+    assertThat(other.statusCode()).isEqualTo(403);
+    assertThat(mapper.readTree(other.body()).path("code").asText()).isEqualTo("ENROLLMENT_INVALID");
+  }
+
   private String bootstrap() throws Exception {
     HttpResponse<String> response =
         client.send(
@@ -99,13 +126,27 @@ class AuthIpRateLimitIT {
   private HttpResponse<String> register(String session, String token, String json)
       throws Exception {
     return client.send(
-        HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/auth/register"))
-            .timeout(Duration.ofSeconds(10))
-            .header("Content-Type", "application/json")
-            .header("Cookie", "SESSION=" + session)
-            .header("X-CSRF-TOKEN", token)
-            .POST(HttpRequest.BodyPublishers.ofString(json))
+        registration("http://localhost:" + port, session, token, json).build(),
+        HttpResponse.BodyHandlers.ofString());
+  }
+
+  /** Sends from the loopback peer, a configured internal proxy, on behalf of {@code clientIp}. */
+  private HttpResponse<String> registerVia(
+      String clientIp, String session, String token, String json) throws Exception {
+    return client.send(
+        registration("http://127.0.0.1:" + port, session, token, json)
+            .header("X-Forwarded-For", clientIp)
             .build(),
         HttpResponse.BodyHandlers.ofString());
+  }
+
+  private static HttpRequest.Builder registration(
+      String origin, String session, String token, String json) {
+    return HttpRequest.newBuilder(URI.create(origin + "/api/auth/register"))
+        .timeout(Duration.ofSeconds(10))
+        .header("Content-Type", "application/json")
+        .header("Cookie", "SESSION=" + session)
+        .header("X-CSRF-TOKEN", token)
+        .POST(HttpRequest.BodyPublishers.ofString(json));
   }
 }

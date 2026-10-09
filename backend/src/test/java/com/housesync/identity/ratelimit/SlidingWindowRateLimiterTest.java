@@ -38,6 +38,22 @@ class SlidingWindowRateLimiterTest {
   }
 
   @Test
+  void releaseReturnsOneSlotAndForgetsEmptiedKeys() {
+    SlidingWindowRateLimiter limiter = new SlidingWindowRateLimiter(fixedAt(START), 100);
+    assertThat(limiter.tryAcquire("key", 2, Duration.ofMinutes(1))).isEmpty();
+    assertThat(limiter.tryAcquire("key", 2, Duration.ofMinutes(1))).isEmpty();
+    assertThat(limiter.tryAcquire("key", 2, Duration.ofMinutes(1))).isPresent();
+    limiter.release("key");
+    assertThat(limiter.tryAcquire("key", 2, Duration.ofMinutes(1))).isEmpty();
+    limiter.release("key");
+    limiter.release("key");
+    assertThat(limiter.trackedKeys()).isZero();
+    // Releasing an unknown key is a no-op.
+    limiter.release("missing");
+    assertThat(limiter.trackedKeys()).isZero();
+  }
+
+  @Test
   void windowSlidesWithInjectedClockInsteadOfSleeping() {
     MutableClock clock = new MutableClock(START);
     SlidingWindowRateLimiter limiter = new SlidingWindowRateLimiter(clock, 100);

@@ -66,6 +66,7 @@ public class ProviderWebhookBodyFilter extends OncePerRequestFilter {
       response.setHeader("Cache-Control", "no-store");
       return;
     }
+    // The client address as attributed by the trusted-proxy RemoteIpValve (application.yaml).
     String remote = request.getRemoteAddr() == null ? "unknown" : request.getRemoteAddr();
     if (limiter.tryAcquire("plaid-webhook:" + remote, RATE_LIMIT, RATE_WINDOW).isPresent()) {
       response.setStatus(429);

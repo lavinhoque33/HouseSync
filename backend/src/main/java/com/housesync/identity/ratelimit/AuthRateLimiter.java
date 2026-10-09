@@ -7,13 +7,16 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
- * Authentication throttling: 30 registration/login attempts per source address per minute plus 10
- * login attempts per canonical email per 10 minutes.
+ * Authentication throttling: 30 registration/login/recovery attempts per source address per minute
+ * plus 10 failed login attempts per canonical email per 10 minutes.
  *
- * <p>Attempts are counted before password hashing work. Only the direct connection address ({@code
- * request.getRemoteAddr()}) is used; arbitrary forwarded headers are never trusted. Behind the
- * current proxy the address bucket can be shared by users, so a trusted-edge/distributed policy is
- * required before a public multi-instance deployment.
+ * <p>Attempts are counted before password hashing work. The source address is the servlet {@code
+ * request.getRemoteAddr()}: Tomcat's RemoteIpValve resolves it from {@code X-Forwarded-For} only
+ * when the direct peer is a configured internal proxy ({@code server.tomcat.remoteip.*}), so a
+ * direct untrusted peer's forwarded headers are ignored. A per-email login slot is reserved before
+ * authentication (so concurrent guesses cannot overshoot the limit) and handed back when the
+ * credentials verify, so successful sign-ins never consume the failure budget. State is
+ * process-local; a distributed policy is required before a multi-instance deployment.
  */
 @Component
 public class AuthRateLimiter {
@@ -44,9 +47,21 @@ public class AuthRateLimiter {
     return limiter.tryAcquire("ip:" + remoteAddr, ipMaxAttempts, ipWindow);
   }
 
-  /** Login budget per canonical identifier. */
+  /**
+   * Reserves one slot of the per-email failed-login budget before authentication. Pair a successful
+   * authentication with {@link #releaseLoginEmail(String)}; a failure keeps the reservation.
+   */
   public Optional<Duration> checkLoginEmail(String canonicalEmail) {
     return limiter.tryAcquire(
-        "login-email:" + canonicalEmail, loginEmailMaxAttempts, loginEmailWindow);
+        loginEmailKey(canonicalEmail), loginEmailMaxAttempts, loginEmailWindow);
+  }
+
+  /** Hands back the slot reserved by {@link #checkLoginEmail(String)} after a successful login. */
+  public void releaseLoginEmail(String canonicalEmail) {
+    limiter.release(loginEmailKey(canonicalEmail));
+  }
+
+  private static String loginEmailKey(String canonicalEmail) {
+    return "login-email:" + canonicalEmail;
   }
 }

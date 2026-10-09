@@ -30,6 +30,14 @@ spring:
 
 server:
   port: ${SERVER_PORT:8080}
+  # Tomcat RemoteIpValve: getRemoteAddr() becomes the X-Forwarded-For client only when the direct
+  # peer is one of these proxies (loopback, or the private Docker ranges nginx runs in). A direct
+  # untrusted peer's forwarded headers are ignored. Session cookie Secure is set explicitly by
+  # app.session-cookie-secure, so X-Forwarded-Proto never changes it.
+  forward-headers-strategy: native
+  tomcat:
+    remoteip:
+      internal-proxies: '10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|127\.0\.0\.1'
   servlet:
     session:
       timeout: 30m

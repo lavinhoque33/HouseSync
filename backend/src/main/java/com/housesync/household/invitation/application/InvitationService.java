@@ -245,12 +245,17 @@ public class InvitationService {
   }
 
   /**
-   * Resolves the path household under the shared lifecycle household write lock, then current
-   * membership. Missing and non-member households share the generic 404; a current non-owner member
-   * receives 403. The lock serializes owner-authorized invitation writes with membership mutations:
-   * a demotion that completes first denies the stale owner before this write commits.
+   * Admits only current members through a non-locking membership-scoped read, then resolves the
+   * path household under the shared lifecycle household write lock and re-reads membership under
+   * it. Missing and non-member households share the generic 404 without ever queueing on the lock;
+   * a current non-owner member receives 403. The lock serializes owner-authorized invitation writes
+   * with membership mutations: a demotion that completes first denies the stale owner before this
+   * write commits.
    */
   private void authorizeOwner(UUID householdId, UUID actorId) {
+    memberships
+        .findScopedByHouseholdAndActor(householdId, actorId)
+        .orElseThrow(HouseholdNotFoundException::new);
     households.findByIdForUpdate(householdId).orElseThrow(HouseholdNotFoundException::new);
     MemberRole role =
         memberships

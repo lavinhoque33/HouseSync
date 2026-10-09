@@ -97,6 +97,23 @@ public final class SlidingWindowRateLimiter {
     return Optional.empty();
   }
 
+  /**
+   * Returns one previously acquired attempt to {@code key}'s budget, for callers that reserve a
+   * slot before work whose outcome decides whether the attempt counts. The newest attempt is
+   * removed; with overlapping reservations on one key that may be a concurrent caller's equal slot,
+   * shifting expiry by at most the overlap. A key without active attempts is left untouched.
+   */
+  public synchronized void release(String key) {
+    Bucket bucket = buckets.get(key);
+    if (bucket == null) {
+      return;
+    }
+    bucket.attempts.pollLast();
+    if (bucket.prune(clock.instant())) {
+      buckets.remove(key, bucket);
+    }
+  }
+
   public synchronized int trackedKeys() {
     pruneAll(clock.instant());
     return buckets.size();

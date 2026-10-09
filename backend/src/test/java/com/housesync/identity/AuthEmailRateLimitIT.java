@@ -24,7 +24,8 @@ import tools.jackson.databind.ObjectMapper;
 /**
  * Per-email login throttle: a narrowed window (3 attempts) keeps the HTTP boundary fast while the
  * production 10-attempt/10-minute values stay covered by configuration defaults and {@code
- * AuthRateLimiterTest}. Attempts are counted before password hashing.
+ * AuthRateLimiterTest}. Attempts are reserved before password hashing and only failures keep their
+ * slot.
  */
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -94,6 +95,32 @@ class AuthEmailRateLimitIT {
                     + "@example.test",
                 "wrong password here!"));
     assertThat(unknown.status).isEqualTo(401);
+  }
+
+  @Test
+  void successfulLoginsNeverConsumeTheFailureBudget() throws Exception {
+    String email =
+        "frequent"
+            + UUID.randomUUID().toString().replace("-", "").substring(0, 12)
+            + "@example.test";
+    assertThat(new Agent().post("/api/auth/register", enrollmentJson(email, PASSWORD)).status)
+        .isEqualTo(201);
+
+    // Twice the 3-attempt budget of successful sign-ins stays unthrottled.
+    for (int i = 0; i < 6; i++) {
+      assertThat(new Agent().post("/api/auth/login", json(email, PASSWORD)).status)
+          .as("success %d", i)
+          .isEqualTo(200);
+    }
+    // Failures still accumulate to the limit, after which even the correct password waits.
+    for (int i = 0; i < 3; i++) {
+      assertThat(new Agent().post("/api/auth/login", json(email, "wrong password here!")).status)
+          .as("failure %d", i)
+          .isEqualTo(401);
+    }
+    FullResp limited = new Agent().post("/api/auth/login", json(email, PASSWORD));
+    assertThat(limited.status).isEqualTo(429);
+    assertThat(mapper.readTree(limited.body).path("code").asText()).isEqualTo("RATE_LIMITED");
   }
 
   private static String json(String email, String password) {

@@ -55,6 +55,21 @@ Malformed JSON and unsupported request shape/content type receive safe 400/415 e
 without echoing submitted fields, SQL, stack traces or credentials. Login failure message is identical for
 unknown identifiers and incorrect passwords. A 429 includes an integer-seconds `Retry-After` header.
 
+Throttling is process-local and runs before any password hashing. Registration, login, and recovery share one
+budget of 30 attempts per client address per 60 seconds; every attempt counts. Login additionally allows 10
+failed attempts per canonical email per 600 seconds: a slot is reserved before authentication (so concurrent
+guesses cannot overshoot) and returned when the credentials verify, so successful sign-ins never consume it.
+The client address is attributed hop by hop. The web nginx trusts `X-Forwarded-For` only from loopback and
+private Docker ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), resolves the rightmost untrusted
+address with `real_ip_recursive`, and overwrites `X-Forwarded-For`/`X-Real-IP` with that single client address.
+The backend (`server.forward-headers-strategy: native`, `server.tomcat.remoteip.internal-proxies`) applies the
+forwarded address only when its direct peer is in the same trusted set; a direct untrusted peer's forwarded
+headers are ignored. In the hosted overlay, Caddy replaces client-supplied forwarded headers before nginx.
+Processes on the host itself can reach the loopback-published web/backend ports through the Docker bridge, and
+anything attached to the Compose network reaches them directly; both are therefore trusted to assert any client
+address. `X-Forwarded-Proto` never changes the session cookie's `Secure` attribute, which
+`SESSION_COOKIE_SECURE` sets explicitly.
+
 Unauthenticated protected access returns 401. Unimplemented routes remain denied (401 anonymous / 403
 authenticated is acceptable); no route gains access simply because the client has a session. Health GETs keep
 their safe UP/DOWN contract with optional public `groups` metadata.

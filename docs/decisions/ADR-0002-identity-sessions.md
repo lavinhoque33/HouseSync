@@ -54,11 +54,12 @@ not copied into long-lived session authorities.
   require CSRF. Fetch a new token after login/logout and after an invalid-token response; do not blindly replay writes.
 - Use same-origin browser requests through Vite/nginx. Do not enable wildcard or credentialed cross-origin CORS.
   The public CSRF endpoint does not make its response readable to foreign origins under browser same-origin policy.
-- Apply bounded **single-process throttling** to registration and login: 30 attempts per source address per minute,
-  plus 10 login attempts per canonical identifier per 10 minutes. Count attempts before password work, bound
-  retained keys (10,000), expire entries, return 429 + `Retry-After`, and test using an injectable clock.
-  Do not trust arbitrary forwarded headers. Behind the current proxy address-level limits can be shared by users;
-  a trusted-edge/distributed policy is required before a public multi-instance deployment.
+- Apply bounded **single-process throttling** to registration, login and recovery: one budget of 30 attempts per
+  source address per minute, plus 10 failed login attempts per canonical identifier per 10 minutes (a slot is
+  reserved before password work and returned on success). Count attempts before password work, bound retained keys
+  (10,000), expire entries, return 429 + `Retry-After`, and test using an injectable clock. Trust forwarded headers
+  only from configured loopback/private-network proxy hops, so limits key on the real client. A distributed policy
+  is still required before a multi-instance deployment.
 - Authentication endpoints have explicit method/path rules; all other unimplemented routes remain denied.
   Return JSON 401/403 responses instead of redirects or generated login pages. Health probes remain public.
 

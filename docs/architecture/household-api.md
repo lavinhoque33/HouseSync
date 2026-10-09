@@ -101,6 +101,10 @@ with correlation IDs. Only `role` may appear as a lifecycle field error.
   list, and revoke operations take the same lock before checking authority. This prevents an in-flight stale owner
   write from committing after a completed demotion and ensures an invitation-list result is ordered before or
   after the role change rather than returning stale owner-only data after it.
+- Lifecycle, invitation, and finance paths that take the household row lock first run a non-locking
+  membership-scoped check. Missing households and non-members receive the generic 404 immediately, without
+  queueing on or observing the lock; members then lock and re-read membership under it, so a removal or demotion
+  committed first still wins.
 - Role updates are idempotent. The owner target endpoints reject self-targeting; the dedicated leave endpoint is
   the only self-removal operation. Co-owners have equal permissions, with no creator privilege.
 

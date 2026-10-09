@@ -43,7 +43,8 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>Every membership mutation locks the household row for update before resolving actor and target
  * roles, so role changes, removal, and leave serialize per household and concurrent mutations can
  * never remove the final owner. Owner-authorized invitation writes take the same lock, so a stale
- * owner cannot commit an invitation write after a completed demotion.
+ * owner cannot commit an invitation write after a completed demotion. The lock is only requested
+ * after a non-locking membership-scoped check, so non-members cannot contend for or probe it.
  */
 @Service
 public class HouseholdService {
@@ -257,7 +258,16 @@ public class HouseholdService {
     }
   }
 
+  /**
+   * Non-locking membership-scoped admission first, so a caller who is not a current member (or a
+   * missing household) gets the generic 404 without ever queueing on — or timing — the household
+   * row lock. Members then take the lock and membership is re-read under it, so a removal that
+   * commits first still wins.
+   */
   private HouseholdMemberEntity lockAndRequireMembership(UUID householdId, UUID actorId) {
+    memberships
+        .findScopedByHouseholdAndActor(householdId, actorId)
+        .orElseThrow(HouseholdNotFoundException::new);
     households.findByIdForUpdate(householdId).orElseThrow(HouseholdNotFoundException::new);
     return memberships
         .findById(new HouseholdMemberId(householdId, actorId))

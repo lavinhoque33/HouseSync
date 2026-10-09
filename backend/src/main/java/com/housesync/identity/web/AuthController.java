@@ -135,7 +135,9 @@ public class AuthController {
    * mutated, so a failure there never leaves a persisted authentication behind. On success the
    * session id is rotated and the CSRF token renewed <em>before</em> the new security context is
    * explicitly saved to the shared session repository, then the safe user DTO is returned with 200.
-   * Failures use one generic 401.
+   * Failures use one generic 401. The per-source budget counts every attempt; the per-email budget
+   * reserves a slot before password work and returns it once the credentials verify, so only
+   * failures accumulate toward the per-email 429.
    */
   @PostMapping(value = "/login", consumes = MediaType.APPLICATION_JSON_VALUE)
   public ResponseEntity<SafeUserResponse> login(
@@ -162,6 +164,8 @@ public class AuthController {
     } catch (AuthenticationException failure) {
       throw new InvalidCredentialsException(failure);
     }
+    // Only failed attempts count against the per-email budget.
+    rateLimiter.releaseLoginEmail(canonical);
     HouseSyncUserDetails principal = (HouseSyncUserDetails) authenticated.getPrincipal();
     SafeUserResponse safeUser = identities.resolve(principal.getId());
     // The hash served its single provider comparison; it must never reach the stored session.

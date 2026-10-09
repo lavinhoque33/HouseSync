@@ -35,4 +35,16 @@ class AuthRateLimiterTest {
     assertThat(limiter.checkLoginEmail("other@example.test")).isEmpty();
     assertThat(limiter.checkSourceAddress("10.0.0.9")).isEmpty();
   }
+
+  @Test
+  void releasedLoginEmailSlotsDoNotCountTowardTheFailureBudget() {
+    AuthRateLimiter limiter = limiter();
+    for (int i = 0; i < 5; i++) {
+      assertThat(limiter.checkLoginEmail("person@example.test")).isEmpty();
+      limiter.releaseLoginEmail("person@example.test");
+    }
+    assertThat(limiter.checkLoginEmail("person@example.test")).isEmpty();
+    assertThat(limiter.checkLoginEmail("person@example.test")).isEmpty();
+    assertThat(limiter.checkLoginEmail("person@example.test")).isPresent();
+  }
 }
